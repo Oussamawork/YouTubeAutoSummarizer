@@ -16,16 +16,6 @@ def save_to_json(data, filename):
         print(f"Error saving data to JSON file: {e}")
 
 def clean_summary(summary: str) -> str:
-    """
-    Replaces non-breaking spaces (\u00a0) with regular spaces and
-    condenses all runs of whitespace into a single space.
-
-    Args:
-        summary (str): The raw summary text to clean.
-
-    Returns:
-        str: The cleaned summary.
-    """
     # 1. Replace non-breaking spaces with a regular space
     summary_clean = summary.replace("\u00a0", " ")
     
