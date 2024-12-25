@@ -1,7 +1,7 @@
 import requests
 from dotenv import load_dotenv
 from transcript import get_transcript_from_video
-from helpers import read_channel_ids, save_to_json
+from helpers import read_channel_ids, save_to_json, clean_summary
 from summarizer import summarize_transcript
 from log import log_info, log_error, log_warn, log_debug
 import os
@@ -83,7 +83,7 @@ if __name__ == "__main__":
                         log_info("Summarizing transcript...")
                         summary = summarize_transcript(transcript['transcript'])
                         video_details['transcript'] = transcript
-                        video_details['summary'] = summary.replace("\u00a0", " ")
+                        video_details['summary'] = clean_summary(summary)
                         log_info("Summary generated.")
                     else:
                         log_warn("Transcript not found.")
