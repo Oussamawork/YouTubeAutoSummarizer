@@ -4,7 +4,7 @@ def get_transcript_from_video(video_id):
     url = 'https://api.kome.ai/api/tools/youtube-transcripts'
     params = {
         "format": True,
-        "video_id": "https://www.youtube.com/watch?v=qh-9TxZ2gA8"
+        "video_id": video_id
     }
     response = requests.post(url, params=params)
 
