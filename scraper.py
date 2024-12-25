@@ -1,12 +1,10 @@
 import requests
 from dotenv import load_dotenv
 from transcript import get_transcript_from_video
-from helpers import read_channel_ids
-from helpers import save_to_json 
+from helpers import read_channel_ids, save_to_json
+from summarizer import summarize_transcript
 import os
-import json
 from datetime import datetime
-
 
 # Load environment variables from .env file
 load_dotenv('.env')
@@ -33,18 +31,17 @@ def get_latest_video(api_key, channel_id):
             published_at = video["snippet"]["publishedAt"]
             video_url = f"https://www.youtube.com/watch?v={video_id}"
             return {
-                    'channel_name' : channel_name, 
-                    'video_title' : video_title,
-                    'video_url' : video_url,
-                    'published_at' : published_at
-                }
+                'channel_name': channel_name,
+                'video_title': video_title,
+                'video_url': video_url,
+                'published_at': published_at
+            }
         else:
             print("No videos found for this channel.")
             return None
     else:
         print(f"Error: {response.status_code}, {response.text}")
         return None
-    
 
 # Main script
 if __name__ == "__main__":
@@ -67,9 +64,13 @@ if __name__ == "__main__":
                     # Fetch the transcript for the video
                     transcript = get_transcript_from_video(video_details['video_url'])
                     if transcript:
+                        # Summarize the transcript
+                        summary = summarize_transcript(transcript)
                         video_details['transcript'] = transcript
+                        video_details['summary'] = summary
                     else:
                         video_details['transcript'] = "Transcript not found."
+                        video_details['summary'] = "Summary not available."
                     
                     results.append(video_details)
                 
@@ -77,5 +78,3 @@ if __name__ == "__main__":
             if results:
                 filename = 'video_details_' + datetime.now().strftime('%Y-%m-%d_%H-%M-%S') + '.json'
                 save_to_json(results, filename)
-            
-            
