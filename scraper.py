@@ -1,7 +1,11 @@
 import requests
 from dotenv import load_dotenv
 from transcript import get_transcript_from_video
+from helpers import read_channel_ids
+from helpers import save_to_json 
 import os
+import json
+from datetime import datetime
 
 
 # Load environment variables from .env file
@@ -26,11 +30,13 @@ def get_latest_video(api_key, channel_id):
             video_id = video["id"]["videoId"]
             video_title = video["snippet"]["title"]
             channel_name = video["snippet"]["channelTitle"]
+            published_at = video["snippet"]["publishedAt"]
             video_url = f"https://www.youtube.com/watch?v={video_id}"
             return {
                     'channel_name' : channel_name, 
                     'video_title' : video_title,
-                    'video_url' : video_url
+                    'video_url' : video_url,
+                    'published_at' : published_at
                 }
         else:
             print("No videos found for this channel.")
@@ -38,12 +44,8 @@ def get_latest_video(api_key, channel_id):
     else:
         print(f"Error: {response.status_code}, {response.text}")
         return None
-
-# Function to read channel IDs from a file
-def read_channel_ids(file_path):
-    with open(file_path, "r") as file:
-        return [line.strip() for line in file.readlines()]
     
+
 # Main script
 if __name__ == "__main__":
     # Replace with your actual API key
@@ -54,11 +56,26 @@ if __name__ == "__main__":
     else:
         # Read channel IDs from the file
         channel_ids = read_channel_ids("channel_ids.txt")
-        
-        # Loop through the list of channel IDs and get the latest video
-        for channel_id in channel_ids:
-            video_details = get_latest_video(API_KEY, channel_id)
-            transcript = get_transcript_from_video(video_details['video_url'])
-            print(transcript)
+        if not channel_ids:
+            print("No channel IDs found. Please check your channel_ids.txt file.")
+        else:
+            results = []
+            # Loop through the list of channel IDs and get the latest video
+            for channel_id in channel_ids:
+                video_details = get_latest_video(API_KEY, channel_id)
+                if video_details:
+                    # Fetch the transcript for the video
+                    transcript = get_transcript_from_video(video_details['video_url'])
+                    if transcript:
+                        video_details['transcript'] = transcript
+                    else:
+                        video_details['transcript'] = "Transcript not found."
+                    
+                    results.append(video_details)
+                
+            # Save the results to a JSON file
+            if results:
+                filename = 'video_details_' + datetime.now().strftime('%Y-%m-%d_%H-%M-%S') + '.json'
+                save_to_json(results, filename)
             
             
