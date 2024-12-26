@@ -4,13 +4,14 @@ from transcript import get_transcript_from_video
 from helpers import read_channel_ids, save_to_json, clean_summary
 from summarizer import summarize_transcript, second_pass_summarize
 from log import log_info, log_error, log_warn, log_debug
+from sendToTelegram import send_telegram_message
 import os
 from datetime import datetime
 
 # Load environment variables from .env file
 load_dotenv('.env')
 
-def get_latest_video(api_key, channel_id):
+def get_latest_video(YOUTUBE_api_key, channel_id):
     log_info(f"get_latest_video called for channel_id={channel_id}")
 
     url = "https://www.googleapis.com/youtube/v3/search"
@@ -20,7 +21,7 @@ def get_latest_video(api_key, channel_id):
         "order": "date",
         "type": "video",
         "maxResults": 1,
-        "key": api_key,
+        "key": YOUTUBE_api_key,
     }
     response = requests.get(url, params=params)
     log_debug(f"GET request to: {response.url}")
@@ -54,8 +55,12 @@ def get_latest_video(api_key, channel_id):
 if __name__ == "__main__":
     log_info("Starting main script.")
     
-    API_KEY = os.getenv("YOUTUBE_API_KEY")
-    if not API_KEY:
+    YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+    TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+
+
+    if not YOUTUBE_API_KEY:
         log_error("API Key not found. Make sure it's set in the .env file.")
     else:
         log_info("Successfully loaded API key from environment.")
@@ -71,7 +76,7 @@ if __name__ == "__main__":
             for channel_id in channel_ids:
                 transcript = ''
                 log_info(f"Processing channel ID: {channel_id}")
-                video_details = get_latest_video(API_KEY, channel_id)
+                video_details = get_latest_video(YOUTUBE_API_KEY, channel_id)
                 if video_details:
                     log_info(f"Video details retrieved: {video_details['video_title']} (published: {video_details['published_at']})")
                     
@@ -86,6 +91,7 @@ if __name__ == "__main__":
                         video_details['transcript'] = transcript
                         #video_details['summary_google'] = summary_google
                         video_details['summary_facebook_bart'] = clean_summary(summary)
+                        send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], video_details['summary_facebook_bart'])
                         log_info("Summary generated.")
                     else:
                         log_warn("Transcript not found.")
