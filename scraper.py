@@ -87,11 +87,11 @@ if __name__ == "__main__":
                         log_info("Transcript fetched successfully.")
                         log_info("Summarizing transcript...")
                         summary = summarize_transcript(transcript['transcript'])
-                        #summary_google = second_pass_summarize(transcript['transcript'])
+                        summary_google = second_pass_summarize(summary)
                         video_details['transcript'] = transcript
-                        #video_details['summary_google'] = summary_google
+                        video_details['summary_google'] = summary_google
                         video_details['summary_facebook_bart'] = clean_summary(summary)
-                        send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], video_details['summary_facebook_bart'])
+                        send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], video_details['summary_google'])
                         log_info("Summary generated.")
                     else:
                         log_warn("Transcript not found.")

@@ -3,3 +3,5 @@ python-dotenv
 transformers
 torch
 colorama
+langdetect
+sentencepiece
