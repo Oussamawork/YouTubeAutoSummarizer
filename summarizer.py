@@ -1,7 +1,31 @@
 from transformers import pipeline
 from log import log_info, log_warn, log_error
 from langdetect import detect
+import re
 
+def clean_transcript(transcript):
+    """
+    Cleans the transcript by removing or normalizing unwanted characters,
+    extra whitespaces, repeated lines, etc.
+    """
+    # Remove common patterns like timestamps [00:00], or (00:00) if they exist
+    transcript = re.sub(r'\[\d{1,2}:\d{2}\]|\(\d{1,2}:\d{2}\)', '', transcript)
+
+    # Remove multiple consecutive spaces
+    transcript = re.sub(r'\s+', ' ', transcript).strip()
+
+    # Optionally remove repeated lines if your data source has duplication
+    lines = transcript.split('. ')
+    unique_lines = []
+    seen = set()
+    for line in lines:
+        line_clean = line.strip().lower()
+        if line_clean not in seen:
+            seen.add(line_clean)
+            unique_lines.append(line.strip())
+    transcript = '. '.join(unique_lines)
+    
+    return transcript
 
 def translate_to_english(text):
     """
@@ -37,6 +61,10 @@ def summarize_transcript(transcript):
     """
     Summarizes a transcript using the BART model and ensures the output is in English.
     """
+
+    # Clean the transcript
+    transcript = clean_transcript(transcript)
+
     log_info("Initializing the BART summarization pipeline...")
     summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
@@ -49,18 +77,18 @@ def summarize_transcript(transcript):
     for idx, chunk in enumerate(transcript_chunks):
         try:
             log_info(f"Processing chunk {idx + 1}/{len(transcript_chunks)}...")
-            summarized = summarizer(chunk, max_length=130, min_length=30, do_sample=False)
+            summarized = summarizer(chunk, max_length=50, min_length=30, do_sample=False)
             chunk_summary = summarized[0]['summary_text']
 
             # Ensure the chunk summary is in English
-            chunk_summary_english = translate_to_english(chunk_summary)
-            summary += chunk_summary_english + " "
+            #chunk_summary_english = translate_to_english(chunk_summary)
+            summary += chunk_summary + " "
             log_info(f"Chunk {idx + 1} summarized successfully.")
         except Exception as e:
             log_warn(f"Failed to summarize chunk {idx + 1}: {str(e)}")
 
     log_info("All chunks processed. Finalizing the summary...")
-    return summary.strip()
+    return second_pass_summarize(summary.strip())
 
 
 def second_pass_summarize(summary_text):
@@ -79,7 +107,7 @@ def second_pass_summarize(summary_text):
     for i, chunk in enumerate(summary_chunks):
         try:
             log_info(f"Processing chunk {i + 1}/{len(summary_chunks)} for bullet points...")
-            summarized = summarizer(chunk, max_length=150, min_length=50, do_sample=False)
+            summarized = summarizer(chunk, max_length=50, min_length=20, do_sample=False)
             bullet_points = summarized[0]['summary_text']
 
             # Add the generated bullet points
@@ -90,14 +118,3 @@ def second_pass_summarize(summary_text):
 
     log_info("Bullet-point extraction completed.")
     return combined_bullet_points.strip()
-
-
-if __name__ == "__main__":
-    summary_text = ""
-    
-    log_info("Starting first-pass summarization...")
-    summary = summarize_transcript(summary_text)
-    log_info("Starting second-pass summarization to generate bullet points...")
-    bullet_summary = second_pass_summarize(summary)
-    log_info("Bullet-point summary generated:")
-    print(bullet_summary)
