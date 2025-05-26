@@ -1,2 +1,9 @@
 .env
 video_details*
+venv311/bin
+venv311/lib
+venv311/pyvenv.cfg
+__pycache__
+.gitignore
+__pycache__/transcript.cpython-39.pyc
+venv311/share/man/man1/isympy.1
