@@ -1,5 +1,7 @@
 # YouTube Latest Video Fetcher and Summarizer
 
+⚠️ This project is tested and compatible with Python 3.11.
+
 This Python script fetches the latest video from a YouTube channel using the YouTube Data API v3, extracts the transcript, summarizes the content using advanced natural language processing (NLP) techniques, and optionally sends the summarized content to a Telegram channel.
 
 ## Features
