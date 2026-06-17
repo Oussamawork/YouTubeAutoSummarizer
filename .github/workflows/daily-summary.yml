@@ -5,18 +5,23 @@ on:
     - cron: '0 22 * * *'  # Runs daily at 22:00 UTC
   workflow_dispatch:      # Allows manual triggering from GitHub UI
 
+permissions:
+  contents: read
+
 jobs:
   run-summarizer:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
