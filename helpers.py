@@ -1,10 +1,26 @@
 import json
 import re
 
+from log import log_error
+
 # Function to read channel IDs from a file
 def read_channel_ids(file_path):
-    with open(file_path, "r") as file:
-        return [line.strip() for line in file.readlines()]
+    """
+    Read channel IDs, one per line. Blank lines and lines starting with '#'
+    (comments) are ignored. Returns [] if the file is missing.
+    """
+    try:
+        with open(file_path, "r") as file:
+            ids = []
+            for line in file:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                ids.append(line)
+            return ids
+    except FileNotFoundError:
+        log_error(f"Channel IDs file not found: {file_path}")
+        return []
     
 # Function to save results to a JSON file
 def save_to_json(data, filename):

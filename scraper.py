@@ -59,11 +59,27 @@ if __name__ == "__main__":
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
     TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 
+    # Fail fast if any required credential is missing, rather than discovering it
+    # mid-run when every YouTube lookup or Telegram send fails.
+    required = {
+        "YOUTUBE_API_KEY": YOUTUBE_API_KEY,
+        "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
+        "TELEGRAM_CHANNEL_ID": TELEGRAM_CHANNEL_ID,
+    }
+    missing = [name for name, value in required.items() if not value]
 
-    if not YOUTUBE_API_KEY:
-        log_error("API Key not found. Make sure it's set in the .env file.")
+    if missing:
+        log_error(
+            "Missing required environment variables: "
+            f"{', '.join(missing)}. Set them as repository secrets (CI) or in .env (local)."
+        )
     else:
-        log_info("Successfully loaded API key from environment.")
+        log_info("All required environment variables loaded.")
+        if not os.getenv("SUPADATA_API_KEY"):
+            log_warn(
+                "SUPADATA_API_KEY not set; transcript fetching may fail on CI "
+                "where YouTube blocks the runner IP."
+            )
         
         # Read channel IDs from the file
         channel_ids = read_channel_ids("channel_ids.txt")
@@ -114,7 +130,7 @@ if __name__ == "__main__":
 
                     results.append(video_details)
                 else:
-                    log_warn("No video details returned for channel ID: {channel_id}.")
+                    log_warn(f"No video details returned for channel ID: {channel_id}.")
 
             # Save the results to a JSON file
             if results:
