@@ -30,3 +30,4 @@ tqdm==4.67.1
 transformers==4.52.3
 typing_extensions==4.13.2
 urllib3==2.4.0
+youtube-transcript-api==1.2.4
