@@ -13,10 +13,10 @@ from youtube_transcript_api import (
 )
 from log import log_info, log_warn, log_error
 
-# Supadata is a free-tier hosted fallback used when youtube-transcript-api is
-# blocked (e.g. YouTube bans the datacenter IP of a CI runner). It fetches the
-# transcript server-side, so it is not affected by the runner's IP. The fallback
-# is only attempted when SUPADATA_API_KEY is set, so local runs stay key-free.
+# Supadata is the primary transcript source: a hosted API (free tier) that
+# fetches captions server-side, so it works even from CI runners whose
+# datacenter IPs YouTube blocks. It is only used when SUPADATA_API_KEY is set;
+# otherwise (e.g. local dev) the code falls back to youtube-transcript-api.
 SUPADATA_API_KEY = os.getenv("SUPADATA_API_KEY")
 SUPADATA_URL = "https://api.supadata.ai/v1/transcript"
 SUPADATA_TIMEOUT = 30
@@ -61,7 +61,7 @@ def _extract_video_id(video_url_or_id):
 
 
 def _fetch_youtube_transcript_api(vid):
-    """Primary source: scrape captions directly. Returns "" on any failure."""
+    """Fallback source: scrape captions directly. Returns "" on any failure."""
     try:
         log_info(f"Fetching transcript via youtube-transcript-api for video ID: {vid}")
         fetched = YouTubeTranscriptApi().fetch(vid)
@@ -98,7 +98,7 @@ def _supadata_text_from_payload(data):
 
 def _fetch_supadata(vid):
     """
-    Fallback source: Supadata hosted API (free tier). Server-side fetch, so it
+    Primary source: Supadata hosted API (free tier). Server-side fetch, so it
     works from blocked CI IPs. Returns "" if no key, on error, or if empty.
     Uses mode=native so only existing captions are returned (no paid AI generation).
     """
@@ -112,7 +112,7 @@ def _fetch_supadata(vid):
         "mode": "native",
     }
     try:
-        log_info(f"Falling back to Supadata for video ID: {vid}")
+        log_info(f"Fetching transcript via Supadata for video ID: {vid}")
         resp = requests.get(SUPADATA_URL, headers=headers, params=params, timeout=SUPADATA_TIMEOUT)
 
         # Large videos are processed asynchronously: 202 + a job id to poll.
@@ -166,8 +166,8 @@ def get_transcript_from_video(video_id):
     """
     Fetch the transcript for a YouTube video.
 
-    Tries youtube-transcript-api first (free, no key, works locally), then falls
-    back to Supadata (free tier, works from blocked CI IPs) when a key is set.
+    Tries Supadata first (free tier, works from blocked CI IPs) when a key is
+    set, then falls back to youtube-transcript-api (free, no key, works locally).
 
     `video_id` may be a full URL or a bare ID. Always returns a dict shaped
     {"transcript": <str>} so callers never have to handle exceptions or None;
@@ -178,9 +178,9 @@ def get_transcript_from_video(video_id):
         log_warn("No valid video ID; cannot fetch transcript.")
         return {"transcript": ""}
 
-    text = _fetch_youtube_transcript_api(vid)
+    text = _fetch_supadata(vid)
     if not text:
-        text = _fetch_supadata(vid)
+        text = _fetch_youtube_transcript_api(vid)
 
     if not text:
         log_warn(f"No transcript available for video {vid} from any source.")
