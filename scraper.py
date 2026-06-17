@@ -87,9 +87,9 @@ def get_latest_video(YOUTUBE_api_key, channel_id):
         log_error(f"YouTube API returned status code {response.status_code} | {response.text}")
         return None
 
-if __name__ == "__main__":
+def main():
     log_info("Starting main script.")
-    
+
     YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
     TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
@@ -155,18 +155,18 @@ if __name__ == "__main__":
                         video_details['transcript'] = transcript
 
                         if summary:
-                            video_details['summary_facebook_bart'] = summary
+                            video_details['summary'] = summary
                             telegram_body = summary
-                            log_info("Summary generated and sent to Telegram.")
+                            log_info("Summary generated.")
                         else:
                             # Transcript existed but the summarizer produced nothing.
-                            video_details['summary_facebook_bart'] = "Summary not available."
+                            video_details['summary'] = "Summary not available."
                             telegram_body = "⚠️ A transcript was found, but summarization produced no output. Manual review needed."
                             log_warn("Empty summary despite a transcript. Notifying Telegram.")
                     else:
-                        # No transcript at all (kome.ai failed or the video has no captions).
+                        # No transcript at all (no source returned text, or the video has no captions).
                         video_details['transcript'] = "Transcript not found."
-                        video_details['summary_facebook_bart'] = "Summary not available."
+                        video_details['summary'] = "Summary not available."
                         telegram_body = "⚠️ No transcript available for this video, so no summary could be generated. Manual review needed."
                         log_warn("Transcript empty or unavailable. Notifying Telegram.")
 
@@ -191,4 +191,8 @@ if __name__ == "__main__":
             else:
                 log_warn("No results to save.")
 
-    log_info(f"Main script finished.")
+    log_info("Main script finished.")
+
+
+if __name__ == "__main__":
+    main()
