@@ -3,7 +3,7 @@ import time
 from dotenv import load_dotenv
 from transcript import get_transcript_from_video
 from helpers import read_channel_ids, save_to_json, clean_summary, load_seen_videos, save_seen_videos
-from summarizer import summarize_transcript
+from summarizer import summarize_transcript, INSUFFICIENT_TRANSCRIPT_SENTINEL
 from log import log_info, log_error, log_warn, log_debug
 from sendToTelegram import send_telegram_message
 import os
@@ -151,18 +151,26 @@ def main():
                     if transcript_text:
                         log_info("Transcript fetched successfully.")
                         log_info("Summarizing transcript...")
-                        summary = clean_summary(summarize_transcript(transcript_text))
+                        raw_summary = summarize_transcript(transcript_text, video_details['video_title'])
                         video_details['transcript'] = transcript
 
-                        if summary:
-                            video_details['summary'] = summary
-                            telegram_body = summary
-                            log_info("Summary generated.")
-                        else:
-                            # Transcript existed but the summarizer produced nothing.
+                        if raw_summary == INSUFFICIENT_TRANSCRIPT_SENTINEL:
+                            # A transcript existed but was too garbled/incomplete
+                            # for the model to summarize meaningfully.
                             video_details['summary'] = "Summary not available."
-                            telegram_body = "⚠️ A transcript was found, but summarization produced no output. Manual review needed."
-                            log_warn("Empty summary despite a transcript. Notifying Telegram.")
+                            telegram_body = "⚠️ The transcript was too garbled or incomplete to summarize. Manual review needed."
+                            log_warn("Transcript judged insufficient to summarize. Notifying Telegram.")
+                        else:
+                            summary = clean_summary(raw_summary)
+                            if summary:
+                                video_details['summary'] = summary
+                                telegram_body = summary
+                                log_info("Summary generated.")
+                            else:
+                                # Transcript existed but the summarizer produced nothing.
+                                video_details['summary'] = "Summary not available."
+                                telegram_body = "⚠️ A transcript was found, but summarization produced no output. Manual review needed."
+                                log_warn("Empty summary despite a transcript. Notifying Telegram.")
                     else:
                         # No transcript at all (no source returned text, or the video has no captions).
                         video_details['transcript'] = "Transcript not found."

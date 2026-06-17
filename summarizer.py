@@ -18,18 +18,63 @@ from log import log_info, log_warn, log_error
 #   Groq   (free tier):         GROQ_API_KEY              [+ GROQ_MODEL]
 
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "60"))
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1500"))
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
+# Cap the transcript length sent to the model, to avoid blowing past context
+# windows and to keep token cost predictable. Overridable via env.
+LLM_MAX_TRANSCRIPT_CHARS = int(os.getenv("LLM_MAX_TRANSCRIPT_CHARS", "48000"))
 LLM_MAX_RETRIES = 3
 LLM_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
 TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 
+# Marker appended when a transcript is truncated, so the model (and a curious
+# human reading the raw input) knows the text was cut short.
+TRANSCRIPT_TRUNCATION_MARKER = "\n\n...[transcript truncated]"
+
+# Sentinel the model is told to emit when the transcript is genuinely
+# unsummarizable. We detect it in code and treat it as "no summary" (so the
+# caller sends its dedicated no-output notice) rather than forwarding a refusal
+# sentence to Telegram as if it were a real summary.
+INSUFFICIENT_TRANSCRIPT_SENTINEL = "INSUFFICIENT_TRANSCRIPT"
+
+# The summary is read by someone who has NOT watched the video and is delivered
+# as a plain-text Telegram message (the sender HTML-escapes it, so markdown like
+# **bold** or "#" headers will not render). Hence: plain text, "• " bullets only.
 SUMMARY_SYSTEM_PROMPT = (
-    "You summarize YouTube video transcripts for a reader who has not watched "
-    "the video. Always respond in English, even if the transcript is in another "
-    "language. Start with a 1-2 sentence overview, then list 3-6 concise bullet "
-    "points capturing the key takeaways. Be faithful to the transcript and do "
-    "not invent details. Output only the summary, with no preamble or sign-off."
+    "You are an expert summarizer of YouTube video transcripts. Your summary is "
+    "read by someone who has NOT watched the video, so it must stand on its own.\n"
+    "\n"
+    "Output format (plain text only — no markdown, no headers, no bold):\n"
+    "1. First line: a single-sentence TL;DR that captures what the video is "
+    "about and its main point.\n"
+    "2. A blank line, then key takeaways as bullets, each starting with \"• \". "
+    "Use as many bullets as the content warrants (typically 3-7) — more for "
+    "dense, information-rich videos, fewer for simple ones. Keep each bullet to "
+    "one or two sentences.\n"
+    "\n"
+    "Content rules:\n"
+    "- Always write in English, even if the transcript is in another language.\n"
+    "- Be strictly faithful to the transcript. Never invent or guess facts, "
+    "names, numbers, dates, or conclusions that are not present.\n"
+    "- Prefer concrete specifics — key arguments, conclusions, steps, named "
+    "people/products/places, and notable data — over vague generalities.\n"
+    "- Auto-generated captions are often messy, informal, or missing "
+    "punctuation; that is normal — do your best to summarize them anyway.\n"
+    "- Only if the transcript is so garbled, fragmentary, or empty that NO "
+    "meaningful summary is possible, output exactly the single token "
+    "INSUFFICIENT_TRANSCRIPT and nothing else.\n"
+    "- Keep the entire summary under roughly 3500 characters so it fits in one "
+    "Telegram message alongside the video's title and link.\n"
+    "\n"
+    "Output only the summary itself — no preamble, no sign-off, and no phrases "
+    "like \"Here is the summary\"."
+)
+
+# User-message template. A title (when known) grounds the model on the video's
+# topic; the transcript follows. {title_line} is either an empty string or a
+# "Video title: ...\n\n" line.
+SUMMARY_USER_TEMPLATE = (
+    "{title_line}Summarize the following transcript:\n\n{transcript}"
 )
 
 
@@ -72,7 +117,30 @@ def _extract_summary(data):
         return ""
 
 
-def _call_provider(provider, transcript):
+def _truncate_transcript(transcript):
+    """
+    Cap the transcript at LLM_MAX_TRANSCRIPT_CHARS, appending a clear marker and
+    logging a warning when content is dropped. Returns the (possibly shorter)
+    transcript.
+    """
+    if len(transcript) <= LLM_MAX_TRANSCRIPT_CHARS:
+        return transcript
+
+    log_warn(
+        f"Transcript is {len(transcript)} chars, exceeding the "
+        f"{LLM_MAX_TRANSCRIPT_CHARS}-char cap; truncating before summarization."
+    )
+    return transcript[:LLM_MAX_TRANSCRIPT_CHARS] + TRANSCRIPT_TRUNCATION_MARKER
+
+
+def _build_user_message(transcript, title=None):
+    """Render the user-message template, grounding on the video title if given."""
+    title = (title or "").strip()
+    title_line = f"Video title: {title}\n\n" if title else ""
+    return SUMMARY_USER_TEMPLATE.format(title_line=title_line, transcript=transcript)
+
+
+def _call_provider(provider, transcript, title=None):
     """
     Call one provider's chat-completions endpoint with retry on transient errors.
     Returns the summary text, or "" on failure.
@@ -86,7 +154,7 @@ def _call_provider(provider, transcript):
         "model": provider["model"],
         "messages": [
             {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Summarize this transcript:\n\n{transcript}"},
+            {"role": "user", "content": _build_user_message(transcript, title)},
         ],
         "temperature": LLM_TEMPERATURE,
         "max_tokens": LLM_MAX_TOKENS,
@@ -127,18 +195,25 @@ def _call_provider(provider, transcript):
     return ""
 
 
-def summarize_transcript(transcript):
+def summarize_transcript(transcript, title=None):
     """
     Summarize a transcript using the first configured LLM provider that succeeds.
 
+    Args:
+        transcript: The transcript text to summarize.
+        title: Optional video title used to ground the model on the topic.
+
     Returns the summary text, or "" if the transcript is empty, no provider is
-    configured, or every provider fails. The caller treats "" as "no summary"
-    and notifies accordingly, so this never raises.
+    configured, or every provider fails. Returns INSUFFICIENT_TRANSCRIPT_SENTINEL
+    if a provider judged the transcript too garbled/empty to summarize. The
+    caller treats both as "no summary" and notifies accordingly; never raises.
     """
     transcript = (transcript or "").strip()
     if not transcript:
         log_warn("Transcript is empty. Nothing to summarize.")
         return ""
+
+    transcript = _truncate_transcript(transcript)
 
     providers = _provider_configs()
     if not providers:
@@ -150,8 +225,19 @@ def summarize_transcript(transcript):
 
     for provider in providers:
         log_info(f"Summarizing via {provider['name']} ({provider['model']})...")
-        summary = _call_provider(provider, transcript)
+        summary = _call_provider(provider, transcript, title)
         if summary:
+            # The model signalled the transcript was unsummarizable. Return the
+            # sentinel (not the bare refusal text) so the caller can send an
+            # accurate "transcript too garbled" notice instead of forwarding the
+            # token to Telegram. The verdict is about the transcript, not the
+            # provider, so don't retry the others.
+            if summary.strip().upper().startswith(INSUFFICIENT_TRANSCRIPT_SENTINEL):
+                log_warn(
+                    f"{provider['name']} judged the transcript insufficient to "
+                    "summarize."
+                )
+                return INSUFFICIENT_TRANSCRIPT_SENTINEL
             log_info(f"Summary generated via {provider['name']}.")
             return summary
         log_warn(f"{provider['name']} did not produce a summary; trying next provider.")
