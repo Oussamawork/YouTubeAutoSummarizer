@@ -32,13 +32,23 @@ def save_to_json(data, filename):
         print(f"Error saving data to JSON file: {e}")
 
 def clean_summary(summary: str) -> str:
+    """
+    Tidy a summary while preserving its line structure (e.g. bullet points),
+    so formatted LLM output stays readable in the Telegram message.
+    """
+    if not summary:
+        return ""
+
     # 1. Replace non-breaking spaces with a regular space
     summary_clean = summary.replace("\u00a0", " ")
-    
-    # 2. Condense any sequence of whitespace (spaces, tabs, newlines, etc.) into a single space
-    summary_clean = re.sub(r"\s+", " ", summary_clean)
-    
-    # 3. Strip leading and trailing spaces
-    summary_clean = summary_clean.strip()
-    
-    return summary_clean
+
+    # 2. Collapse runs of spaces/tabs, but keep newlines intact
+    summary_clean = re.sub(r"[ \t]+", " ", summary_clean)
+
+    # 3. Collapse 3+ blank lines into a single blank line (one paragraph break)
+    summary_clean = re.sub(r"\n{3,}", "\n\n", summary_clean)
+
+    # 4. Trim trailing spaces per line, then strip the whole thing
+    summary_clean = "\n".join(line.rstrip() for line in summary_clean.splitlines())
+
+    return summary_clean.strip()
