@@ -22,6 +22,9 @@ SUPADATA_URL = "https://api.supadata.ai/v1/transcript"
 SUPADATA_TIMEOUT = 30
 SUPADATA_POLL_ATTEMPTS = 6
 SUPADATA_POLL_DELAY = 5  # seconds between polls for async (202) jobs
+SUPADATA_MAX_RETRIES = 3
+SUPADATA_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
+SUPADATA_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 
 
 def _extract_video_id(video_url_or_id):
@@ -111,29 +114,52 @@ def _fetch_supadata(vid):
         "text": "true",
         "mode": "native",
     }
-    try:
-        log_info(f"Fetching transcript via Supadata for video ID: {vid}")
-        resp = requests.get(SUPADATA_URL, headers=headers, params=params, timeout=SUPADATA_TIMEOUT)
+    log_info(f"Fetching transcript via Supadata for video ID: {vid}")
+
+    for attempt in range(1, SUPADATA_MAX_RETRIES + 1):
+        try:
+            resp = requests.get(SUPADATA_URL, headers=headers, params=params, timeout=SUPADATA_TIMEOUT)
+        except requests.RequestException as e:
+            log_warn(f"Supadata request error (attempt {attempt}/{SUPADATA_MAX_RETRIES}): {e}")
+            if attempt < SUPADATA_MAX_RETRIES:
+                time.sleep(SUPADATA_RETRY_BACKOFF * attempt)
+                continue
+            log_error("Supadata unreachable after retries.")
+            return ""
 
         # Large videos are processed asynchronously: 202 + a job id to poll.
         if resp.status_code == 202:
-            job_id = resp.json().get("jobId")
+            try:
+                job_id = resp.json().get("jobId")
+            except ValueError:
+                job_id = None
             if not job_id:
                 log_warn("Supadata returned 202 without a jobId.")
                 return ""
             return _poll_supadata_job(job_id, headers)
 
-        if resp.status_code != 200:
-            log_warn(f"Supadata returned {resp.status_code}: {resp.text[:200]}")
-            return ""
+        if resp.status_code == 200:
+            try:
+                text = _supadata_text_from_payload(resp.json())
+            except ValueError as e:
+                log_error(f"Supadata returned invalid JSON: {e}")
+                return ""
+            log_info(f"Supadata returned {len(text)} chars")
+            return text
 
-        text = _supadata_text_from_payload(resp.json())
-        log_info(f"Supadata returned {len(text)} chars")
-        return text
+        # Retry transient server/rate-limit errors; give up on anything else.
+        if resp.status_code in SUPADATA_TRANSIENT_STATUS and attempt < SUPADATA_MAX_RETRIES:
+            log_warn(
+                f"Transient Supadata status {resp.status_code} "
+                f"(attempt {attempt}/{SUPADATA_MAX_RETRIES}); retrying."
+            )
+            time.sleep(SUPADATA_RETRY_BACKOFF * attempt)
+            continue
 
-    except Exception as e:
-        log_error(f"Supadata fallback failed for {vid}: {e}")
+        log_warn(f"Supadata returned {resp.status_code}: {resp.text[:200]}")
         return ""
+
+    return ""
 
 
 def _poll_supadata_job(job_id, headers):
