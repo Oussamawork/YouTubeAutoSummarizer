@@ -65,6 +65,10 @@ def summarize_transcript(transcript):
     # Clean the transcript
     transcript = clean_transcript(transcript)
 
+    if not transcript.strip():
+        log_warn("Transcript is empty after cleaning. Nothing to summarize.")
+        return ""
+
     log_info("Initializing the BART summarization pipeline...")
     summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
@@ -95,6 +99,10 @@ def second_pass_summarize(summary_text):
     """
     Extracts key ideas and formats them as concise bullet points using sliding window chunking.
     """
+    if not summary_text.strip():
+        log_warn("First-pass summary is empty. Skipping bullet-point summarization.")
+        return ""
+
     log_info("Initializing BART for bullet-point summarization with sliding window...")
     summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 

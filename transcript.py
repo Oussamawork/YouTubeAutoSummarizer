@@ -19,7 +19,14 @@ def get_transcript_from_video(video_id):
 
         # Attempt to parse JSON only if response has proper content-type
         if 'application/json' in response.headers.get('Content-Type', ''):
-            return response.json()
+            data = response.json()
+            # Surface what came back so an empty transcript can be diagnosed
+            log_info(f"Transcript response keys: {list(data.keys())}")
+            transcript_text = data.get("transcript", "") if isinstance(data, dict) else ""
+            log_info(f"Transcript length: {len(transcript_text)} chars")
+            if not (transcript_text and transcript_text.strip()):
+                log_warn(f"Transcript field empty. Response preview: {response.text[:200]}")
+            return data
         else:
             log_error("Response content is not JSON.")
             log_warn(f"Response content: {response.text[:200]}")

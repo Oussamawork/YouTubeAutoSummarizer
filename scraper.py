@@ -83,18 +83,27 @@ if __name__ == "__main__":
                     log_info(f"Fetching transcript for {video_details['video_url']} ...")
                     transcript = get_transcript_from_video(video_details['video_url'])
 
-                    if transcript:
+                    # Check the actual transcript TEXT, not the dict (a dict is always truthy).
+                    transcript_text = transcript.get('transcript', '') if isinstance(transcript, dict) else ''
+                    transcript_text = transcript_text.strip() if transcript_text else ''
+
+                    if transcript_text:
                         log_info("Transcript fetched successfully.")
                         log_info("Summarizing transcript...")
-                        summary = summarize_transcript(transcript['transcript'])
+                        summary = clean_summary(summarize_transcript(transcript_text))
                         video_details['transcript'] = transcript
-                        video_details['summary_facebook_bart'] = clean_summary(summary)
-                        send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], video_details['summary_facebook_bart'])
-                        log_info("Summary generated.")
+                        video_details['summary_facebook_bart'] = summary or "Summary not available."
+
+                        # Only notify Telegram when we actually produced a summary.
+                        if summary:
+                            send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], summary)
+                            log_info("Summary generated and sent to Telegram.")
+                        else:
+                            log_warn("Summarization produced an empty summary. Skipping Telegram message.")
                     else:
-                        log_warn("Transcript not found.")
+                        log_warn("Transcript empty or unavailable. Skipping summarization and Telegram message.")
                         video_details['transcript'] = "Transcript not found."
-                        video_details['summary'] = "Summary not available."
+                        video_details['summary_facebook_bart'] = "Summary not available."
 
                     results.append(video_details)
                 else:
