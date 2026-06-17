@@ -5,8 +5,14 @@ on:
     - cron: '0 22 * * *'  # Runs daily at 22:00 UTC
   workflow_dispatch:      # Allows manual triggering from GitHub UI
 
+# Write access is needed to commit the dedup state (seen_videos.json) back.
 permissions:
-  contents: read
+  contents: write
+
+# Prevent overlapping runs from racing on the committed state file.
+concurrency:
+  group: daily-summary
+  cancel-in-progress: false
 
 jobs:
   run-summarizer:
@@ -42,3 +48,18 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
+
+      - name: Persist dedup state
+        if: always()  # commit progress even if the scraper step failed mid-run
+        run: |
+          if git status --porcelain seen_videos.json | grep -q .; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add seen_videos.json
+            git commit -m "chore: update seen videos [skip ci]"
+            # Rebase onto any concurrent change before pushing, then push.
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo "seen_videos.json unchanged; nothing to commit."
+          fi
