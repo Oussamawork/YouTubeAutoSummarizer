@@ -7,10 +7,9 @@ This Python script fetches the latest video from a YouTube channel using the You
 ## Features
 - Fetches the latest video from any YouTube channel.
 - Displays the **channel name**, **video title**, **video URL**, and **publication date**.
-- Extracts the **transcript** of the video and translates it into English if needed.
-- Cleans the transcript by removing timestamps, repeated lines, and unnecessary whitespace to ensure a high-quality summary.
-- Summarizes the transcript with an **LLM via the OpenAI-compatible Chat Completions API** — provider-agnostic (Gemini, Groq, OpenRouter, OpenAI, local servers, …), configured by environment variables.
-- Generates a short overview plus **bullet-point summaries** of the transcript, in English regardless of the source language.
+- Extracts the **transcript** of the video (via Supadata or `youtube-transcript-api`).
+- Summarizes the transcript with an **LLM via the OpenAI-compatible Chat Completions API** — provider-agnostic (Gemini, Groq, OpenRouter, OpenAI, local servers, …), configured by environment variables. The prompt grounds the model on the video title, translates to English when needed, and guards against over-long transcripts.
+- Generates a one-line **TL;DR plus bullet-point key takeaways**, in English regardless of the source language.
 - Supports sending the summarized content to a specified **Telegram channel**.
 - Uses environment variables to securely store API keys and tokens.
 
@@ -100,33 +99,33 @@ The generated JSON file will have the following structure:
     "video_url": "https://www.youtube.com/watch?v=example123",
     "published_at": "2024-12-25T17:36:31Z",
     "transcript": "Full transcript text here...",
-    "summary": "Summarized text here...",
-    "bullet_points": [
-      "Key idea 1 from the summary.",
-      "Key idea 2 from the summary.",
-      "Key idea 3 from the summary."
-    ]
+    "summary": "Overview line.\n\n• Key takeaway 1.\n• Key takeaway 2."
   }
 ]
 ```
 
 ## Implementation Details
 
-### Sliding Window Chunking:
-The script uses a sliding window mechanism to handle long transcripts that exceed the token limit of the summarization model (typically 1024 tokens for `facebook/bart-large-cnn`). The mechanism works as follows:
+### Summarization:
+The transcript is summarized by a large language model through the OpenAI-compatible Chat Completions API, so the project is provider-agnostic (Gemini, Groq, OpenRouter, OpenAI, local servers, …) — see [LLM provider configuration](#llm-provider-configuration). The prompt instructs the model to produce a reader-friendly, plain-text summary:
 
-1. **Window Size**: Each chunk is limited to 1024 characters (or tokens) to ensure compatibility with the model.
-2. **Overlap Size**: A 256-character overlap is introduced between consecutive chunks to retain context from the previous chunk.
-3. **Context Retention**: The overlap ensures that key ideas that span across chunk boundaries are not lost, preserving the coherence of the summary.
+- A single-sentence **TL;DR / overview** on the first line.
+- A short list of **key takeaways** as `• ` bullets, scaling with the content (typically 3-7).
+- Always in **English**, regardless of the transcript's source language.
+- **Faithful to the transcript** — the model is told not to invent facts, names, or numbers, and to say so briefly if the transcript is too garbled to summarize.
 
-This approach balances the model's input limitations with the need for comprehensive summaries of long texts.
+The video **title** is passed alongside the transcript to ground the model on the topic. Output is kept plain-text (no markdown) because the Telegram sender HTML-escapes the summary, so `**bold**`/`#` markers would not render.
 
-### NLP Models:
-- **Summarization**: `facebook/bart-large-cnn`
-- **Translation**: `Helsinki-NLP/opus-mt-[detected_language]-en`
+To avoid blowing past model context windows and to keep token cost predictable, very long transcripts are **truncated** to a configurable character cap before being sent, with a `...[transcript truncated]` marker appended and a warning logged.
 
-### Transcript Cleaning:
-Before summarization, the script removes timestamps, redundant lines, and excessive whitespace to improve the quality of the input data for the summarization model.
+Tunable summarization environment variables (all optional, with sensible defaults):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LLM_MAX_TOKENS` | `1500` | Max tokens for the generated summary. |
+| `LLM_TEMPERATURE` | `0.3` | Sampling temperature (lower = more faithful). |
+| `LLM_TIMEOUT` | `60` | Per-request timeout in seconds. |
+| `LLM_MAX_TRANSCRIPT_CHARS` | `48000` | Character cap on transcript text sent to the model. |
 
 ### Telegram Integration:
 The script uses the Telegram Bot API to send summarized content directly to a Telegram channel.
