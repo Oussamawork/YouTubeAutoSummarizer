@@ -2,7 +2,7 @@ import requests
 import time
 from dotenv import load_dotenv
 from transcript import get_transcript_from_video
-from helpers import read_channel_ids, save_to_json, clean_summary
+from helpers import read_channel_ids, save_to_json, clean_summary, load_seen_videos, save_seen_videos
 from summarizer import summarize_transcript
 from log import log_info, log_error, log_warn, log_debug
 from sendToTelegram import send_telegram_message
@@ -19,6 +19,9 @@ MAX_RETRIES = 3               # attempts for transient failures
 RETRY_BACKOFF = 2            # base seconds, multiplied by the attempt number
 TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 
+# File that remembers the last video summarized per channel (dedup state)
+SEEN_VIDEOS_FILE = "seen_videos.json"
+
 
 def _parse_latest_video(data):
     """Turn a YouTube search response into our video dict, or None if empty."""
@@ -32,6 +35,7 @@ def _parse_latest_video(data):
     snippet = video["snippet"]
     log_info(f"Found video: {snippet['title']} | Channel: {snippet['channelTitle']}")
     return {
+        "video_id": video_id,
         "channel_name": snippet["channelTitle"],
         "video_title": snippet["title"],
         "video_url": f"https://www.youtube.com/watch?v={video_id}",
@@ -83,9 +87,9 @@ def get_latest_video(YOUTUBE_api_key, channel_id):
         log_error(f"YouTube API returned status code {response.status_code} | {response.text}")
         return None
 
-if __name__ == "__main__":
+def main():
     log_info("Starting main script.")
-    
+
     YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
     TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
@@ -119,14 +123,24 @@ if __name__ == "__main__":
         else:
             log_info(f"Beginning process to fetch video details for each channel.")
             results = []
+            seen_videos = load_seen_videos(SEEN_VIDEOS_FILE)
 
             for channel_id in channel_ids:
                 transcript = ''
                 log_info(f"Processing channel ID: {channel_id}")
                 video_details = get_latest_video(YOUTUBE_API_KEY, channel_id)
                 if video_details:
+                    # Skip channels whose latest video was already processed, so
+                    # the same summary isn't re-sent every day.
+                    if seen_videos.get(channel_id) == video_details['video_id']:
+                        log_info(
+                            f"No new video for channel {channel_id} "
+                            f"(latest already processed: {video_details['video_id']}). Skipping."
+                        )
+                        continue
+
                     log_info(f"Video details retrieved: {video_details['video_title']} (published: {video_details['published_at']})")
-                    
+
                     log_info(f"Fetching transcript for {video_details['video_url']} ...")
                     transcript = get_transcript_from_video(video_details['video_url'])
 
@@ -141,23 +155,28 @@ if __name__ == "__main__":
                         video_details['transcript'] = transcript
 
                         if summary:
-                            video_details['summary_facebook_bart'] = summary
+                            video_details['summary'] = summary
                             telegram_body = summary
-                            log_info("Summary generated and sent to Telegram.")
+                            log_info("Summary generated.")
                         else:
                             # Transcript existed but the summarizer produced nothing.
-                            video_details['summary_facebook_bart'] = "Summary not available."
+                            video_details['summary'] = "Summary not available."
                             telegram_body = "⚠️ A transcript was found, but summarization produced no output. Manual review needed."
                             log_warn("Empty summary despite a transcript. Notifying Telegram.")
                     else:
-                        # No transcript at all (kome.ai failed or the video has no captions).
+                        # No transcript at all (no source returned text, or the video has no captions).
                         video_details['transcript'] = "Transcript not found."
-                        video_details['summary_facebook_bart'] = "Summary not available."
+                        video_details['summary'] = "Summary not available."
                         telegram_body = "⚠️ No transcript available for this video, so no summary could be generated. Manual review needed."
                         log_warn("Transcript empty or unavailable. Notifying Telegram.")
 
                     # Always notify Telegram so empty summaries are never silent.
                     send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], telegram_body)
+
+                    # Mark this video as processed and persist immediately, so a
+                    # later crash doesn't cause already-sent videos to be re-sent.
+                    seen_videos[channel_id] = video_details['video_id']
+                    save_seen_videos(SEEN_VIDEOS_FILE, seen_videos)
 
                     results.append(video_details)
                 else:
@@ -172,4 +191,8 @@ if __name__ == "__main__":
             else:
                 log_warn("No results to save.")
 
-    log_info(f"Main script finished.")
+    log_info("Main script finished.")
+
+
+if __name__ == "__main__":
+    main()

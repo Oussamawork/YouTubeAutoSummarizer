@@ -22,6 +22,29 @@ def read_channel_ids(file_path):
         log_error(f"Channel IDs file not found: {file_path}")
         return []
     
+# Dedup state: map of {channel_id: last_processed_video_id}
+def load_seen_videos(file_path):
+    """Load the per-channel last-seen video IDs. Returns {} if missing/invalid."""
+    try:
+        with open(file_path, "r") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (ValueError, OSError) as e:
+        log_error(f"Could not read seen-videos file {file_path}: {e}. Starting fresh.")
+        return {}
+
+
+def save_seen_videos(file_path, seen):
+    """Persist the per-channel last-seen video IDs."""
+    try:
+        with open(file_path, "w") as f:
+            json.dump(seen, f, indent=2, sort_keys=True)
+    except OSError as e:
+        log_error(f"Could not write seen-videos file {file_path}: {e}")
+
+
 # Function to save results to a JSON file
 def save_to_json(data, filename):
     try:
