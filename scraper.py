@@ -3,7 +3,7 @@ import time
 from dotenv import load_dotenv
 from transcript import get_transcript_from_video
 from helpers import read_channel_ids, save_to_json, clean_summary
-from summarizer import summarize_transcript, second_pass_summarize
+from summarizer import summarize_transcript
 from log import log_info, log_error, log_warn, log_debug
 from sendToTelegram import send_telegram_message
 import os

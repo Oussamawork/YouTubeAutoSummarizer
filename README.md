@@ -9,19 +9,28 @@ This Python script fetches the latest video from a YouTube channel using the You
 - Displays the **channel name**, **video title**, **video URL**, and **publication date**.
 - Extracts the **transcript** of the video and translates it into English if needed.
 - Cleans the transcript by removing timestamps, repeated lines, and unnecessary whitespace to ensure a high-quality summary.
-- Summarizes the transcript using `facebook/bart-large-cnn` with a **sliding window approach** to preserve context.
-- Generates **bullet-point summaries** of the transcript with actionable insights.
+- Summarizes the transcript with an **LLM via the OpenAI-compatible Chat Completions API** — provider-agnostic (Gemini, Groq, OpenRouter, OpenAI, local servers, …), configured by environment variables.
+- Generates a short overview plus **bullet-point summaries** of the transcript, in English regardless of the source language.
 - Supports sending the summarized content to a specified **Telegram channel**.
 - Uses environment variables to securely store API keys and tokens.
 
 ## Requirements
 Before running the script, ensure you have the required Python dependencies:
 
-- `transformers` for NLP and summarization.
-- `langdetect` for language detection.
-- `requests` for making HTTP requests to the YouTube API.
+- `requests` for HTTP calls to the YouTube API, the LLM provider, and Telegram.
+- `youtube-transcript-api` for fetching video transcripts.
 - `python-dotenv` for loading environment variables from the `.env` file.
-- `loguru` for structured logging.
+- `colorama` for colored logging.
+
+### LLM provider configuration
+
+The summarizer tries providers in this order, skipping any whose key is unset:
+
+1. **Generic** (any OpenAI-compatible endpoint): `LLM_API_KEY` + `LLM_BASE_URL` (+ optional `LLM_MODEL`, `LLM_NAME`)
+2. **Gemini** (free tier): `GEMINI_API_KEY` (+ optional `GEMINI_MODEL`, default `gemini-2.5-flash`)
+3. **Groq** (free tier): `GROQ_API_KEY` (+ optional `GROQ_MODEL`, default `llama-3.3-70b-versatile`)
+
+If no provider is configured, transcripts are fetched but no summary is produced (a notice is sent to Telegram).
 
 To install the required dependencies, run:
 
