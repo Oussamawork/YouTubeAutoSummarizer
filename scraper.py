@@ -1,4 +1,5 @@
 import requests
+import time
 from dotenv import load_dotenv
 from transcript import get_transcript_from_video
 from helpers import read_channel_ids, save_to_json, clean_summary
@@ -11,10 +12,36 @@ from datetime import datetime
 # Load environment variables from .env file
 load_dotenv('.env')
 
+# YouTube API request tuning
+YOUTUBE_API_URL = "https://www.googleapis.com/youtube/v3/search"
+REQUEST_TIMEOUT = 15          # seconds before a hung request is abandoned
+MAX_RETRIES = 3               # attempts for transient failures
+RETRY_BACKOFF = 2            # base seconds, multiplied by the attempt number
+TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+
+
+def _parse_latest_video(data):
+    """Turn a YouTube search response into our video dict, or None if empty."""
+    items = data.get("items") if isinstance(data, dict) else None
+    if not items:
+        log_warn("No videos found for this channel.")
+        return None
+
+    video = items[0]
+    video_id = video["id"]["videoId"]
+    snippet = video["snippet"]
+    log_info(f"Found video: {snippet['title']} | Channel: {snippet['channelTitle']}")
+    return {
+        "channel_name": snippet["channelTitle"],
+        "video_title": snippet["title"],
+        "video_url": f"https://www.youtube.com/watch?v={video_id}",
+        "published_at": snippet["publishedAt"],
+    }
+
+
 def get_latest_video(YOUTUBE_api_key, channel_id):
     log_info(f"get_latest_video called for channel_id={channel_id}")
 
-    url = "https://www.googleapis.com/youtube/v3/search"
     params = {
         "part": "snippet",
         "channelId": channel_id,
@@ -23,32 +50,36 @@ def get_latest_video(YOUTUBE_api_key, channel_id):
         "maxResults": 1,
         "key": YOUTUBE_api_key,
     }
-    response = requests.get(url, params=params)
-    log_debug(f"GET request to: {response.url}")
 
-    if response.status_code == 200:
-        data = response.json()
-        log_debug("Received 200 OK from YouTube API")
-        if "items" in data and len(data["items"]) > 0:
-            video = data["items"][0]
-            video_id = video["id"]["videoId"]
-            video_title = video["snippet"]["title"]
-            channel_name = video["snippet"]["channelTitle"]
-            published_at = video["snippet"]["publishedAt"]
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-
-            log_info(f"Found video: {video_title} | Channel: {channel_name}")
-
-            return {
-                'channel_name': channel_name,
-                'video_title': video_title,
-                'video_url': video_url,
-                'published_at': published_at
-            }
-        else:
-            log_warn("No videos found for this channel.")
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.get(YOUTUBE_API_URL, params=params, timeout=REQUEST_TIMEOUT)
+        except requests.RequestException as e:
+            log_warn(f"YouTube API request error (attempt {attempt}/{MAX_RETRIES}): {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF * attempt)
+                continue
+            log_error("YouTube API unreachable after retries.")
             return None
-    else:
+
+        log_debug(f"GET request to: {response.url}")
+
+        if response.status_code == 200:
+            log_debug("Received 200 OK from YouTube API")
+            try:
+                return _parse_latest_video(response.json())
+            except (ValueError, KeyError) as e:
+                log_error(f"Unexpected YouTube API response shape: {e}")
+                return None
+
+        if response.status_code in TRANSIENT_STATUS and attempt < MAX_RETRIES:
+            log_warn(
+                f"Transient YouTube API status {response.status_code} "
+                f"(attempt {attempt}/{MAX_RETRIES}); retrying."
+            )
+            time.sleep(RETRY_BACKOFF * attempt)
+            continue
+
         log_error(f"YouTube API returned status code {response.status_code} | {response.text}")
         return None
 
