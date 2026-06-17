@@ -92,18 +92,25 @@ if __name__ == "__main__":
                         log_info("Summarizing transcript...")
                         summary = clean_summary(summarize_transcript(transcript_text))
                         video_details['transcript'] = transcript
-                        video_details['summary_facebook_bart'] = summary or "Summary not available."
 
-                        # Only notify Telegram when we actually produced a summary.
                         if summary:
-                            send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], summary)
+                            video_details['summary_facebook_bart'] = summary
+                            telegram_body = summary
                             log_info("Summary generated and sent to Telegram.")
                         else:
-                            log_warn("Summarization produced an empty summary. Skipping Telegram message.")
+                            # Transcript existed but the summarizer produced nothing.
+                            video_details['summary_facebook_bart'] = "Summary not available."
+                            telegram_body = "⚠️ A transcript was found, but summarization produced no output. Manual review needed."
+                            log_warn("Empty summary despite a transcript. Notifying Telegram.")
                     else:
-                        log_warn("Transcript empty or unavailable. Skipping summarization and Telegram message.")
+                        # No transcript at all (kome.ai failed or the video has no captions).
                         video_details['transcript'] = "Transcript not found."
                         video_details['summary_facebook_bart'] = "Summary not available."
+                        telegram_body = "⚠️ No transcript available for this video, so no summary could be generated. Manual review needed."
+                        log_warn("Transcript empty or unavailable. Notifying Telegram.")
+
+                    # Always notify Telegram so empty summaries are never silent.
+                    send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], telegram_body)
 
                     results.append(video_details)
                 else:
