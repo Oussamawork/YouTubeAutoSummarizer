@@ -1,2 +1,7 @@
+# One channel per line. Accepts a channel ID (UC...), a channel URL
+# (https://youtube.com/@handle or /channel/UC...), or a bare @handle.
+# Blank lines and lines starting with '#' are ignored.
 UCrGLm-Drgv0vbbemwwHeXJw
 UCngIhBkikUe6e7tZTjpKK7Q
+@parkevtatevosiancfa9544
+@josephcarlsonafterhours

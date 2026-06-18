@@ -1,5 +1,7 @@
 import requests
 import time
+import re
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 from transcript import get_transcript_from_video
 from helpers import read_channel_ids, save_to_json, clean_summary, load_seen_videos, save_seen_videos
@@ -14,10 +16,14 @@ load_dotenv('.env')
 
 # YouTube API request tuning
 YOUTUBE_API_URL = "https://www.googleapis.com/youtube/v3/search"
+YOUTUBE_CHANNELS_API_URL = "https://www.googleapis.com/youtube/v3/channels"
 REQUEST_TIMEOUT = 15          # seconds before a hung request is abandoned
 MAX_RETRIES = 3               # attempts for transient failures
 RETRY_BACKOFF = 2            # base seconds, multiplied by the attempt number
 TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+
+# A bare YouTube channel ID: "UC" followed by 22 url-safe base64 chars.
+CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 
 # File that remembers the last video summarized per channel (dedup state)
 SEEN_VIDEOS_FILE = "seen_videos.json"
@@ -41,6 +47,81 @@ def _parse_latest_video(data):
         "video_url": f"https://www.youtube.com/watch?v={video_id}",
         "published_at": snippet["publishedAt"],
     }
+
+
+def _resolve_handle_to_id(handle, api_key):
+    """
+    Resolve a YouTube @handle (or legacy custom username) to a UC... channel ID
+    via the Data API's channels.list endpoint. Returns "" if it can't be found.
+    """
+    handle = handle.lstrip("@")
+    # Modern channels use forHandle; older ones may only resolve via forUsername.
+    for lookup in ("forHandle", "forUsername"):
+        params = {"part": "id", lookup: handle, "key": api_key}
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = requests.get(YOUTUBE_CHANNELS_API_URL, params=params, timeout=REQUEST_TIMEOUT)
+            except requests.RequestException as e:
+                log_warn(f"channels.list error for '{handle}' (attempt {attempt}/{MAX_RETRIES}): {e}")
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_BACKOFF * attempt)
+                    continue
+                break
+
+            if resp.status_code == 200:
+                try:
+                    items = resp.json().get("items") or []
+                except ValueError:
+                    items = []
+                if items:
+                    return items[0].get("id", "")
+                break  # valid response, just no match for this lookup type
+
+            if resp.status_code in TRANSIENT_STATUS and attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF * attempt)
+                continue
+
+            log_warn(f"channels.list returned {resp.status_code} for '{handle}': {resp.text[:200]}")
+            break
+
+    return ""
+
+
+def resolve_channel_id(entry, api_key):
+    """
+    Normalize a channel_ids.txt entry into a UC... channel ID.
+
+    Accepts a bare channel ID, a channel URL (/channel/UC..., /@handle), or a
+    bare @handle/handle. Channel IDs and /channel/ URLs need no API call;
+    handles are resolved via the Data API. Returns "" if it can't be resolved.
+    """
+    entry = entry.strip()
+    if CHANNEL_ID_RE.match(entry):
+        return entry
+
+    handle = ""
+    if "youtube.com" in entry or "youtu.be" in entry or "://" in entry:
+        path = urlparse(entry if "://" in entry else "https://" + entry).path
+        m = re.search(r"/channel/(UC[A-Za-z0-9_-]{22})", path)
+        if m:
+            return m.group(1)
+        m = re.search(r"/@([A-Za-z0-9._-]+)", path)
+        if m:
+            handle = m.group(1)
+    elif entry.startswith("@"):
+        handle = entry[1:]
+    else:
+        # A bare token that isn't a channel ID; try resolving it as a handle.
+        handle = entry
+
+    if handle:
+        cid = _resolve_handle_to_id(handle, api_key)
+        if cid:
+            log_info(f"Resolved channel entry '{entry}' to {cid}.")
+            return cid
+        log_warn(f"Could not resolve channel entry '{entry}' to a channel ID.")
+
+    return ""
 
 
 def get_latest_video(YOUTUBE_api_key, channel_id):
@@ -116,17 +197,21 @@ def main():
                 "where YouTube blocks the runner IP."
             )
         
-        # Read channel IDs from the file
-        channel_ids = read_channel_ids("channel_ids.txt")
-        if not channel_ids:
+        # Read channel entries (IDs, URLs, or @handles) from the file
+        channel_entries = read_channel_ids("channel_ids.txt")
+        if not channel_entries:
             log_warn("No channel IDs found. Check your channel_ids.txt file.")
         else:
             log_info(f"Beginning process to fetch video details for each channel.")
             results = []
             seen_videos = load_seen_videos(SEEN_VIDEOS_FILE)
 
-            for channel_id in channel_ids:
+            for entry in channel_entries:
                 transcript = ''
+                channel_id = resolve_channel_id(entry, YOUTUBE_API_KEY)
+                if not channel_id:
+                    log_warn(f"Skipping unresolved channel entry: {entry}")
+                    continue
                 log_info(f"Processing channel ID: {channel_id}")
                 video_details = get_latest_video(YOUTUBE_API_KEY, channel_id)
                 if video_details:

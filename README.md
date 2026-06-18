@@ -58,12 +58,17 @@ pip install -r requirements.txt
    ```
 
 ### 4. Format of `channel_ids.txt`:
-   The `channel_ids.txt` file should contain one YouTube channel ID per line. For example:
+   The `channel_ids.txt` file lists one channel per line. Each line may be a
+   **channel ID** (`UC...`), a **channel URL** (`https://youtube.com/@handle` or
+   `/channel/UC...`), or a bare **@handle** — handles and URLs are resolved to
+   channel IDs automatically via the YouTube Data API. Blank lines and lines
+   starting with `#` are ignored. For example:
 
    ```txt
+   # Channel ID, URL, or @handle — one per line
    UC_x5XG1OV2P6uZZ5FSM9Ttw
-   UCBR8-60-B28hp2BmDPdntcQ
-   UC123456789
+   https://www.youtube.com/@GoogleDevelopers
+   @veritasium
    ```
 
 ## Usage
