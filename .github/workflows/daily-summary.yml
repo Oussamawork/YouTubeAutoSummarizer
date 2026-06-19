@@ -57,9 +57,42 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add seen_videos.json
             git commit -m "chore: update seen videos [skip ci]"
-            # Rebase onto any concurrent change before pushing, then push.
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
-            git push origin "HEAD:${GITHUB_REF_NAME}"
+            # Rebase onto any concurrent change, then push — retry on rejection,
+            # and fail loudly if it never lands (so dedup drift / re-sends are visible).
+            pushed=false
+            for attempt in 1 2 3; do
+              git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+              if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+                pushed=true
+                break
+              fi
+              echo "Push attempt ${attempt} failed; retrying in $((attempt * 5))s..."
+              sleep $((attempt * 5))
+            done
+            if [ "${pushed}" != "true" ]; then
+              echo "::error::Failed to persist seen_videos.json after 3 attempts; dedup state may drift (risk of re-sends)."
+              exit 1
+            fi
           else
             echo "seen_videos.json unchanged; nothing to commit."
           fi
+
+      - name: Alert on failure
+        if: failure()  # any prior step failed (scraper crash, push failure, etc.)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: |
+          if [ -z "${TELEGRAM_TOKEN}" ] || [ -z "${TELEGRAM_CHANNEL_ID}" ]; then
+            echo "Telegram secrets not set; cannot send failure alert."
+            exit 0
+          fi
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          TEXT="🚨 Daily YouTube Summary workflow failed.
+          Repo: ${GITHUB_REPOSITORY}
+          Run: ${RUN_URL}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHANNEL_ID}" \
+            --data-urlencode "text=${TEXT}" \
+            --data-urlencode "disable_web_page_preview=true" > /dev/null \
+            || echo "Failed to send Telegram failure alert."

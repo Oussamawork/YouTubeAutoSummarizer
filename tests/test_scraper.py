@@ -38,6 +38,12 @@ def test_parse_latest_video_empty():
     assert scraper._parse_latest_video({}) is None
 
 
+def test_parse_latest_video_malformed_item():
+    # Missing videoId or snippet must yield None, not raise (I7 hardening).
+    assert scraper._parse_latest_video({"items": [{"snippet": {"title": "t"}}]}) is None
+    assert scraper._parse_latest_video({"items": [{"id": {}, "snippet": {}}]}) is None
+
+
 def test_get_latest_video_success(monkeypatch):
     payload = {
         "items": [
