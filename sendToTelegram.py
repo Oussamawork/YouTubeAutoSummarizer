@@ -36,22 +36,57 @@ def _build_plain_message(channel_name, video_title, video_url, published_at, sum
     )
 
 
-def _post(bot_token, chat_id, text, parse_mode=None):
-    """POST one message to Telegram. Returns True on HTTP 200."""
-    url = TELEGRAM_API.format(token=bot_token)
-    data = {"chat_id": chat_id, "text": text[:TELEGRAM_MAX_LEN]}
-    if parse_mode:
-        data["parse_mode"] = parse_mode
-    try:
-        resp = requests.post(url, data=data, timeout=TELEGRAM_TIMEOUT)
-    except requests.RequestException as e:
-        log_error(f"Telegram request failed: {e}")
-        return False
+def _split_message(text, limit=TELEGRAM_MAX_LEN):
+    """
+    Split text into chunks no longer than `limit`, so long summaries aren't
+    silently truncated at Telegram's 4096-char cap.
 
-    if resp.status_code == 200:
-        return True
-    log_warn(f"Telegram send failed ({resp.status_code}): {resp.text[:200]}")
-    return False
+    Splits preferentially on a newline boundary (then a space), which keeps our
+    messages safe under HTML parse mode: tags and entities never contain
+    newlines, so a newline split never lands inside `<b>...</b>` or `&amp;`. For
+    a pathological single line longer than the limit, it hard-splits but backs
+    off so the cut never falls inside an HTML entity. Always returns >=1 chunk.
+    """
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        cut = remaining.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = remaining.rfind(" ", 0, limit)
+        if cut <= 0:
+            cut = limit
+        # Don't cut inside an HTML entity like &amp; — back up to before the '&'.
+        amp = remaining.rfind("&", max(0, cut - 10), cut)
+        if amp != -1 and ";" not in remaining[amp:cut]:
+            cut = amp
+        if cut <= 0:
+            cut = limit
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    chunks.append(remaining)
+    return chunks
+
+
+def _post(bot_token, chat_id, text, parse_mode=None):
+    """
+    POST a message to Telegram, splitting it across multiple sends if it exceeds
+    the 4096-char limit (rather than silently truncating). Returns True only if
+    every chunk was accepted (HTTP 200).
+    """
+    url = TELEGRAM_API.format(token=bot_token)
+    for chunk in _split_message(text):
+        data = {"chat_id": chat_id, "text": chunk}
+        if parse_mode:
+            data["parse_mode"] = parse_mode
+        try:
+            resp = requests.post(url, data=data, timeout=TELEGRAM_TIMEOUT)
+        except requests.RequestException as e:
+            log_error(f"Telegram request failed: {e}")
+            return False
+        if resp.status_code != 200:
+            log_warn(f"Telegram send failed ({resp.status_code}): {resp.text[:200]}")
+            return False
+    return True
 
 
 def send_telegram_message(bot_token, chat_id, channel_name, video_title, video_url, published_at, summary):

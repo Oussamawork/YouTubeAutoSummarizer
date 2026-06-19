@@ -3,7 +3,11 @@ import time
 from dotenv import load_dotenv
 from transcript import get_transcript_from_video
 from helpers import read_channel_ids, save_to_json, clean_summary, load_seen_videos, save_seen_videos
-from summarizer import summarize_transcript, INSUFFICIENT_TRANSCRIPT_SENTINEL
+from summarizer import (
+    summarize_transcript,
+    INSUFFICIENT_TRANSCRIPT_SENTINEL,
+    QUOTA_EXHAUSTED_SENTINEL,
+)
 from log import log_info, log_error, log_warn, log_debug
 from sendToTelegram import send_telegram_message
 import os
@@ -24,22 +28,26 @@ SEEN_VIDEOS_FILE = "seen_videos.json"
 
 
 def _parse_latest_video(data):
-    """Turn a YouTube search response into our video dict, or None if empty."""
+    """Turn a YouTube search response into our video dict, or None if empty/malformed."""
     items = data.get("items") if isinstance(data, dict) else None
     if not items:
         log_warn("No videos found for this channel.")
         return None
 
-    video = items[0]
-    video_id = video["id"]["videoId"]
-    snippet = video["snippet"]
-    log_info(f"Found video: {snippet['title']} | Channel: {snippet['channelTitle']}")
+    video = items[0] or {}
+    video_id = (video.get("id") or {}).get("videoId")
+    snippet = video.get("snippet") or {}
+    if not video_id or not snippet:
+        log_warn("YouTube response item missing videoId/snippet; skipping.")
+        return None
+
+    log_info(f"Found video: {snippet.get('title')} | Channel: {snippet.get('channelTitle')}")
     return {
         "video_id": video_id,
-        "channel_name": snippet["channelTitle"],
-        "video_title": snippet["title"],
+        "channel_name": snippet.get("channelTitle", "Unknown channel"),
+        "video_title": snippet.get("title", "Untitled"),
         "video_url": f"https://www.youtube.com/watch?v={video_id}",
-        "published_at": snippet["publishedAt"],
+        "published_at": snippet.get("publishedAt", ""),
     }
 
 
@@ -125,11 +133,23 @@ def main():
             results = []
             seen_videos = load_seen_videos(SEEN_VIDEOS_FILE)
 
+            # Per-channel outcome tally for the end-of-run summary report.
+            outcomes = {
+                "sent": 0, "unchanged": 0, "no_transcript": 0, "insufficient": 0,
+                "summary_failed": 0, "quota_deferred": 0, "no_video": 0, "error": 0,
+            }
+
             for channel_id in channel_ids:
-                transcript = ''
-                log_info(f"Processing channel ID: {channel_id}")
-                video_details = get_latest_video(YOUTUBE_API_KEY, channel_id)
-                if video_details:
+                # Isolate each channel: one malformed response or unexpected error
+                # must not abort the whole run and skip every remaining channel.
+                try:
+                    log_info(f"Processing channel ID: {channel_id}")
+                    video_details = get_latest_video(YOUTUBE_API_KEY, channel_id)
+                    if not video_details:
+                        log_warn(f"No video details returned for channel ID: {channel_id}.")
+                        outcomes["no_video"] += 1
+                        continue
+
                     # Skip channels whose latest video was already processed, so
                     # the same summary isn't re-sent every day.
                     if seen_videos.get(channel_id) == video_details['video_id']:
@@ -137,6 +157,7 @@ def main():
                             f"No new video for channel {channel_id} "
                             f"(latest already processed: {video_details['video_id']}). Skipping."
                         )
+                        outcomes["unchanged"] += 1
                         continue
 
                     log_info(f"Video details retrieved: {video_details['video_title']} (published: {video_details['published_at']})")
@@ -147,6 +168,10 @@ def main():
                     # Check the actual transcript TEXT, not the dict (a dict is always truthy).
                     transcript_text = transcript.get('transcript', '') if isinstance(transcript, dict) else ''
                     transcript_text = transcript_text.strip() if transcript_text else ''
+
+                    # Whether to record this video as processed. False for retryable
+                    # outcomes (quota deferral) so they're retried on the next run.
+                    mark_seen = True
 
                     if transcript_text:
                         log_info("Transcript fetched successfully.")
@@ -160,35 +185,56 @@ def main():
                             video_details['summary'] = "Summary not available."
                             telegram_body = "⚠️ The transcript was too garbled or incomplete to summarize. Manual review needed."
                             log_warn("Transcript judged insufficient to summarize. Notifying Telegram.")
+                            outcomes["insufficient"] += 1
+                        elif raw_summary == QUOTA_EXHAUSTED_SENTINEL:
+                            # All LLM providers are rate-limited/out of quota — a
+                            # retryable condition. Notify, but don't mark as seen.
+                            video_details['summary'] = "Summary not available."
+                            telegram_body = "⏳ Summary deferred — the LLM provider quota/rate limit was reached. This video will be retried on the next run."
+                            log_warn("LLM quota exhausted; deferring this video for retry next run.")
+                            outcomes["quota_deferred"] += 1
+                            mark_seen = False
                         else:
                             summary = clean_summary(raw_summary)
                             if summary:
                                 video_details['summary'] = summary
                                 telegram_body = summary
                                 log_info("Summary generated.")
+                                outcomes["sent"] += 1
                             else:
                                 # Transcript existed but the summarizer produced nothing.
                                 video_details['summary'] = "Summary not available."
                                 telegram_body = "⚠️ A transcript was found, but summarization produced no output. Manual review needed."
                                 log_warn("Empty summary despite a transcript. Notifying Telegram.")
+                                outcomes["summary_failed"] += 1
                     else:
                         # No transcript at all (no source returned text, or the video has no captions).
                         video_details['transcript'] = "Transcript not found."
                         video_details['summary'] = "Summary not available."
                         telegram_body = "⚠️ No transcript available for this video, so no summary could be generated. Manual review needed."
                         log_warn("Transcript empty or unavailable. Notifying Telegram.")
+                        outcomes["no_transcript"] += 1
 
                     # Always notify Telegram so empty summaries are never silent.
                     send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], telegram_body)
 
                     # Mark this video as processed and persist immediately, so a
                     # later crash doesn't cause already-sent videos to be re-sent.
-                    seen_videos[channel_id] = video_details['video_id']
-                    save_seen_videos(SEEN_VIDEOS_FILE, seen_videos)
+                    # Skipped for retryable outcomes (e.g. quota deferral).
+                    if mark_seen:
+                        seen_videos[channel_id] = video_details['video_id']
+                        save_seen_videos(SEEN_VIDEOS_FILE, seen_videos)
 
                     results.append(video_details)
-                else:
-                    log_warn(f"No video details returned for channel ID: {channel_id}.")
+                except Exception as e:
+                    # Don't let one channel's failure sink the rest of the batch.
+                    log_error(f"Unexpected error processing channel {channel_id}: {e}")
+                    outcomes["error"] += 1
+                    continue
+
+            # End-of-run report: one line summarizing what happened this run.
+            summary_line = ", ".join(f"{k}={v}" for k, v in outcomes.items() if v)
+            log_info(f"Run summary: {len(channel_ids)} channels | {summary_line or 'nothing to do'}")
 
             # Save the results to a JSON file
             if results:

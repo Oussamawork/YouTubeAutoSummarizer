@@ -1,5 +1,7 @@
 import json
+import os
 import re
+import tempfile
 
 from log import log_error
 
@@ -37,12 +39,29 @@ def load_seen_videos(file_path):
 
 
 def save_seen_videos(file_path, seen):
-    """Persist the per-channel last-seen video IDs."""
+    """
+    Persist the per-channel last-seen video IDs atomically.
+
+    Writes to a temp file in the same directory and os.replace()s it into place,
+    so a crash mid-write can't leave a truncated/corrupt dedup file (which would
+    reset state and cause already-sent summaries to be re-sent).
+    """
+    tmp = None
     try:
-        with open(file_path, "w") as f:
+        directory = os.path.dirname(os.path.abspath(file_path)) or "."
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".seen_", suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
             json.dump(seen, f, indent=2, sort_keys=True)
+        os.replace(tmp, file_path)
+        tmp = None  # replaced successfully; nothing to clean up
     except OSError as e:
         log_error(f"Could not write seen-videos file {file_path}: {e}")
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 # Function to save results to a JSON file

@@ -25,7 +25,14 @@ LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 LLM_MAX_TRANSCRIPT_CHARS = int(os.getenv("LLM_MAX_TRANSCRIPT_CHARS", "48000"))
 LLM_MAX_RETRIES = 3
 LLM_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
-TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+# Honor a server's Retry-After on 429, but cap it so a huge value can't stall
+# the daily run past its workflow timeout.
+LLM_RETRY_AFTER_CAP = 30
+TRANSIENT_STATUS = {500, 502, 503, 504}  # 429 is handled separately (quota/rate limit)
+
+# Providers found to be quota/rate-limited during this run. Once a provider 429s
+# persistently, later channels skip it instead of re-hitting the dead endpoint.
+_EXHAUSTED_PROVIDERS = set()
 
 # Marker appended when a transcript is truncated, so the model (and a curious
 # human reading the raw input) knows the text was cut short.
@@ -36,6 +43,11 @@ TRANSCRIPT_TRUNCATION_MARKER = "\n\n...[transcript truncated]"
 # caller sends its dedicated no-output notice) rather than forwarding a refusal
 # sentence to Telegram as if it were a real summary.
 INSUFFICIENT_TRANSCRIPT_SENTINEL = "INSUFFICIENT_TRANSCRIPT"
+
+# Sentinel returned when every available provider is quota/rate-limited. The
+# caller treats this as a retryable "deferred" outcome (don't mark the video as
+# seen) rather than a permanent failure, so it's retried on the next run.
+QUOTA_EXHAUSTED_SENTINEL = "QUOTA_EXHAUSTED"
 
 # The summary is read by someone who has NOT watched the video and is delivered
 # as a plain-text Telegram message (the sender HTML-escapes it, so markdown like
@@ -140,10 +152,27 @@ def _build_user_message(transcript, title=None):
     return SUMMARY_USER_TEMPLATE.format(title_line=title_line, transcript=transcript)
 
 
+def _parse_retry_after(resp):
+    """
+    Return the Retry-After header value in seconds (capped), or None if absent
+    or unparseable. Only the delta-seconds form is honored; HTTP-date values
+    fall back to None (and thus to our normal backoff).
+    """
+    value = resp.headers.get("Retry-After") if hasattr(resp, "headers") else None
+    if not value:
+        return None
+    try:
+        secs = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(secs, LLM_RETRY_AFTER_CAP))
+
+
 def _call_provider(provider, transcript, title=None):
     """
     Call one provider's chat-completions endpoint with retry on transient errors.
-    Returns the summary text, or "" on failure.
+    Returns the summary text, "" on failure, or QUOTA_EXHAUSTED_SENTINEL when the
+    provider is persistently rate-limited / out of quota (HTTP 429).
     """
     url = f"{provider['base_url']}/chat/completions"
     headers = {
@@ -180,6 +209,22 @@ def _call_provider(provider, transcript, title=None):
             if not summary:
                 log_warn(f"{provider['name']} returned an empty summary.")
             return summary
+
+        # 429 = rate limit / quota. Honor Retry-After while retrying; if it
+        # persists, signal quota exhaustion so the caller can defer (and so we
+        # stop hammering this provider for the rest of the run).
+        if resp.status_code == 429:
+            if attempt < LLM_MAX_RETRIES:
+                retry_after = _parse_retry_after(resp)
+                wait = retry_after if retry_after is not None else LLM_RETRY_BACKOFF * attempt
+                log_warn(
+                    f"{provider['name']} rate-limited (429); retrying in {wait}s "
+                    f"(attempt {attempt}/{LLM_MAX_RETRIES})."
+                )
+                time.sleep(wait)
+                continue
+            log_warn(f"{provider['name']} rate-limited (429) after retries; treating as quota exhausted.")
+            return QUOTA_EXHAUSTED_SENTINEL
 
         if resp.status_code in TRANSIENT_STATUS and attempt < LLM_MAX_RETRIES:
             log_warn(
@@ -223,9 +268,23 @@ def summarize_transcript(transcript, title=None):
         )
         return ""
 
+    quota_hit = False
     for provider in providers:
+        # Skip providers already known to be quota-exhausted earlier this run.
+        if provider["name"] in _EXHAUSTED_PROVIDERS:
+            log_info(f"Skipping {provider['name']} (quota exhausted earlier this run).")
+            quota_hit = True
+            continue
+
         log_info(f"Summarizing via {provider['name']} ({provider['model']})...")
         summary = _call_provider(provider, transcript, title)
+
+        if summary == QUOTA_EXHAUSTED_SENTINEL:
+            log_warn(f"{provider['name']} quota/rate limit hit; skipping it for the rest of the run.")
+            _EXHAUSTED_PROVIDERS.add(provider["name"])
+            quota_hit = True
+            continue
+
         if summary:
             # The model signalled the transcript was unsummarizable. Return the
             # sentinel (not the bare refusal text) so the caller can send an
@@ -241,6 +300,12 @@ def summarize_transcript(transcript, title=None):
             log_info(f"Summary generated via {provider['name']}.")
             return summary
         log_warn(f"{provider['name']} did not produce a summary; trying next provider.")
+
+    # No provider produced a summary. Distinguish "everything is rate-limited"
+    # (retryable — defer) from genuine failure, so the caller can notify accurately.
+    if quota_hit:
+        log_warn("All available LLM providers are quota/rate-limited; deferring summary.")
+        return QUOTA_EXHAUSTED_SENTINEL
 
     log_warn("All configured LLM providers failed to produce a summary.")
     return ""
