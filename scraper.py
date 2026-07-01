@@ -5,7 +5,7 @@ import time
 from dotenv import load_dotenv
 from defusedxml import ElementTree as SafeET
 from transcript import get_transcript_from_video
-from helpers import read_channels, save_to_json, clean_summary, load_state, save_state
+from helpers import read_channels, save_to_json, clean_summary, load_state, save_state, env_int
 from summarizer import (
     summarize_transcript,
     INSUFFICIENT_TRANSCRIPT_SENTINEL,
@@ -41,10 +41,10 @@ STATE_FILE = "seen_videos.json"
 
 # Cap on videos processed per channel per run, so a backlog (or a channel that
 # uploads a lot) can't flood Telegram in one run. The rest wait for the next run.
-MAX_VIDEOS_PER_RUN = int(os.getenv("MAX_VIDEOS_PER_RUN", "3"))
+MAX_VIDEOS_PER_RUN = env_int("MAX_VIDEOS_PER_RUN", 3)
 # Captions (especially auto-generated ones) often appear hours after upload, so
 # a video with no transcript is retried this many runs before giving up.
-NO_TRANSCRIPT_MAX_ATTEMPTS = int(os.getenv("NO_TRANSCRIPT_MAX_ATTEMPTS", "3"))
+NO_TRANSCRIPT_MAX_ATTEMPTS = env_int("NO_TRANSCRIPT_MAX_ATTEMPTS", 3)
 
 
 def _env_flag(name):

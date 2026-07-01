@@ -2,6 +2,7 @@ import os
 import time
 
 import requests
+from helpers import env_int, env_float
 from log import log_info, log_warn, log_error
 
 # Provider-agnostic summarization.
@@ -17,12 +18,12 @@ from log import log_info, log_warn, log_error
 #   Gemini (free tier):         GEMINI_API_KEY            [+ GEMINI_MODEL]
 #   Groq   (free tier):         GROQ_API_KEY              [+ GROQ_MODEL]
 
-LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "60"))
-LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1500"))
-LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
+LLM_TIMEOUT = env_int("LLM_TIMEOUT", 60)
+LLM_MAX_TOKENS = env_int("LLM_MAX_TOKENS", 1500)
+LLM_TEMPERATURE = env_float("LLM_TEMPERATURE", 0.3)
 # Cap the transcript length sent to the model, to avoid blowing past context
 # windows and to keep token cost predictable. Overridable via env.
-LLM_MAX_TRANSCRIPT_CHARS = int(os.getenv("LLM_MAX_TRANSCRIPT_CHARS", "48000"))
+LLM_MAX_TRANSCRIPT_CHARS = env_int("LLM_MAX_TRANSCRIPT_CHARS", 48000)
 LLM_MAX_RETRIES = 3
 LLM_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
 # Honor a server's Retry-After on 429, but cap it so a huge value can't stall
