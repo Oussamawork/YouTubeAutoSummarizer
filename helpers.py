@@ -5,21 +5,46 @@ import tempfile
 
 from log import log_error
 
-# Function to read channel IDs from a file
-def read_channel_ids(file_path):
+# Function to read channel entries from a file
+def read_channels(file_path):
     """
-    Read channel IDs, one per line. Blank lines and lines starting with '#'
+    Read channel entries, one per line: a channel ID optionally followed by
+    whitespace-separated options. Blank lines and lines starting with '#'
     (comments) are ignored. Returns [] if the file is missing.
+
+    Supported options:
+      digest — bundle this channel's new videos into one compact TL;DR digest
+               message per run instead of one full summary per video (for
+               prolific channels that would otherwise flood the chat).
+      max=N  — per-run video cap for this channel (overrides the global default).
+
+    Unknown or malformed options are logged and ignored, so a typo can't make
+    the whole channel list unreadable.
+
+    Returns a list of {"channel_id", "digest", "max_per_run"} dicts.
     """
     try:
         with open(file_path, "r") as file:
-            ids = []
+            channels = []
             for line in file:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                ids.append(line)
-            return ids
+                tokens = line.split()
+                entry = {"channel_id": tokens[0], "digest": False, "max_per_run": None}
+                for token in tokens[1:]:
+                    option = token.lower()
+                    if option == "digest":
+                        entry["digest"] = True
+                    elif option.startswith("max="):
+                        try:
+                            entry["max_per_run"] = max(1, int(option[4:]))
+                        except ValueError:
+                            log_error(f"Ignoring malformed channel option '{token}' for {tokens[0]}")
+                    else:
+                        log_error(f"Ignoring unknown channel option '{token}' for {tokens[0]}")
+                channels.append(entry)
+            return channels
     except FileNotFoundError:
         log_error(f"Channel IDs file not found: {file_path}")
         return []

@@ -1,4 +1,9 @@
+# One channel per line: <channel_id> [options]
+# Options:
+#   digest — bundle this channel's new videos into ONE compact TL;DR message
+#            per run (for prolific channels, so the chat isn't flooded)
+#   max=N  — per-run video cap for this channel (default: MAX_VIDEOS_PER_RUN)
 UCrGLm-Drgv0vbbemwwHeXJw
-UCngIhBkikUe6e7tZTjpKK7Q
+UCngIhBkikUe6e7tZTjpKK7Q digest
 UCwKB_00dPL3x5XmHF9IJCrg
 UCfCT7SSFEWyG4th9ZmaGYqQ

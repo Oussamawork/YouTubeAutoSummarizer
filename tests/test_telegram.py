@@ -78,6 +78,13 @@ def test_plain_digest_does_not_escape():
     assert "&amp;" not in msg
 
 
+def test_digest_custom_title_escaped():
+    # Per-channel digests use "New from <channel>" as the header.
+    msg = tg._build_html_digest(DIGEST_ENTRIES, title="New from A&B")
+    assert "<b>New from A&amp;B</b>" in msg
+    assert "Daily digest" not in msg
+
+
 def test_send_digest_falls_back_to_plain(monkeypatch):
     sent = []
 

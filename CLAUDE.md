@@ -12,8 +12,8 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `transcript.py` — transcript fetch (Supadata → youtube-transcript-api fallback).
 - `summarizer.py` — provider-agnostic LLM summarization (OpenAI-compatible API).
 - `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback); digest builder.
-- `helpers.py` — channel-id file reading, dedup state (v2 schema + v1 migration),
-  summary cleaning.
+- `helpers.py` — channel file parsing (`<id> [digest] [max=N]` per line), dedup
+  state (v2 schema + v1 migration), summary cleaning.
 - `log.py` — colored logging helpers.
 
 ## Dedup state model

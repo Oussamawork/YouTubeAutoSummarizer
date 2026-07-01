@@ -68,7 +68,7 @@ def _one_provider():
 
 def test_summarize_returns_summary(monkeypatch):
     monkeypatch.setattr(summarizer, "_provider_configs", _one_provider)
-    monkeypatch.setattr(summarizer, "_call_provider", lambda p, t, title=None: "SUMMARY")
+    monkeypatch.setattr(summarizer, "_call_provider", lambda p, t, title=None, **kw: "SUMMARY")
     assert summarizer.summarize_transcript("text", "title") == "SUMMARY"
 
 
@@ -77,7 +77,7 @@ def test_summarize_routes_sentinel(monkeypatch):
     monkeypatch.setattr(
         summarizer,
         "_call_provider",
-        lambda p, t, title=None: summarizer.INSUFFICIENT_TRANSCRIPT_SENTINEL,
+        lambda p, t, title=None, **kw: summarizer.INSUFFICIENT_TRANSCRIPT_SENTINEL,
     )
     assert (
         summarizer.summarize_transcript("text")
@@ -97,7 +97,7 @@ def test_summarize_falls_through_on_empty(monkeypatch):
     )
     calls = {"n": 0}
 
-    def fake_call(p, t, title=None):
+    def fake_call(p, t, title=None, **kw):
         calls["n"] += 1
         return "" if calls["n"] == 1 else "SECOND"
 
@@ -116,10 +116,32 @@ def test_parse_retry_after():
     )
 
 
+def test_summarize_compact_uses_compact_prompt(monkeypatch):
+    monkeypatch.setattr(summarizer, "_provider_configs", _one_provider)
+    captured = {}
+
+    def fake_call(p, t, title=None, system_prompt=None):
+        captured["prompt"] = system_prompt
+        return "S"
+
+    monkeypatch.setattr(summarizer, "_call_provider", fake_call)
+    assert summarizer.summarize_transcript("text", compact=True) == "S"
+    assert captured["prompt"] == summarizer.COMPACT_SUMMARY_SYSTEM_PROMPT
+    assert summarizer.summarize_transcript("text") == "S"
+    assert captured["prompt"] == summarizer.SUMMARY_SYSTEM_PROMPT
+
+
+def test_compact_prompt_keeps_sentinel_and_plaintext_rules():
+    # The compact variant must keep the sentinel contract and plain-text rule,
+    # or digest-channel refusals would be forwarded to Telegram as summaries.
+    assert summarizer.INSUFFICIENT_TRANSCRIPT_SENTINEL in summarizer.COMPACT_SUMMARY_SYSTEM_PROMPT
+    assert "plain text only" in summarizer.COMPACT_SUMMARY_SYSTEM_PROMPT
+
+
 def test_summarize_quota_exhausted_routes_and_marks(monkeypatch):
     monkeypatch.setattr(summarizer, "_provider_configs", _one_provider)
     monkeypatch.setattr(
-        summarizer, "_call_provider", lambda p, t, title=None: summarizer.QUOTA_EXHAUSTED_SENTINEL
+        summarizer, "_call_provider", lambda p, t, title=None, **kw: summarizer.QUOTA_EXHAUSTED_SENTINEL
     )
     assert summarizer.summarize_transcript("text") == summarizer.QUOTA_EXHAUSTED_SENTINEL
     assert "x" in summarizer._EXHAUSTED_PROVIDERS  # marked for the rest of the run
@@ -130,7 +152,7 @@ def test_summarize_skips_already_exhausted_provider(monkeypatch):
     monkeypatch.setattr(summarizer, "_provider_configs", _one_provider)
     calls = {"n": 0}
 
-    def fake_call(p, t, title=None):
+    def fake_call(p, t, title=None, **kw):
         calls["n"] += 1
         return "SUMMARY"
 
@@ -150,7 +172,7 @@ def test_summarize_quota_then_success(monkeypatch):
         ],
     )
 
-    def fake_call(p, t, title=None):
+    def fake_call(p, t, title=None, **kw):
         return summarizer.QUOTA_EXHAUSTED_SENTINEL if p["name"] == "a" else "OK"
 
     monkeypatch.setattr(summarizer, "_call_provider", fake_call)

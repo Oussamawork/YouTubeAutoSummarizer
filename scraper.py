@@ -5,7 +5,7 @@ import time
 from dotenv import load_dotenv
 from defusedxml import ElementTree as SafeET
 from transcript import get_transcript_from_video
-from helpers import read_channel_ids, save_to_json, clean_summary, load_state, save_state
+from helpers import read_channels, save_to_json, clean_summary, load_state, save_state
 from summarizer import (
     summarize_transcript,
     INSUFFICIENT_TRANSCRIPT_SENTINEL,
@@ -275,9 +275,10 @@ def get_latest_video(YOUTUBE_api_key, channel_id):
         return None
 
 
-def _summarize_video(video_details, no_transcript_attempts=0):
+def _summarize_video(video_details, no_transcript_attempts=0, compact=False):
     """
-    Fetch and summarize one video's transcript.
+    Fetch and summarize one video's transcript. `compact` requests a short
+    TL;DR-style summary (for digest-mode channels) instead of a full one.
 
     Returns (telegram_body, outcome, decided):
       telegram_body — text to deliver, or None when nothing should be sent yet
@@ -313,7 +314,7 @@ def _summarize_video(video_details, no_transcript_attempts=0):
 
     video_details['transcript'] = transcript
     log_info("Transcript fetched successfully. Summarizing...")
-    raw_summary = summarize_transcript(transcript_text, video_details['video_title'])
+    raw_summary = summarize_transcript(transcript_text, video_details['video_title'], compact=compact)
 
     if raw_summary == INSUFFICIENT_TRANSCRIPT_SENTINEL:
         # A transcript existed but was too garbled/incomplete for the model to
@@ -382,9 +383,9 @@ def main():
                 "where YouTube blocks the runner IP."
             )
 
-        # Read channel IDs from the file
-        channel_ids = read_channel_ids("channel_ids.txt")
-        if not channel_ids:
+        # Read channel entries (id + per-channel options) from the file
+        channels = read_channels("channel_ids.txt")
+        if not channels:
             log_warn("No channel IDs found. Check your channel_ids.txt file.")
         else:
             log_info(f"Beginning process to fetch video details for each channel.")
@@ -405,7 +406,8 @@ def main():
                 "no_video": 0, "error": 0,
             }
 
-            for channel_id in channel_ids:
+            for channel in channels:
+                channel_id = channel["channel_id"]
                 # Isolate each channel: one malformed response or unexpected error
                 # must not abort the whole run and skip every remaining channel.
                 try:
@@ -416,11 +418,19 @@ def main():
                         outcomes["no_video"] += 1
                         continue
 
-                    candidates = _select_candidates(videos, channels_state.get(channel_id), pending)
+                    candidates = _select_candidates(
+                        videos, channels_state.get(channel_id), pending,
+                        limit=channel["max_per_run"],
+                    )
                     if not candidates:
                         log_info(f"No new videos for channel {channel_id}. Skipping.")
                         outcomes["unchanged"] += 1
                         continue
+
+                    # Digest-flagged channels (prolific posters) get one bundled
+                    # message per run with compact TL;DR entries, instead of one
+                    # full-summary message per video.
+                    channel_entries = []
 
                     for video_details in candidates:
                         video_id = video_details["video_id"]
@@ -430,7 +440,9 @@ def main():
                             f"(published: {video_details['published_at']})"
                         )
 
-                        telegram_body, outcome, decided = _summarize_video(video_details, attempts)
+                        telegram_body, outcome, decided = _summarize_video(
+                            video_details, attempts, compact=channel["digest"]
+                        )
                         outcomes[outcome] += 1
 
                         # One quota notice per run is enough; later deferrals are logged only.
@@ -438,14 +450,17 @@ def main():
                             telegram_body = None
 
                         if telegram_body is not None:
+                            entry = {
+                                "channel_name": video_details['channel_name'],
+                                "video_title": video_details['video_title'],
+                                "video_url": video_details['video_url'],
+                                "published_at": video_details['published_at'],
+                                "body": telegram_body,
+                            }
                             if digest_mode:
-                                digest_entries.append({
-                                    "channel_name": video_details['channel_name'],
-                                    "video_title": video_details['video_title'],
-                                    "video_url": video_details['video_url'],
-                                    "published_at": video_details['published_at'],
-                                    "body": telegram_body,
-                                })
+                                digest_entries.append(entry)
+                            elif channel["digest"]:
+                                channel_entries.append(entry)
                             else:
                                 send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], telegram_body)
 
@@ -465,6 +480,16 @@ def main():
                         # Persist immediately, so a later crash doesn't cause
                         # already-sent videos to be re-sent.
                         save_state(STATE_FILE, state)
+
+                    if channel_entries:
+                        if len(channel_entries) == 1:
+                            entry = channel_entries[0]
+                            send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, entry['channel_name'], entry['video_title'], entry['video_url'], entry['published_at'], entry['body'])
+                        else:
+                            send_telegram_digest(
+                                TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, channel_entries,
+                                title=f"New from {channel_entries[0]['channel_name']}",
+                            )
                 except Exception as e:
                     # Don't let one channel's failure sink the rest of the batch.
                     log_error(f"Unexpected error processing channel {channel_id}: {e}")
@@ -480,7 +505,7 @@ def main():
 
             # End-of-run report: one line summarizing what happened this run.
             summary_line = ", ".join(f"{k}={v}" for k, v in outcomes.items() if v)
-            log_info(f"Run summary: {len(channel_ids)} channels | {summary_line or 'nothing to do'}")
+            log_info(f"Run summary: {len(channels)} channels | {summary_line or 'nothing to do'}")
 
             # Save the results to a JSON file
             if results:

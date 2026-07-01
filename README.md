@@ -61,13 +61,18 @@ pip install -r requirements.txt
    ```
 
 ### 4. Format of `channel_ids.txt`:
-   The `channel_ids.txt` file should contain one YouTube channel ID per line. For example:
+   One YouTube channel ID per line, optionally followed by per-channel options. Blank lines and `#` comments are ignored. For example:
 
    ```txt
    UC_x5XG1OV2P6uZZ5FSM9Ttw
-   UCBR8-60-B28hp2BmDPdntcQ
-   UC123456789
+   UCBR8-60-B28hp2BmDPdntcQ digest
+   UC123456789 digest max=5
    ```
+
+   | Option | Effect |
+   | --- | --- |
+   | `digest` | For prolific channels: instead of one full-summary message per video, bundle the channel's new videos into **one compact TL;DR digest message per run** (short TL;DR + up to 3 bullets each), so the chat isn't flooded. |
+   | `max=N` | Per-run video cap for this channel (overrides `MAX_VIDEOS_PER_RUN`). |
 
 ## Usage
 

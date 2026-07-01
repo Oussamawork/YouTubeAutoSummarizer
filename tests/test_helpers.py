@@ -71,3 +71,34 @@ def test_load_state_tolerates_wrong_shapes(tmp_path):
     p = tmp_path / "seen.json"
     p.write_text('{"channels": [1, 2], "pending": "nope"}')
     assert helpers.load_state(str(p)) == {"channels": {}, "pending": {}}
+
+
+def test_read_channels_plain_and_options(tmp_path):
+    p = tmp_path / "channels.txt"
+    p.write_text(
+        "# comment\n"
+        "\n"
+        "UCplain\n"
+        "UCdigest digest\n"
+        "UCcapped max=5\n"
+        "UCboth digest max=2\n"
+    )
+    assert helpers.read_channels(str(p)) == [
+        {"channel_id": "UCplain", "digest": False, "max_per_run": None},
+        {"channel_id": "UCdigest", "digest": True, "max_per_run": None},
+        {"channel_id": "UCcapped", "digest": False, "max_per_run": 5},
+        {"channel_id": "UCboth", "digest": True, "max_per_run": 2},
+    ]
+
+
+def test_read_channels_ignores_bad_options(tmp_path):
+    # A typo in an option must not lose the channel itself.
+    p = tmp_path / "channels.txt"
+    p.write_text("UCx digset max=oops\n")
+    assert helpers.read_channels(str(p)) == [
+        {"channel_id": "UCx", "digest": False, "max_per_run": None}
+    ]
+
+
+def test_read_channels_missing_file():
+    assert helpers.read_channels("does-not-exist.txt") == []

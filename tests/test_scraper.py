@@ -239,15 +239,31 @@ def test_summarize_video_gives_up_after_max_attempts(monkeypatch):
 
 def test_summarize_video_quota_deferral_not_decided(monkeypatch):
     monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "words"})
-    monkeypatch.setattr(scraper, "summarize_transcript", lambda t, title: scraper.QUOTA_EXHAUSTED_SENTINEL)
+    monkeypatch.setattr(scraper, "summarize_transcript", lambda t, title, **kw: scraper.QUOTA_EXHAUSTED_SENTINEL)
     body, outcome, decided = scraper._summarize_video(_vid("v1", ""))
     assert outcome == "quota_deferred"
     assert decided is False
 
 
+def test_summarize_video_compact_flag_passthrough(monkeypatch):
+    # Digest-mode channels must get compact TL;DR summaries.
+    captured = {}
+
+    def fake_summarize(t, title=None, compact=False):
+        captured["compact"] = compact
+        return "TLDR"
+
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "words"})
+    monkeypatch.setattr(scraper, "summarize_transcript", fake_summarize)
+    scraper._summarize_video(_vid("v1", ""), compact=True)
+    assert captured["compact"] is True
+    scraper._summarize_video(_vid("v1", ""))
+    assert captured["compact"] is False
+
+
 def test_summarize_video_success(monkeypatch):
     monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "words"})
-    monkeypatch.setattr(scraper, "summarize_transcript", lambda t, title: "TLDR\n\n• point")
+    monkeypatch.setattr(scraper, "summarize_transcript", lambda t, title, **kw: "TLDR\n\n• point")
     details = _vid("v1", "")
     body, outcome, decided = scraper._summarize_video(details)
     assert body == "TLDR\n\n• point"
