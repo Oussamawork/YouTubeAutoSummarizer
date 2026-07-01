@@ -46,6 +46,71 @@ def test_split_never_cuts_inside_entity():
     assert all(_no_dangling_entity(c) for c in chunks)
 
 
+DIGEST_ENTRIES = [
+    {
+        "channel_name": "A&B",
+        "video_title": "Title <one>",
+        "video_url": "http://u?a=1&b=2",
+        "published_at": "2026-06-01",
+        "body": "sum & <stuff>",
+    },
+    {
+        "channel_name": "Chan2",
+        "video_title": "Title two",
+        "video_url": "http://u2",
+        "published_at": "2026-06-02",
+        "body": "second summary",
+    },
+]
+
+
+def test_html_digest_escapes_and_sections():
+    msg = tg._build_html_digest(DIGEST_ENTRIES)
+    assert "2 new videos" in msg
+    assert msg.count(tg.DIGEST_DIVIDER) == 2  # header + 2 sections
+    assert "&amp;" in msg and "&lt;one&gt;" in msg
+    assert "<b>A&amp;B</b>" in msg  # our own markup preserved, fields escaped
+
+
+def test_plain_digest_does_not_escape():
+    msg = tg._build_plain_digest(DIGEST_ENTRIES)
+    assert "A&B" in msg
+    assert "&amp;" not in msg
+
+
+def test_digest_custom_title_escaped():
+    # Per-channel digests use "New from <channel>" as the header.
+    msg = tg._build_html_digest(DIGEST_ENTRIES, title="New from A&B")
+    assert "<b>New from A&amp;B</b>" in msg
+    assert "Daily digest" not in msg
+
+
+def test_send_digest_falls_back_to_plain(monkeypatch):
+    sent = []
+
+    def fake_post(url, data=None, timeout=None):
+        sent.append(data)
+
+        class R:
+            # Reject the HTML attempt, accept the plain one.
+            status_code = 400 if data.get("parse_mode") else 200
+            text = "bad entities"
+        return R()
+
+    monkeypatch.setattr(tg.requests, "post", fake_post)
+    assert tg.send_telegram_digest("tok", "chat", DIGEST_ENTRIES) is True
+    assert sent[0].get("parse_mode") == "HTML"
+    assert "parse_mode" not in sent[-1]
+
+
+def test_send_digest_empty_is_noop(monkeypatch):
+    monkeypatch.setattr(
+        tg.requests, "post",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not post")),
+    )
+    assert tg.send_telegram_digest("tok", "chat", []) is True
+
+
 def test_post_splits_long_message(monkeypatch):
     sent = []
 

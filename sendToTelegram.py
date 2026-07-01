@@ -89,6 +89,62 @@ def _post(bot_token, chat_id, text, parse_mode=None):
     return True
 
 
+# Separator between per-video sections in a digest. Newline-heavy on purpose:
+# the splitter cuts on newlines, so a digest too long for one message always
+# splits cleanly between sections or lines, never inside an HTML tag.
+DIGEST_DIVIDER = "\n\n— — — — —\n\n"
+
+
+def _build_html_digest(entries, title="Daily digest"):
+    """One HTML message covering every new video from a run (digest mode)."""
+    e = html.escape
+    parts = [f"🗞️ <b>{e(title)}</b> — {len(entries)} new videos"]
+    for entry in entries:
+        parts.append(
+            f"🎥 <b>{e(entry['channel_name'])}</b>\n"
+            f"📌 {e(entry['video_title'])}\n"
+            f'🔗 <a href="{e(entry["video_url"])}">Watch on YouTube</a> · 📅 {e(entry["published_at"])}\n\n'
+            f"{e(entry['body'])}"
+        )
+    return DIGEST_DIVIDER.join(parts)
+
+
+def _build_plain_digest(entries, title="Daily digest"):
+    """Plain-text digest fallback — no parse mode, so it can never fail to parse."""
+    parts = [f"🗞️ {title} — {len(entries)} new videos"]
+    for entry in entries:
+        parts.append(
+            f"🎥 {entry['channel_name']}\n"
+            f"📌 {entry['video_title']}\n"
+            f"🔗 {entry['video_url']} · 📅 {entry['published_at']}\n\n"
+            f"{entry['body']}"
+        )
+    return DIGEST_DIVIDER.join(parts)
+
+
+def send_telegram_digest(bot_token, chat_id, entries, title="Daily digest"):
+    """
+    Send one combined message for several videos (digest mode). Each entry is a
+    dict with channel_name, video_title, video_url, published_at and body keys;
+    `title` heads the message (e.g. "Daily digest", "New from <channel>").
+    Tries HTML first, then plain text, like send_telegram_message; anything over
+    the 4096-char limit is split across messages by _post.
+    """
+    if not entries:
+        return True
+    if _post(bot_token, chat_id, _build_html_digest(entries, title), parse_mode="HTML"):
+        log_info(f"Digest with {len(entries)} entries sent to Telegram.")
+        return True
+
+    log_warn("HTML digest send failed; retrying as plain text.")
+    if _post(bot_token, chat_id, _build_plain_digest(entries, title)):
+        log_info("Digest sent to Telegram as plain text (fallback).")
+        return True
+
+    log_error("Failed to send Telegram digest (HTML and plain text both failed).")
+    return False
+
+
 def send_telegram_message(bot_token, chat_id, channel_name, video_title, video_url, published_at, summary):
     """
     Send a formatted message to a Telegram channel.

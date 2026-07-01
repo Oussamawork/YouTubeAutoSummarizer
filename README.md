@@ -5,12 +5,15 @@
 This Python script fetches the latest video from a YouTube channel using the YouTube Data API v3, extracts the transcript, summarizes the content using advanced natural language processing (NLP) techniques, and optionally sends the summarized content to a Telegram channel.
 
 ## Features
-- Fetches the latest video from any YouTube channel.
+- Fetches each channel's recent videos from its **public RSS feed** (no API quota; catches channels that upload more than once a day), with the YouTube Data API as fallback.
+- **Deduplicates** across runs: only videos newer than the per-channel watermark are processed, capped per run so a backlog can't flood Telegram.
+- **Retries videos whose captions aren't up yet** — auto-generated captions often appear hours after upload, so "no transcript" videos are silently retried for a few runs before a notice is sent.
 - Displays the **channel name**, **video title**, **video URL**, and **publication date**.
 - Extracts the **transcript** of the video (via Supadata or `youtube-transcript-api`).
 - Summarizes the transcript with an **LLM via the OpenAI-compatible Chat Completions API** — provider-agnostic (Gemini, Groq, OpenRouter, OpenAI, local servers, …), configured by environment variables. The prompt grounds the model on the video title, translates to English when needed, and guards against over-long transcripts.
 - Generates a one-line **TL;DR plus bullet-point key takeaways**, in English regardless of the source language.
-- Supports sending the summarized content to a specified **Telegram channel**.
+- Supports sending the summarized content to a specified **Telegram channel** — one message per video, or one combined **daily digest** (`DAILY_DIGEST=true`).
+- **On-demand mode**: `python scraper.py --video-url <url>` (or the workflow's `video_url` dispatch input) summarizes any single video immediately, bypassing the channel scan and dedup.
 - Uses environment variables to securely store API keys and tokens.
 
 ## Requirements
@@ -58,23 +61,48 @@ pip install -r requirements.txt
    ```
 
 ### 4. Format of `channel_ids.txt`:
-   The `channel_ids.txt` file should contain one YouTube channel ID per line. For example:
+   One YouTube channel ID per line, optionally followed by per-channel options. Blank lines and `#` comments are ignored. For example:
 
    ```txt
    UC_x5XG1OV2P6uZZ5FSM9Ttw
-   UCBR8-60-B28hp2BmDPdntcQ
-   UC123456789
+   UCBR8-60-B28hp2BmDPdntcQ digest
+   UC123456789 digest max=5
    ```
+
+   | Option | Effect |
+   | --- | --- |
+   | `digest` | For prolific channels: instead of one full-summary message per video, bundle the channel's new videos into **one compact TL;DR digest message per run** (short TL;DR + up to 3 bullets each), so the chat isn't flooded. |
+   | `max=N` | Per-run video cap for this channel (overrides `MAX_VIDEOS_PER_RUN`). |
 
 ## Usage
 
 ### Fetching and Summarizing Videos:
 1. Add YouTube channel IDs to `channel_ids.txt` (one per line).
-2. Run the script to fetch the latest video, extract the transcript, clean it, summarize it, and optionally send the summary to Telegram:
+2. Run the script to fetch each channel's new videos, extract the transcripts, summarize them, and send the summaries to Telegram:
 
    ```bash
    python scraper.py
    ```
+
+### Summarizing a single video on demand:
+
+```bash
+python scraper.py --video-url "https://www.youtube.com/watch?v=example123"
+```
+
+This skips the channel scan and dedup state entirely — useful for any video, subscribed channel or not. On GitHub, run the *Daily YouTube Summary* workflow manually and fill in the `video_url` input.
+
+### Behavior tuning (all optional):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MAX_VIDEOS_PER_RUN` | `3` | Max videos processed per channel per run; older ones go first, the rest wait for the next run. |
+| `NO_TRANSCRIPT_MAX_ATTEMPTS` | `3` | Runs to retry a video whose captions aren't up yet before notifying and giving up. |
+| `DAILY_DIGEST` | off | `true` bundles all of a run's summaries into one combined Telegram message. |
+
+### Dedup state (`seen_videos.json`):
+
+The daily workflow commits this file back to the repo after each run. It stores a per-channel watermark (`last_video_id` + `last_published`) plus a `pending` map of videos deferred for retry (captions not up yet, LLM quota exhausted). Legacy flat `{channel_id: video_id}` files are migrated automatically.
 
 ### Example Output:
 The script outputs a JSON file containing details of the latest videos and their summaries. Additionally, it prints the following to the console:

@@ -82,6 +82,35 @@ SUMMARY_SYSTEM_PROMPT = (
     "like \"Here is the summary\"."
 )
 
+# Compact variant used for digest-mode channels: prolific channels get one
+# bundled message per run, so each entry must be skimmable — a short TL;DR and
+# at most a few bullets — instead of a full summary.
+COMPACT_SUMMARY_SYSTEM_PROMPT = (
+    "You are an expert summarizer of YouTube video transcripts, producing "
+    "COMPACT digest entries. The reader has NOT watched the video and skims "
+    "several of these entries in one message, so be brief.\n"
+    "\n"
+    "Output format (plain text only — no markdown, no headers, no bold):\n"
+    "1. First line: a one-to-two-sentence TL;DR capturing what the video is "
+    "about and its main point or conclusion.\n"
+    "2. Optionally, up to 3 short bullets starting with \"• \" for genuinely "
+    "important specifics. Skip the bullets entirely for thin content.\n"
+    "\n"
+    "Content rules:\n"
+    "- Always write in English, even if the transcript is in another language.\n"
+    "- Be strictly faithful to the transcript. Never invent or guess facts, "
+    "names, numbers, dates, or conclusions that are not present.\n"
+    "- Auto-generated captions are often messy, informal, or missing "
+    "punctuation; that is normal — do your best to summarize them anyway.\n"
+    "- Only if the transcript is so garbled, fragmentary, or empty that NO "
+    "meaningful summary is possible, output exactly the single token "
+    "INSUFFICIENT_TRANSCRIPT and nothing else.\n"
+    "- Keep the whole entry under roughly 600 characters.\n"
+    "\n"
+    "Output only the summary itself — no preamble, no sign-off, and no phrases "
+    "like \"Here is the summary\"."
+)
+
 # User-message template. A title (when known) grounds the model on the video's
 # topic; the transcript follows. {title_line} is either an empty string or a
 # "Video title: ...\n\n" line.
@@ -168,7 +197,7 @@ def _parse_retry_after(resp):
     return max(0, min(secs, LLM_RETRY_AFTER_CAP))
 
 
-def _call_provider(provider, transcript, title=None):
+def _call_provider(provider, transcript, title=None, system_prompt=None):
     """
     Call one provider's chat-completions endpoint with retry on transient errors.
     Returns the summary text, "" on failure, or QUOTA_EXHAUSTED_SENTINEL when the
@@ -182,7 +211,7 @@ def _call_provider(provider, transcript, title=None):
     payload = {
         "model": provider["model"],
         "messages": [
-            {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt or SUMMARY_SYSTEM_PROMPT},
             {"role": "user", "content": _build_user_message(transcript, title)},
         ],
         "temperature": LLM_TEMPERATURE,
@@ -240,13 +269,15 @@ def _call_provider(provider, transcript, title=None):
     return ""
 
 
-def summarize_transcript(transcript, title=None):
+def summarize_transcript(transcript, title=None, compact=False):
     """
     Summarize a transcript using the first configured LLM provider that succeeds.
 
     Args:
         transcript: The transcript text to summarize.
         title: Optional video title used to ground the model on the topic.
+        compact: Produce a short digest entry (TL;DR + up to 3 bullets) instead
+            of a full summary — used for digest-mode channels.
 
     Returns the summary text, or "" if the transcript is empty, no provider is
     configured, or every provider fails. Returns INSUFFICIENT_TRANSCRIPT_SENTINEL
@@ -277,7 +308,8 @@ def summarize_transcript(transcript, title=None):
             continue
 
         log_info(f"Summarizing via {provider['name']} ({provider['model']})...")
-        summary = _call_provider(provider, transcript, title)
+        system_prompt = COMPACT_SUMMARY_SYSTEM_PROMPT if compact else SUMMARY_SYSTEM_PROMPT
+        summary = _call_provider(provider, transcript, title, system_prompt=system_prompt)
 
         if summary == QUOTA_EXHAUSTED_SENTINEL:
             log_warn(f"{provider['name']} quota/rate limit hit; skipping it for the rest of the run.")

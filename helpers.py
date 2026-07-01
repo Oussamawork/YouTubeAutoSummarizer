@@ -5,42 +5,99 @@ import tempfile
 
 from log import log_error
 
-# Function to read channel IDs from a file
-def read_channel_ids(file_path):
+# Function to read channel entries from a file
+def read_channels(file_path):
     """
-    Read channel IDs, one per line. Blank lines and lines starting with '#'
+    Read channel entries, one per line: a channel ID optionally followed by
+    whitespace-separated options. Blank lines and lines starting with '#'
     (comments) are ignored. Returns [] if the file is missing.
+
+    Supported options:
+      digest — bundle this channel's new videos into one compact TL;DR digest
+               message per run instead of one full summary per video (for
+               prolific channels that would otherwise flood the chat).
+      max=N  — per-run video cap for this channel (overrides the global default).
+
+    Unknown or malformed options are logged and ignored, so a typo can't make
+    the whole channel list unreadable.
+
+    Returns a list of {"channel_id", "digest", "max_per_run"} dicts.
     """
     try:
         with open(file_path, "r") as file:
-            ids = []
+            channels = []
             for line in file:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                ids.append(line)
-            return ids
+                tokens = line.split()
+                entry = {"channel_id": tokens[0], "digest": False, "max_per_run": None}
+                for token in tokens[1:]:
+                    option = token.lower()
+                    if option == "digest":
+                        entry["digest"] = True
+                    elif option.startswith("max="):
+                        try:
+                            entry["max_per_run"] = max(1, int(option[4:]))
+                        except ValueError:
+                            log_error(f"Ignoring malformed channel option '{token}' for {tokens[0]}")
+                    else:
+                        log_error(f"Ignoring unknown channel option '{token}' for {tokens[0]}")
+                channels.append(entry)
+            return channels
     except FileNotFoundError:
         log_error(f"Channel IDs file not found: {file_path}")
         return []
     
-# Dedup state: map of {channel_id: last_processed_video_id}
-def load_seen_videos(file_path):
-    """Load the per-channel last-seen video IDs. Returns {} if missing/invalid."""
+# Dedup state. Current (v2) schema:
+#   {
+#     "channels": {channel_id: {"last_video_id": str, "last_published": iso-str}},
+#     "pending":  {video_id: {"channel_id": str, "attempts": int}}
+#   }
+# "channels" holds the per-channel watermark (newest decided video); "pending"
+# holds videos deferred for retry (captions not up yet, LLM quota exhausted).
+# Legacy (v1) files were a flat {channel_id: last_video_id} map; load_state
+# migrates them transparently.
+
+def _empty_state():
+    return {"channels": {}, "pending": {}}
+
+
+def load_state(file_path):
+    """
+    Load the dedup state, migrating legacy formats in memory. Returns a fresh
+    empty state if the file is missing or unreadable; never raises.
+    """
     try:
         with open(file_path, "r") as f:
             data = json.load(f)
-            return data if isinstance(data, dict) else {}
     except FileNotFoundError:
-        return {}
+        return _empty_state()
     except (ValueError, OSError) as e:
-        log_error(f"Could not read seen-videos file {file_path}: {e}. Starting fresh.")
-        return {}
+        log_error(f"Could not read state file {file_path}: {e}. Starting fresh.")
+        return _empty_state()
+
+    if not isinstance(data, dict):
+        return _empty_state()
+
+    # v1: flat {channel_id: last_video_id}
+    if "channels" not in data and all(isinstance(v, str) for v in data.values()):
+        return {
+            "channels": {cid: {"last_video_id": vid} for cid, vid in data.items()},
+            "pending": {},
+        }
+
+    channels = data.get("channels")
+    pending = data.get("pending")
+    return {
+        "channels": channels if isinstance(channels, dict) else {},
+        "pending": pending if isinstance(pending, dict) else {},
+    }
 
 
-def save_seen_videos(file_path, seen):
+def save_state(file_path, seen):
     """
-    Persist the per-channel last-seen video IDs atomically.
+    Persist the dedup state atomically.
 
     Writes to a temp file in the same directory and os.replace()s it into place,
     so a crash mid-write can't leave a truncated/corrupt dedup file (which would
