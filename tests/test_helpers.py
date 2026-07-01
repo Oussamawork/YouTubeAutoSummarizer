@@ -30,11 +30,44 @@ def test_nbsp_replaced():
     assert helpers.clean_summary("a" + chr(0x00A0) + "b") == "a b"
 
 
-def test_seen_videos_roundtrip_atomic(tmp_path):
+def test_state_roundtrip_atomic(tmp_path):
     p = tmp_path / "seen.json"
-    data = {"UCabc": "vid1", "UCdef": "vid2"}
-    helpers.save_seen_videos(str(p), data)
-    assert helpers.load_seen_videos(str(p)) == data
+    state = {
+        "channels": {"UCabc": {"last_video_id": "vid1", "last_published": "2026-01-01T00:00:00+00:00"}},
+        "pending": {"vid2": {"channel_id": "UCdef", "attempts": 1}},
+    }
+    helpers.save_state(str(p), state)
+    assert helpers.load_state(str(p)) == state
     # The atomic write must not leave a temp file behind.
     leftovers = [f for f in os.listdir(tmp_path) if f.startswith(".seen_")]
     assert leftovers == []
+
+
+def test_load_state_missing_file(tmp_path):
+    assert helpers.load_state(str(tmp_path / "nope.json")) == {"channels": {}, "pending": {}}
+
+
+def test_load_state_corrupt_file(tmp_path):
+    p = tmp_path / "seen.json"
+    p.write_text("{not json")
+    assert helpers.load_state(str(p)) == {"channels": {}, "pending": {}}
+
+
+def test_load_state_migrates_v1(tmp_path):
+    # v1 files were a flat {channel_id: last_video_id} map.
+    p = tmp_path / "seen.json"
+    p.write_text('{"UCabc": "vid1", "UCdef": "vid2"}')
+    state = helpers.load_state(str(p))
+    assert state == {
+        "channels": {
+            "UCabc": {"last_video_id": "vid1"},
+            "UCdef": {"last_video_id": "vid2"},
+        },
+        "pending": {},
+    }
+
+
+def test_load_state_tolerates_wrong_shapes(tmp_path):
+    p = tmp_path / "seen.json"
+    p.write_text('{"channels": [1, 2], "pending": "nope"}')
+    assert helpers.load_state(str(p)) == {"channels": {}, "pending": {}}

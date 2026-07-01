@@ -1,16 +1,27 @@
 # Developer guide (for Claude Code and humans)
 
-YouTube auto-summarizer: fetches each channel's latest video, gets its transcript,
-summarizes it with an LLM, and posts the summary to Telegram. Runs daily via GitHub
-Actions (`.github/workflows/daily-summary.yml`).
+YouTube auto-summarizer: fetches each channel's new videos, gets their transcripts,
+summarizes them with an LLM, and posts the summaries to Telegram. Runs daily via
+GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
+(`.github/workflows/ci.yml`).
 
 ## Module map
-- `scraper.py` — entry point / orchestration; YouTube Data API; channel-entry resolution.
+- `scraper.py` — entry point / orchestration; RSS feed (primary) + YouTube Data API
+  (fallback); candidate selection against the dedup watermark; per-video outcomes
+  (send / defer / give up); digest mode; `--video-url` on-demand path.
 - `transcript.py` — transcript fetch (Supadata → youtube-transcript-api fallback).
 - `summarizer.py` — provider-agnostic LLM summarization (OpenAI-compatible API).
-- `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback).
-- `helpers.py` — channel-id file reading, dedup state, summary cleaning.
+- `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback); digest builder.
+- `helpers.py` — channel-id file reading, dedup state (v2 schema + v1 migration),
+  summary cleaning.
 - `log.py` — colored logging helpers.
+
+## Dedup state model
+`seen_videos.json`: `channels` maps channel-id → watermark (`last_video_id`,
+`last_published`); videos published after the watermark are candidates, oldest
+first, capped at `MAX_VIDEOS_PER_RUN`. `pending` maps video-id → retry record for
+deferred videos (captions not up yet → up to `NO_TRANSCRIPT_MAX_ATTEMPTS` runs;
+LLM quota exhausted). Deciding a video advances the watermark; deferring does not.
 
 ## Dev workflow
 ```bash

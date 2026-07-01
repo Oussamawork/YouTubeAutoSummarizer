@@ -24,23 +24,55 @@ def read_channel_ids(file_path):
         log_error(f"Channel IDs file not found: {file_path}")
         return []
     
-# Dedup state: map of {channel_id: last_processed_video_id}
-def load_seen_videos(file_path):
-    """Load the per-channel last-seen video IDs. Returns {} if missing/invalid."""
+# Dedup state. Current (v2) schema:
+#   {
+#     "channels": {channel_id: {"last_video_id": str, "last_published": iso-str}},
+#     "pending":  {video_id: {"channel_id": str, "attempts": int}}
+#   }
+# "channels" holds the per-channel watermark (newest decided video); "pending"
+# holds videos deferred for retry (captions not up yet, LLM quota exhausted).
+# Legacy (v1) files were a flat {channel_id: last_video_id} map; load_state
+# migrates them transparently.
+
+def _empty_state():
+    return {"channels": {}, "pending": {}}
+
+
+def load_state(file_path):
+    """
+    Load the dedup state, migrating legacy formats in memory. Returns a fresh
+    empty state if the file is missing or unreadable; never raises.
+    """
     try:
         with open(file_path, "r") as f:
             data = json.load(f)
-            return data if isinstance(data, dict) else {}
     except FileNotFoundError:
-        return {}
+        return _empty_state()
     except (ValueError, OSError) as e:
-        log_error(f"Could not read seen-videos file {file_path}: {e}. Starting fresh.")
-        return {}
+        log_error(f"Could not read state file {file_path}: {e}. Starting fresh.")
+        return _empty_state()
+
+    if not isinstance(data, dict):
+        return _empty_state()
+
+    # v1: flat {channel_id: last_video_id}
+    if "channels" not in data and all(isinstance(v, str) for v in data.values()):
+        return {
+            "channels": {cid: {"last_video_id": vid} for cid, vid in data.items()},
+            "pending": {},
+        }
+
+    channels = data.get("channels")
+    pending = data.get("pending")
+    return {
+        "channels": channels if isinstance(channels, dict) else {},
+        "pending": pending if isinstance(pending, dict) else {},
+    }
 
 
-def save_seen_videos(file_path, seen):
+def save_state(file_path, seen):
     """
-    Persist the per-channel last-seen video IDs atomically.
+    Persist the dedup state atomically.
 
     Writes to a temp file in the same directory and os.replace()s it into place,
     so a crash mid-write can't leave a truncated/corrupt dedup file (which would

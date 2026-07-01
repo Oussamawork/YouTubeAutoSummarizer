@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 22 * * *'  # Runs daily at 22:00 UTC
   workflow_dispatch:      # Allows manual triggering from GitHub UI
+    inputs:
+      video_url:
+        description: 'Optional: summarize this one video URL on demand (skips the channel scan and dedup)'
+        required: false
+        type: string
 
 # Write access is needed to commit the dedup state (seen_videos.json) back.
 permissions:
@@ -35,8 +40,14 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run scraper
-        run: python scraper.py
+        run: |
+          if [ -n "${VIDEO_URL}" ]; then
+            python scraper.py --video-url "${VIDEO_URL}"
+          else
+            python scraper.py
+          fi
         env:
+          VIDEO_URL: ${{ inputs.video_url }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
@@ -48,6 +59,11 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
+          # Optional behavior tuning (repo variables, all have defaults):
+          # DAILY_DIGEST=true bundles all of a run's summaries into one message;
+          # MAX_VIDEOS_PER_RUN caps videos processed per channel per run.
+          DAILY_DIGEST: ${{ vars.DAILY_DIGEST }}
+          MAX_VIDEOS_PER_RUN: ${{ vars.MAX_VIDEOS_PER_RUN }}
 
       - name: Persist dedup state
         if: always()  # commit progress even if the scraper step failed mid-run
