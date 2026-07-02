@@ -102,3 +102,25 @@ def test_read_channels_ignores_bad_options(tmp_path):
 
 def test_read_channels_missing_file():
     assert helpers.read_channels("does-not-exist.txt") == []
+
+
+def test_env_int_empty_string_falls_back(monkeypatch):
+    # An unconfigured GitHub Actions repo variable arrives as "" (not absent);
+    # this crashed the first live run of the new pipeline.
+    monkeypatch.setenv("X_TEST_INT", "")
+    assert helpers.env_int("X_TEST_INT", 3) == 3
+    monkeypatch.setenv("X_TEST_INT", "  ")
+    assert helpers.env_int("X_TEST_INT", 3) == 3
+    monkeypatch.setenv("X_TEST_INT", "garbage")
+    assert helpers.env_int("X_TEST_INT", 3) == 3
+    monkeypatch.setenv("X_TEST_INT", "7")
+    assert helpers.env_int("X_TEST_INT", 3) == 7
+    monkeypatch.delenv("X_TEST_INT")
+    assert helpers.env_int("X_TEST_INT", 3) == 3
+
+
+def test_env_float_empty_string_falls_back(monkeypatch):
+    monkeypatch.setenv("X_TEST_FLOAT", "")
+    assert helpers.env_float("X_TEST_FLOAT", 0.3) == 0.3
+    monkeypatch.setenv("X_TEST_FLOAT", "0.7")
+    assert helpers.env_float("X_TEST_FLOAT", 0.3) == 0.7

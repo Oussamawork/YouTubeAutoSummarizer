@@ -5,6 +5,34 @@ import tempfile
 
 from log import log_error
 
+def env_int(name, default):
+    """
+    Read an integer env var, falling back to `default` when it is unset, empty,
+    or malformed. An unconfigured GitHub Actions repo variable arrives as ""
+    (not absent), so plain int(os.getenv(name, default)) would crash.
+    """
+    value = (os.getenv(name) or "").strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        log_error(f"Ignoring invalid {name}={value!r}; using default {default}.")
+        return default
+
+
+def env_float(name, default):
+    """Float twin of env_int: unset/empty/malformed values fall back to default."""
+    value = (os.getenv(name) or "").strip()
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        log_error(f"Ignoring invalid {name}={value!r}; using default {default}.")
+        return default
+
+
 # Function to read channel entries from a file
 def read_channels(file_path):
     """
