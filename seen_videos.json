@@ -1,6 +1,24 @@
 {
-  "UCfCT7SSFEWyG4th9ZmaGYqQ": "pxwzDrynBiE",
-  "UCngIhBkikUe6e7tZTjpKK7Q": "gZKiPakuoF8",
-  "UCrGLm-Drgv0vbbemwwHeXJw": "5bpOa3L9kHw",
-  "UCwKB_00dPL3x5XmHF9IJCrg": "cAlT6IdygW8"
+  "channels": {
+    "UCfCT7SSFEWyG4th9ZmaGYqQ": {
+      "last_video_id": "pxwzDrynBiE"
+    },
+    "UCngIhBkikUe6e7tZTjpKK7Q": {
+      "last_published": "2026-07-01T12:52:34+00:00",
+      "last_video_id": "dfm26gZeNoM"
+    },
+    "UCrGLm-Drgv0vbbemwwHeXJw": {
+      "last_video_id": "5bpOa3L9kHw"
+    },
+    "UCwKB_00dPL3x5XmHF9IJCrg": {
+      "last_published": "2026-07-01T12:45:31+00:00",
+      "last_video_id": "2Yct2KaBTP0"
+    }
+  },
+  "pending": {
+    "HhSrVOyJ0xE": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    }
+  }
 }
