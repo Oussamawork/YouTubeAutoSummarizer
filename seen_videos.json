@@ -1,8 +1,8 @@
 {
   "channels": {
     "UCfCT7SSFEWyG4th9ZmaGYqQ": {
-      "last_published": "2026-07-09T21:47:23+00:00",
-      "last_video_id": "oHn3oEn-7Mw"
+      "last_published": "2026-07-13T20:54:22+00:00",
+      "last_video_id": "TPjLjj1NLpA"
     },
     "UCngIhBkikUe6e7tZTjpKK7Q": {
       "last_published": "2026-07-06T18:39:54+00:00",
@@ -50,6 +50,10 @@
       "attempts": 1,
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     },
+    "CThQjf1xQ_E": {
+      "attempts": 1,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
     "DP__2gAIufM": {
       "attempts": 1,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
@@ -58,7 +62,19 @@
       "attempts": 2,
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     },
+    "ErroJpGFz60": {
+      "attempts": 1,
+      "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
+    },
+    "Fd_nGgR7wQA": {
+      "attempts": 1,
+      "channel_id": "UCfCT7SSFEWyG4th9ZmaGYqQ"
+    },
     "I1MG0vAehn4": {
+      "attempts": 1,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
+    "I5ym698A5IA": {
       "attempts": 1,
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     },
@@ -70,13 +86,13 @@
       "attempts": 1,
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     },
+    "Mf1G2HrSIzg": {
+      "attempts": 1,
+      "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
+    },
     "P_tUM0ZOjXM": {
       "attempts": 1,
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
-    },
-    "TPjLjj1NLpA": {
-      "attempts": 2,
-      "channel_id": "UCfCT7SSFEWyG4th9ZmaGYqQ"
     },
     "TpFdb70RVew": {
       "attempts": 1,
@@ -89,6 +105,14 @@
     "UxNsEXjsNhM": {
       "attempts": 1,
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
+    "W9TAubhJFI0": {
+      "attempts": 1,
+      "channel_id": "UCrGLm-Drgv0vbbemwwHeXJw"
+    },
+    "WM7gqcAoJ_4": {
+      "attempts": 1,
+      "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
     },
     "YYOYdE3XArE": {
       "attempts": 1,
@@ -131,7 +155,7 @@
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     },
     "nr0tf3KGM_A": {
-      "attempts": 1,
+      "attempts": 2,
       "channel_id": "UCrGLm-Drgv0vbbemwwHeXJw"
     },
     "ohqVKO_Z7YA": {
@@ -151,6 +175,10 @@
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     },
     "s7UChSfDtaE": {
+      "attempts": 1,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
+    "u4oj0iQ_SmQ": {
       "attempts": 1,
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     },
