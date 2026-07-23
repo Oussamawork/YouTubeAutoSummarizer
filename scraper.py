@@ -12,7 +12,7 @@ from summarizer import (
     QUOTA_EXHAUSTED_SENTINEL,
 )
 from log import log_info, log_error, log_warn, log_debug
-from sendToTelegram import send_telegram_message, send_telegram_digest
+from sendToTelegram import send_telegram_message, send_telegram_digest, send_telegram_teaser, build_teaser
 import os
 from datetime import datetime, timezone
 
@@ -360,6 +360,11 @@ def main():
     YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
     TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+    # Optional free/premium split: when TELEGRAM_FREE_CHANNEL_ID is set, real
+    # summaries also produce a TL;DR teaser in that (public) channel, with an
+    # optional CTA link to the premium channel. Unset = exactly the old behavior.
+    TELEGRAM_FREE_CHANNEL_ID = os.getenv("TELEGRAM_FREE_CHANNEL_ID")
+    PREMIUM_INVITE_URL = os.getenv("PREMIUM_INVITE_URL")
 
     # Fail fast if any required credential is missing, rather than discovering it
     # mid-run when every YouTube lookup or Telegram send fails.
@@ -398,6 +403,10 @@ def main():
             # message at the end of the run instead of one message per video.
             digest_mode = _env_flag("DAILY_DIGEST")
             digest_entries = []
+            # Teaser copies of the digest entries for the free channel (only
+            # populated when the free/premium split is enabled).
+            free_digest_entries = []
+            premium_cta = f"🔓 Full summaries: {PREMIUM_INVITE_URL}" if PREMIUM_INVITE_URL else None
 
             # Per-channel outcome tally for the end-of-run summary report.
             outcomes = {
@@ -431,6 +440,7 @@ def main():
                     # message per run with compact TL;DR entries, instead of one
                     # full-summary message per video.
                     channel_entries = []
+                    free_channel_entries = []
 
                     for video_details in candidates:
                         video_id = video_details["video_id"]
@@ -457,12 +467,29 @@ def main():
                                 "published_at": video_details['published_at'],
                                 "body": telegram_body,
                             }
+                            # Free/premium split: only real summaries get a
+                            # teaser — warning/deferral notices stay premium-only.
+                            # A failed teaser send is logged inside the sender
+                            # and never affects the video's outcome/watermark.
+                            teaser = ""
+                            if TELEGRAM_FREE_CHANNEL_ID and outcome == "sent":
+                                teaser = build_teaser(telegram_body)
                             if digest_mode:
                                 digest_entries.append(entry)
+                                if teaser:
+                                    free_digest_entries.append({**entry, "body": teaser})
                             elif channel["digest"]:
                                 channel_entries.append(entry)
+                                if teaser:
+                                    free_channel_entries.append({**entry, "body": teaser})
                             else:
                                 send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], telegram_body)
+                                if teaser:
+                                    send_telegram_teaser(
+                                        TELEGRAM_TOKEN, TELEGRAM_FREE_CHANNEL_ID,
+                                        video_details['channel_name'], video_details['video_title'],
+                                        video_details['video_url'], teaser, PREMIUM_INVITE_URL,
+                                    )
 
                         if decided:
                             # Final outcome: advance the watermark and drop any
@@ -490,6 +517,20 @@ def main():
                                 TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, channel_entries,
                                 title=f"New from {channel_entries[0]['channel_name']}",
                             )
+                    if free_channel_entries:
+                        if len(free_channel_entries) == 1:
+                            entry = free_channel_entries[0]
+                            send_telegram_teaser(
+                                TELEGRAM_TOKEN, TELEGRAM_FREE_CHANNEL_ID,
+                                entry['channel_name'], entry['video_title'],
+                                entry['video_url'], entry['body'], PREMIUM_INVITE_URL,
+                            )
+                        else:
+                            send_telegram_digest(
+                                TELEGRAM_TOKEN, TELEGRAM_FREE_CHANNEL_ID, free_channel_entries,
+                                title=f"New from {free_channel_entries[0]['channel_name']}",
+                                footer=premium_cta,
+                            )
                 except Exception as e:
                     # Don't let one channel's failure sink the rest of the batch.
                     log_error(f"Unexpected error processing channel {channel_id}: {e}")
@@ -502,6 +543,19 @@ def main():
                     send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, entry['channel_name'], entry['video_title'], entry['video_url'], entry['published_at'], entry['body'])
                 else:
                     send_telegram_digest(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, digest_entries)
+            if free_digest_entries:
+                if len(free_digest_entries) == 1:
+                    entry = free_digest_entries[0]
+                    send_telegram_teaser(
+                        TELEGRAM_TOKEN, TELEGRAM_FREE_CHANNEL_ID,
+                        entry['channel_name'], entry['video_title'],
+                        entry['video_url'], entry['body'], PREMIUM_INVITE_URL,
+                    )
+                else:
+                    send_telegram_digest(
+                        TELEGRAM_TOKEN, TELEGRAM_FREE_CHANNEL_ID, free_digest_entries,
+                        footer=premium_cta,
+                    )
 
             # End-of-run report: one line summarizing what happened this run.
             summary_line = ", ".join(f"{k}={v}" for k, v in outcomes.items() if v)

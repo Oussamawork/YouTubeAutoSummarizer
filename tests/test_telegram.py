@@ -127,3 +127,74 @@ def test_post_splits_long_message(monkeypatch):
     assert tg._post("tok", "chat", long_text, parse_mode="HTML") is True
     assert len(sent) >= 2
     assert all(len(t) <= tg.TELEGRAM_MAX_LEN for t in sent)
+
+
+# --- Free/premium teaser split ---
+
+
+def test_build_teaser_takes_first_nonempty_line():
+    assert tg.build_teaser("TL;DR line\n\n• bullet 1\n• bullet 2") == "TL;DR line"
+    assert tg.build_teaser("\n\n  spaced first line  \nrest") == "spaced first line"
+
+
+def test_build_teaser_empty_input_never_raises():
+    assert tg.build_teaser("") == ""
+    assert tg.build_teaser(None) == ""
+    assert tg.build_teaser("\n \n") == ""
+
+
+def test_html_teaser_escapes_and_includes_cta():
+    msg = tg._build_html_teaser("A&B", "T<i>", "http://u?a=1&b=2", "tl;dr & more", "https://t.me/+inv")
+    assert "&amp;" in msg and "&lt;i&gt;" in msg
+    assert "<b>A&amp;B</b>" in msg  # our markup preserved, fields escaped
+    assert "🔓 Full summary: https://t.me/+inv" in msg
+
+
+def test_html_teaser_omits_cta_when_no_premium_url():
+    msg = tg._build_html_teaser("C", "T", "http://u", "tl;dr", None)
+    assert "🔓" not in msg
+
+
+def test_plain_teaser_does_not_escape():
+    msg = tg._build_plain_teaser("A&B", "T", "http://u", "tl;dr", "https://t.me/+inv")
+    assert "A&B" in msg
+    assert "&amp;" not in msg
+    assert "https://t.me/+inv" in msg
+
+
+def test_send_teaser_falls_back_to_plain(monkeypatch):
+    sent = []
+
+    def fake_post(url, data=None, timeout=None):
+        sent.append(data)
+
+        class R:
+            status_code = 400 if data.get("parse_mode") else 200
+            text = "bad entities"
+        return R()
+
+    monkeypatch.setattr(tg.requests, "post", fake_post)
+    assert tg.send_telegram_teaser("tok", "free", "C", "T", "http://u", "tl;dr") is True
+    assert sent[0].get("parse_mode") == "HTML"
+    assert "parse_mode" not in sent[-1]
+    assert all(d["chat_id"] == "free" for d in sent)
+
+
+def test_send_teaser_empty_skips_without_posting(monkeypatch):
+    monkeypatch.setattr(
+        tg.requests, "post",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not post")),
+    )
+    assert tg.send_telegram_teaser("tok", "free", "C", "T", "http://u", "") is False
+
+
+def test_digest_footer_rendered_and_escaped():
+    html_msg = tg._build_html_digest(DIGEST_ENTRIES, footer="🔓 Full & more: https://t.me/+inv")
+    assert html_msg.rstrip().endswith("🔓 Full &amp; more: https://t.me/+inv")
+    plain_msg = tg._build_plain_digest(DIGEST_ENTRIES, footer="🔓 Full & more: https://t.me/+inv")
+    assert "&amp;" not in plain_msg
+    assert plain_msg.rstrip().endswith("🔓 Full & more: https://t.me/+inv")
+
+
+def test_digest_no_footer_by_default():
+    assert "🔓" not in tg._build_html_digest(DIGEST_ENTRIES)

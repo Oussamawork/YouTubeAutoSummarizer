@@ -64,6 +64,10 @@ jobs:
           # MAX_VIDEOS_PER_RUN caps videos processed per channel per run.
           DAILY_DIGEST: ${{ vars.DAILY_DIGEST }}
           MAX_VIDEOS_PER_RUN: ${{ vars.MAX_VIDEOS_PER_RUN }}
+          # Optional free/premium split: teasers (TL;DR + link) go to the free
+          # public channel, full summaries stay in the main (premium) channel.
+          TELEGRAM_FREE_CHANNEL_ID: ${{ secrets.TELEGRAM_FREE_CHANNEL_ID }}
+          PREMIUM_INVITE_URL: ${{ vars.PREMIUM_INVITE_URL }}
 
       - name: Persist dedup state
         if: always()  # commit progress even if the scraper step failed mid-run

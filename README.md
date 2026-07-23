@@ -100,6 +100,18 @@ This skips the channel scan and dedup state entirely — useful for any video, s
 | `NO_TRANSCRIPT_MAX_ATTEMPTS` | `3` | Runs to retry a video whose captions aren't up yet before notifying and giving up. |
 | `DAILY_DIGEST` | off | `true` bundles all of a run's summaries into one combined Telegram message. |
 
+### Free/premium channel split (optional):
+
+Set `TELEGRAM_FREE_CHANNEL_ID` (secret) to a second — typically public — Telegram
+channel and every successfully summarized video also produces a short teaser
+there: the summary's TL;DR first line plus the video link. Full summaries keep
+going to `TELEGRAM_CHANNEL_ID`, which becomes your premium channel. Optionally
+set `PREMIUM_INVITE_URL` (repo variable) to append a "🔓 Full summary: <link>"
+call-to-action to each teaser, pointing readers at the premium channel's invite
+or subscription link. Warning/deferral notices are never teased, and a failed
+teaser send never affects dedup state. Leave `TELEGRAM_FREE_CHANNEL_ID` unset to
+keep the original single-channel behavior.
+
 ### Dedup state (`seen_videos.json`):
 
 The daily workflow commits this file back to the repo after each run. It stores a per-channel watermark (`last_video_id` + `last_published`) plus a `pending` map of videos deferred for retry (captions not up yet, LLM quota exhausted). Legacy flat `{channel_id: video_id}` files are migrated automatically.

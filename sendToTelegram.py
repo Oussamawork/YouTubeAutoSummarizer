@@ -95,7 +95,7 @@ def _post(bot_token, chat_id, text, parse_mode=None):
 DIGEST_DIVIDER = "\n\n— — — — —\n\n"
 
 
-def _build_html_digest(entries, title="Daily digest"):
+def _build_html_digest(entries, title="Daily digest", footer=None):
     """One HTML message covering every new video from a run (digest mode)."""
     e = html.escape
     parts = [f"🗞️ <b>{e(title)}</b> — {len(entries)} new videos"]
@@ -106,10 +106,12 @@ def _build_html_digest(entries, title="Daily digest"):
             f'🔗 <a href="{e(entry["video_url"])}">Watch on YouTube</a> · 📅 {e(entry["published_at"])}\n\n'
             f"{e(entry['body'])}"
         )
+    if footer:
+        parts.append(e(footer))
     return DIGEST_DIVIDER.join(parts)
 
 
-def _build_plain_digest(entries, title="Daily digest"):
+def _build_plain_digest(entries, title="Daily digest", footer=None):
     """Plain-text digest fallback — no parse mode, so it can never fail to parse."""
     parts = [f"🗞️ {title} — {len(entries)} new videos"]
     for entry in entries:
@@ -119,29 +121,103 @@ def _build_plain_digest(entries, title="Daily digest"):
             f"🔗 {entry['video_url']} · 📅 {entry['published_at']}\n\n"
             f"{entry['body']}"
         )
+    if footer:
+        parts.append(footer)
     return DIGEST_DIVIDER.join(parts)
 
 
-def send_telegram_digest(bot_token, chat_id, entries, title="Daily digest"):
+def send_telegram_digest(bot_token, chat_id, entries, title="Daily digest", footer=None):
     """
     Send one combined message for several videos (digest mode). Each entry is a
     dict with channel_name, video_title, video_url, published_at and body keys;
-    `title` heads the message (e.g. "Daily digest", "New from <channel>").
+    `title` heads the message (e.g. "Daily digest", "New from <channel>") and
+    `footer`, when given, closes it (e.g. a link to the premium channel).
     Tries HTML first, then plain text, like send_telegram_message; anything over
     the 4096-char limit is split across messages by _post.
     """
     if not entries:
         return True
-    if _post(bot_token, chat_id, _build_html_digest(entries, title), parse_mode="HTML"):
+    if _post(bot_token, chat_id, _build_html_digest(entries, title, footer), parse_mode="HTML"):
         log_info(f"Digest with {len(entries)} entries sent to Telegram.")
         return True
 
     log_warn("HTML digest send failed; retrying as plain text.")
-    if _post(bot_token, chat_id, _build_plain_digest(entries, title)):
+    if _post(bot_token, chat_id, _build_plain_digest(entries, title, footer)):
         log_info("Digest sent to Telegram as plain text (fallback).")
         return True
 
     log_error("Failed to send Telegram digest (HTML and plain text both failed).")
+    return False
+
+
+def build_teaser(summary):
+    """
+    First non-empty line of a summary — the TL;DR sentence the prompt format
+    guarantees — for the free public channel. Returns "" for empty input
+    (never raises), which callers treat as "nothing to tease".
+    """
+    if not summary:
+        return ""
+    for line in summary.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _build_html_teaser(channel_name, video_title, video_url, teaser, premium_url=None):
+    """Short HTML teaser card: TL;DR + video link, plus an optional premium CTA.
+
+    The CTA URL is inserted as escaped text (not an anchor) — Telegram clients
+    auto-link bare URLs, and plain text survives the plain-text fallback too.
+    """
+    e = html.escape
+    lines = [
+        f"🎥 <b>{e(channel_name)}</b>",
+        f"📌 {e(video_title)}",
+        f"💡 {e(teaser)}",
+        f'🔗 <a href="{e(video_url)}">Watch on YouTube</a>',
+    ]
+    if premium_url:
+        lines.append(f"🔓 Full summary: {e(premium_url)}")
+    return "\n".join(lines)
+
+
+def _build_plain_teaser(channel_name, video_title, video_url, teaser, premium_url=None):
+    """Plain-text teaser fallback — no parse mode, so it can never fail to parse."""
+    lines = [
+        f"🎥 {channel_name}",
+        f"📌 {video_title}",
+        f"💡 {teaser}",
+        f"🔗 {video_url}",
+    ]
+    if premium_url:
+        lines.append(f"🔓 Full summary: {premium_url}")
+    return "\n".join(lines)
+
+
+def send_telegram_teaser(bot_token, chat_id, channel_name, video_title, video_url, teaser, premium_url=None):
+    """
+    Send a short teaser (TL;DR + link) to the free public channel, with an
+    optional "full summary" CTA pointing at the premium channel. Same
+    HTML-then-plain fallback as send_telegram_message. Returns True on success;
+    an empty teaser is skipped (False) without contacting Telegram.
+    """
+    if not teaser:
+        log_warn("Empty teaser; skipping free-channel send.")
+        return False
+
+    html_message = _build_html_teaser(channel_name, video_title, video_url, teaser, premium_url)
+    if _post(bot_token, chat_id, html_message, parse_mode="HTML"):
+        log_info("Teaser sent to free Telegram channel.")
+        return True
+
+    log_warn("HTML teaser send failed; retrying as plain text.")
+    plain_message = _build_plain_teaser(channel_name, video_title, video_url, teaser, premium_url)
+    if _post(bot_token, chat_id, plain_message):
+        log_info("Teaser sent to free Telegram channel as plain text (fallback).")
+        return True
+
+    log_error("Failed to send Telegram teaser (HTML and plain text both failed).")
     return False
 
 
