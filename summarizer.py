@@ -198,11 +198,14 @@ def _parse_retry_after(resp):
     return max(0, min(secs, LLM_RETRY_AFTER_CAP))
 
 
-def _call_provider(provider, transcript, title=None, system_prompt=None):
+def _call_provider(provider, transcript, title=None, system_prompt=None, user_message=None):
     """
     Call one provider's chat-completions endpoint with retry on transient errors.
     Returns the summary text, "" on failure, or QUOTA_EXHAUSTED_SENTINEL when the
     provider is persistently rate-limited / out of quota (HTTP 429).
+
+    `user_message`, when given, is sent verbatim instead of the transcript
+    template — used by complete() for non-summarization calls.
     """
     url = f"{provider['base_url']}/chat/completions"
     headers = {
@@ -213,7 +216,7 @@ def _call_provider(provider, transcript, title=None, system_prompt=None):
         "model": provider["model"],
         "messages": [
             {"role": "system", "content": system_prompt or SUMMARY_SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_message(transcript, title)},
+            {"role": "user", "content": user_message if user_message is not None else _build_user_message(transcript, title)},
         ],
         "temperature": LLM_TEMPERATURE,
         "max_tokens": LLM_MAX_TOKENS,
@@ -267,6 +270,50 @@ def _call_provider(provider, transcript, title=None, system_prompt=None):
         log_warn(f"{provider['name']} returned {resp.status_code}: {resp.text[:200]}")
         return ""
 
+    return ""
+
+
+def complete(system_prompt, user_message):
+    """
+    Generic completion over the same provider chain as summarize_transcript:
+    first configured provider that succeeds wins, quota-exhausted providers are
+    skipped for the rest of the run. Returns the response text, "" when no
+    provider is configured or all fail, or QUOTA_EXHAUSTED_SENTINEL when every
+    available provider is rate-limited. Never raises.
+    """
+    if not (user_message or "").strip():
+        log_warn("Empty prompt for completion; nothing to do.")
+        return ""
+
+    providers = _provider_configs()
+    if not providers:
+        log_warn(
+            "No LLM provider configured. Set GEMINI_API_KEY, GROQ_API_KEY, or "
+            "LLM_API_KEY + LLM_BASE_URL to enable completions."
+        )
+        return ""
+
+    quota_hit = False
+    for provider in providers:
+        if provider["name"] in _EXHAUSTED_PROVIDERS:
+            log_info(f"Skipping {provider['name']} (quota exhausted earlier this run).")
+            quota_hit = True
+            continue
+
+        text = _call_provider(
+            provider, "", system_prompt=system_prompt, user_message=user_message
+        )
+        if text == QUOTA_EXHAUSTED_SENTINEL:
+            log_warn(f"{provider['name']} quota/rate limit hit; skipping it for the rest of the run.")
+            _EXHAUSTED_PROVIDERS.add(provider["name"])
+            quota_hit = True
+            continue
+        if text:
+            return text
+        log_warn(f"{provider['name']} did not produce a completion; trying next provider.")
+
+    if quota_hit:
+        return QUOTA_EXHAUSTED_SENTINEL
     return ""
 
 

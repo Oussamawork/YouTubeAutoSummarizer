@@ -68,15 +68,21 @@ jobs:
           # public channel, full summaries stay in the main (premium) channel.
           TELEGRAM_FREE_CHANNEL_ID: ${{ secrets.TELEGRAM_FREE_CHANNEL_ID }}
           PREMIUM_INVITE_URL: ${{ vars.PREMIUM_INVITE_URL }}
+          # MARKET_SIGNALS=true records each delivered summary + LLM-extracted
+          # market signals to data/signals.jsonl (committed back below).
+          MARKET_SIGNALS: ${{ vars.MARKET_SIGNALS }}
 
-      - name: Persist dedup state
+      - name: Persist dedup state and signals
         if: always()  # commit progress even if the scraper step failed mid-run
         run: |
-          if git status --porcelain seen_videos.json | grep -q .; then
+          if git status --porcelain seen_videos.json data/signals.jsonl | grep -q .; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add seen_videos.json
-            git commit -m "chore: update seen videos [skip ci]"
+            if [ -f data/signals.jsonl ]; then
+              git add data/signals.jsonl
+            fi
+            git commit -m "chore: update seen videos and signals [skip ci]"
             # Rebase onto any concurrent change, then push — retry on rejection,
             # and fail loudly if it never lands (so dedup drift / re-sends are visible).
             pushed=false

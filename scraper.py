@@ -5,7 +5,8 @@ import time
 from dotenv import load_dotenv
 from defusedxml import ElementTree as SafeET
 from transcript import get_transcript_from_video
-from helpers import read_channels, save_to_json, clean_summary, load_state, save_state, env_int
+from helpers import read_channels, save_to_json, clean_summary, load_state, save_state, env_int, append_jsonl
+from signals import extract_signals
 from summarizer import (
     summarize_transcript,
     INSUFFICIENT_TRANSCRIPT_SENTINEL,
@@ -38,6 +39,10 @@ YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
 
 # File that remembers what was already processed per channel (dedup state).
 STATE_FILE = "seen_videos.json"
+
+# Append-only store of per-video summaries + extracted market signals
+# (committed back by the daily workflow when MARKET_SIGNALS is enabled).
+SIGNALS_FILE = "data/signals.jsonl"
 
 # Cap on videos processed per channel per run, so a backlog (or a channel that
 # uploads a lot) can't flood Telegram in one run. The rest wait for the next run.
@@ -354,6 +359,32 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False):
     )
 
 
+def _record_market_signals(channel_id, video_details, summary):
+    """
+    Best-effort: extract structured market signals from a delivered summary and
+    append the record to SIGNALS_FILE. Any failure is logged and swallowed —
+    signal recording must never affect delivery, outcomes, or dedup state.
+    """
+    try:
+        signals = extract_signals(
+            summary, video_details.get("video_title"), video_details.get("channel_name")
+        )
+        record = {
+            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "video_id": video_details.get("video_id"),
+            "channel_id": channel_id,
+            "channel_name": video_details.get("channel_name"),
+            "video_title": video_details.get("video_title"),
+            "video_url": video_details.get("video_url"),
+            "published_at": video_details.get("published_at"),
+            "summary": summary,
+            "signals": signals,
+        }
+        append_jsonl(SIGNALS_FILE, record)
+    except Exception as e:
+        log_error(f"Market-signal recording failed for {video_details.get('video_url')}: {e}")
+
+
 def main():
     log_info("Starting main script.")
 
@@ -403,6 +434,8 @@ def main():
             # message at the end of the run instead of one message per video.
             digest_mode = _env_flag("DAILY_DIGEST")
             digest_entries = []
+            # Market-signal recording (data/signals.jsonl) — opt-in via env.
+            market_signals = _env_flag("MARKET_SIGNALS")
             # Teaser copies of the digest entries for the free channel (only
             # populated when the free/premium split is enabled).
             free_digest_entries = []
@@ -490,6 +523,9 @@ def main():
                                         video_details['channel_name'], video_details['video_title'],
                                         video_details['video_url'], teaser, PREMIUM_INVITE_URL,
                                     )
+
+                        if market_signals and outcome == "sent":
+                            _record_market_signals(channel_id, video_details, telegram_body)
 
                         if decided:
                             # Final outcome: advance the watermark and drop any
