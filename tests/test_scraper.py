@@ -270,3 +270,99 @@ def test_summarize_video_success(monkeypatch):
     assert outcome == "sent"
     assert decided is True
     assert details["summary"] == "TLDR\n\n• point"
+
+
+# --- Free/premium teaser split (dual-send orchestration in main) ---
+
+
+def _run_main(monkeypatch, free_channel=None, premium_url=None, outcome="sent",
+              body="TL;DR line\n\n• detail 1\n• detail 2"):
+    """Drive main() with everything mocked; return the recorded send calls."""
+    for name, value in {
+        "YOUTUBE_API_KEY": "yt", "TELEGRAM_TOKEN": "tok", "TELEGRAM_CHANNEL_ID": "premium",
+    }.items():
+        monkeypatch.setenv(name, value)
+    for name, value in {
+        "TELEGRAM_FREE_CHANNEL_ID": free_channel, "PREMIUM_INVITE_URL": premium_url,
+    }.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    monkeypatch.delenv("DAILY_DIGEST", raising=False)
+
+    video = {
+        "video_id": "v1", "channel_name": "Chan", "video_title": "Title",
+        "video_url": "http://u", "published_at": "2026-07-01T00:00:00+00:00",
+    }
+    monkeypatch.setattr(scraper, "read_channels", lambda path: [
+        {"channel_id": "c1", "digest": False, "max_per_run": 3},
+    ])
+    monkeypatch.setattr(scraper, "load_state", lambda path: {"channels": {}, "pending": {}})
+    monkeypatch.setattr(scraper, "save_state", lambda path, state: None)
+    monkeypatch.setattr(scraper, "save_to_json", lambda results, filename: None)
+    monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: [video])
+    monkeypatch.setattr(
+        scraper, "_summarize_video",
+        lambda details, attempts, compact=False: (body, outcome, True),
+    )
+
+    calls = {"message": [], "teaser": []}
+    monkeypatch.setattr(
+        scraper, "send_telegram_message",
+        lambda *args: calls["message"].append(args) or True,
+    )
+    monkeypatch.setattr(
+        scraper, "send_telegram_teaser",
+        lambda *args: calls["teaser"].append(args) or True,
+    )
+    scraper.main()
+    return calls
+
+
+def test_main_sends_teaser_to_free_channel(monkeypatch):
+    calls = _run_main(monkeypatch, free_channel="free", premium_url="https://t.me/+inv")
+    # Full summary still goes to the premium channel.
+    assert len(calls["message"]) == 1
+    assert calls["message"][0][1] == "premium"
+    # Teaser goes to the free channel: TL;DR first line + CTA url.
+    assert len(calls["teaser"]) == 1
+    token, chat_id, channel_name, title, url, teaser, cta = calls["teaser"][0]
+    assert chat_id == "free"
+    assert teaser == "TL;DR line"
+    assert cta == "https://t.me/+inv"
+
+
+def test_main_no_teaser_when_free_channel_unset(monkeypatch):
+    calls = _run_main(monkeypatch, free_channel=None)
+    assert len(calls["message"]) == 1
+    assert calls["teaser"] == []
+
+
+def test_main_no_teaser_for_warning_outcomes(monkeypatch):
+    # Deferral/warning notices must never reach the public free channel.
+    calls = _run_main(
+        monkeypatch, free_channel="free",
+        outcome="no_transcript", body="⚠️ No transcript available. Manual review needed.",
+    )
+    assert len(calls["message"]) == 1  # premium notice still sent
+    assert calls["teaser"] == []
+
+
+def test_main_teaser_failure_does_not_affect_state(monkeypatch):
+    # A failing teaser send must not stop the watermark advance for the video.
+    saved_states = []
+    calls = _run_main(monkeypatch, free_channel="free")
+    # Re-run with a teaser sender that fails and a state recorder.
+    monkeypatch.setattr(
+        scraper, "send_telegram_teaser", lambda *args: False,
+    )
+    monkeypatch.setattr(
+        scraper, "save_state", lambda path, state: saved_states.append(
+            {"channels": dict(state["channels"]), "pending": dict(state["pending"])}
+        ),
+    )
+    scraper.main()
+    assert saved_states  # state persisted
+    assert saved_states[-1]["channels"].get("c1", {}).get("last_video_id") == "v1"
+    assert saved_states[-1]["pending"] == {}
