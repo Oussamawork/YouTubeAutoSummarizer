@@ -42,3 +42,5 @@ proposes, debates, and ranks feature ideas, then lets you pick one to implement.
 - Functions never raise to the caller for expected failures; they return ""/None and log.
 - Network calls retry transient errors with backoff; keep that pattern.
 - Summaries are plain text (Telegram HTML-escapes them) with `• ` bullets.
+- Never hardcode chat/channel identifiers (or any deployment value) in the repo or
+  workflows — always read them from GitHub secrets/variables, even for public channels.
