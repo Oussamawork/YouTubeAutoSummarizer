@@ -198,3 +198,32 @@ def test_digest_footer_rendered_and_escaped():
 
 def test_digest_no_footer_by_default():
     assert "🔓" not in tg._build_html_digest(DIGEST_ENTRIES)
+
+
+# --- Plain-text sender (weekly pulse) ---
+
+
+def test_send_text_plain_no_parse_mode(monkeypatch):
+    sent = []
+
+    def fake_post(url, data=None, timeout=None):
+        sent.append(data)
+
+        class R:
+            status_code = 200
+            text = ""
+        return R()
+
+    monkeypatch.setattr(tg.requests, "post", fake_post)
+    assert tg.send_telegram_text("tok", "chat", "pulse <text> & stuff") is True
+    assert len(sent) == 1
+    assert "parse_mode" not in sent[0]
+    assert sent[0]["text"] == "pulse <text> & stuff"
+
+
+def test_send_text_empty_skips(monkeypatch):
+    monkeypatch.setattr(
+        tg.requests, "post",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not post")),
+    )
+    assert tg.send_telegram_text("tok", "chat", "  ") is False

@@ -14,6 +14,8 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   also exposes `complete()` for generic calls over the same provider chain.
 - `signals.py` — LLM extraction of structured market signals from summaries
   (opt-in via `MARKET_SIGNALS`; appends to `data/signals.jsonl`).
+- `market_pulse.py` — weekly aggregation over `data/signals.jsonl` (top assets,
+  consensus flips, new-on-radar) sent to Telegram by `weekly-pulse.yml`.
 - `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback); digest builder.
 - `helpers.py` — channel file parsing (`<id> [digest] [max=N]` per line), dedup
   state (v2 schema + v1 migration), summary cleaning.

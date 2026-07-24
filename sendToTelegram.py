@@ -150,6 +150,22 @@ def send_telegram_digest(bot_token, chat_id, entries, title="Daily digest", foot
     return False
 
 
+def send_telegram_text(bot_token, chat_id, text):
+    """
+    Send a plain-text message (no parse mode, so it can never fail to parse and
+    needs no escaping). Long texts are split by _post. Used for non-video
+    messages like the weekly market pulse. Returns True on success.
+    """
+    if not (text or "").strip():
+        log_warn("Empty text; nothing to send to Telegram.")
+        return False
+    if _post(bot_token, chat_id, text):
+        log_info("Text message sent to Telegram.")
+        return True
+    log_error("Failed to send Telegram text message.")
+    return False
+
+
 def build_teaser(summary):
     """
     First non-empty line of a summary — the TL;DR sentence the prompt format

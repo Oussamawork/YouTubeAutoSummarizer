@@ -125,6 +125,12 @@ Telegram delivery or dedup state. The data is research input for later
 aggregation (sentiment trends, consensus flips, per-channel track records) —
 it is not investment advice.
 
+Once records accumulate, a **weekly market pulse** is sent every Monday by
+`.github/workflows/weekly-pulse.yml` (also runnable on demand, or locally with
+`python market_pulse.py --dry-run`): the trailing week's top mentioned assets
+with net stance and stated actions, consensus flips versus the prior week, and
+assets newly on the radar. Weeks with no data are skipped silently.
+
 ### Dedup state (`seen_videos.json`):
 
 The daily workflow commits this file back to the repo after each run. It stores a per-channel watermark (`last_video_id` + `last_published`) plus a `pending` map of videos deferred for retry (captions not up yet, LLM quota exhausted). Legacy flat `{channel_id: video_id}` files are migrated automatically.
