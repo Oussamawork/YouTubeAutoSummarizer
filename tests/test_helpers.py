@@ -124,3 +124,23 @@ def test_env_float_empty_string_falls_back(monkeypatch):
     assert helpers.env_float("X_TEST_FLOAT", 0.3) == 0.3
     monkeypatch.setenv("X_TEST_FLOAT", "0.7")
     assert helpers.env_float("X_TEST_FLOAT", 0.3) == 0.7
+
+
+# --- append_jsonl (market-signals persistence) ---
+
+
+def test_append_jsonl_creates_dirs_and_appends(tmp_path):
+    import json
+    path = tmp_path / "data" / "signals.jsonl"
+    assert helpers.append_jsonl(str(path), {"a": 1}) is True
+    assert helpers.append_jsonl(str(path), {"b": "é"}) is True
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[0]) == {"a": 1}
+    assert json.loads(lines[1]) == {"b": "é"}
+
+
+def test_append_jsonl_failure_returns_false(tmp_path):
+    # Target path is a directory -> OSError, swallowed.
+    assert helpers.append_jsonl(str(tmp_path), {"a": 1}) is False
+    # Unserializable record -> TypeError, swallowed.
+    assert helpers.append_jsonl(str(tmp_path / "f.jsonl"), {"x": {1, 2}}) is False

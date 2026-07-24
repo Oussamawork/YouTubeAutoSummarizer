@@ -276,7 +276,7 @@ def test_summarize_video_success(monkeypatch):
 
 
 def _run_main(monkeypatch, free_channel=None, premium_url=None, outcome="sent",
-              body="TL;DR line\n\n• detail 1\n• detail 2"):
+              body="TL;DR line\n\n• detail 1\n• detail 2", market_signals=False):
     """Drive main() with everything mocked; return the recorded send calls."""
     for name, value in {
         "YOUTUBE_API_KEY": "yt", "TELEGRAM_TOKEN": "tok", "TELEGRAM_CHANNEL_ID": "premium",
@@ -290,6 +290,9 @@ def _run_main(monkeypatch, free_channel=None, premium_url=None, outcome="sent",
         else:
             monkeypatch.setenv(name, value)
     monkeypatch.delenv("DAILY_DIGEST", raising=False)
+    # Recording defaults ON; tests opt out explicitly so the flag-off paths
+    # stay covered.
+    monkeypatch.setenv("MARKET_SIGNALS", "true" if market_signals else "false")
 
     video = {
         "video_id": "v1", "channel_name": "Chan", "video_title": "Title",
@@ -366,3 +369,80 @@ def test_main_teaser_failure_does_not_affect_state(monkeypatch):
     assert saved_states  # state persisted
     assert saved_states[-1]["channels"].get("c1", {}).get("last_video_id") == "v1"
     assert saved_states[-1]["pending"] == {}
+
+
+# --- Market-signal recording (MARKET_SIGNALS orchestration in main) ---
+
+
+def test_main_records_signals_when_enabled(monkeypatch):
+    records = []
+    monkeypatch.setattr(
+        scraper, "extract_signals",
+        lambda summary, title=None, channel=None: {
+            "assets": [], "market_sentiment": "bullish", "topics": []},
+    )
+    monkeypatch.setattr(
+        scraper, "append_jsonl",
+        lambda path, rec: records.append((path, rec)) or True,
+    )
+    _run_main(monkeypatch, market_signals=True)
+    assert len(records) == 1
+    path, rec = records[0]
+    assert path == scraper.SIGNALS_FILE
+    assert rec["video_id"] == "v1"
+    assert rec["channel_id"] == "c1"
+    assert rec["summary"].startswith("TL;DR line")
+    assert rec["signals"]["market_sentiment"] == "bullish"
+    assert rec["date"]
+
+
+def test_main_no_signals_when_flag_off(monkeypatch):
+    called = []
+    monkeypatch.setattr(scraper, "extract_signals", lambda *a, **k: called.append(1))
+    _run_main(monkeypatch)  # _run_main sets MARKET_SIGNALS=false by default
+    assert called == []
+
+
+def test_env_flag_defaults():
+    assert scraper._env_flag("NO_SUCH_FLAG_XYZ") is False
+    assert scraper._env_flag("NO_SUCH_FLAG_XYZ", default=True) is True
+
+
+def test_main_signals_default_on(monkeypatch):
+    # With MARKET_SIGNALS entirely unset, recording is enabled by default.
+    records = []
+    monkeypatch.setattr(
+        scraper, "extract_signals",
+        lambda *a, **k: {"assets": [], "market_sentiment": "neutral", "topics": []},
+    )
+    monkeypatch.setattr(scraper, "append_jsonl", lambda path, rec: records.append(rec) or True)
+    _run_main(monkeypatch, market_signals=True)
+    monkeypatch.delenv("MARKET_SIGNALS", raising=False)
+    scraper.main()
+    assert len(records) == 2  # once from _run_main, once from the unset-flag run
+
+
+def test_main_no_signals_for_warning_outcomes(monkeypatch):
+    called = []
+    monkeypatch.setattr(scraper, "extract_signals", lambda *a, **k: called.append(1) or None)
+    _run_main(monkeypatch, market_signals=True, outcome="no_transcript",
+              body="⚠️ No transcript available. Manual review needed.")
+    assert called == []
+
+
+def test_main_signal_failure_never_breaks_delivery(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("LLM exploded")
+
+    monkeypatch.setattr(scraper, "extract_signals", boom)
+    calls = _run_main(monkeypatch, market_signals=True)
+    assert len(calls["message"]) == 1  # summary still delivered to Telegram
+
+
+def test_main_records_row_even_when_extraction_returns_none(monkeypatch):
+    records = []
+    monkeypatch.setattr(scraper, "extract_signals", lambda *a, **k: None)
+    monkeypatch.setattr(scraper, "append_jsonl", lambda path, rec: records.append(rec) or True)
+    _run_main(monkeypatch, market_signals=True)
+    assert len(records) == 1
+    assert records[0]["signals"] is None  # summary row still kept for the dataset

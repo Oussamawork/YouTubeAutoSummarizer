@@ -150,6 +150,24 @@ def save_state(file_path, seen):
 
 
 # Function to save results to a JSON file
+def append_jsonl(path, record):
+    """
+    Append one record as a JSON line to `path`, creating parent directories as
+    needed. Returns True on success, False on failure (logged, never raises) —
+    callers treat persistence as best-effort.
+    """
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return True
+    except (OSError, TypeError, ValueError) as e:
+        log_error(f"Could not append record to {path}: {e}")
+        return False
+
+
 def save_to_json(data, filename):
     try:
         with open(filename, 'w') as json_file:

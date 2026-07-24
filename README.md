@@ -112,6 +112,26 @@ or subscription link. Warning/deferral notices are never teased, and a failed
 teaser send never affects dedup state. Leave `TELEGRAM_FREE_CHANNEL_ID` unset to
 keep the original single-channel behavior.
 
+### Market signals (on by default):
+
+Every delivered summary is also
+analyzed by one extra LLM call that extracts structured market signals — the
+assets discussed, the speaker's stance (bullish/bearish/neutral), conviction,
+stated action, catalysts, price targets, and overall market sentiment. Each
+video appends one JSON line to `data/signals.jsonl` (date, video metadata,
+summary, signals), which the daily workflow commits back so the dataset grows
+run over run. Disable it by setting the repo variable `MARKET_SIGNALS=false`.
+Extraction is best-effort: failures are logged and never affect
+Telegram delivery or dedup state. The data is research input for later
+aggregation (sentiment trends, consensus flips, per-channel track records) —
+it is not investment advice.
+
+Once records accumulate, a **weekly market pulse** is sent every Monday by
+`.github/workflows/weekly-pulse.yml` (also runnable on demand, or locally with
+`python market_pulse.py --dry-run`): the trailing week's top mentioned assets
+with net stance and stated actions, consensus flips versus the prior week, and
+assets newly on the radar. Weeks with no data are skipped silently.
+
 ### Dedup state (`seen_videos.json`):
 
 The daily workflow commits this file back to the repo after each run. It stores a per-channel watermark (`last_video_id` + `last_published`) plus a `pending` map of videos deferred for retry (captions not up yet, LLM quota exhausted). Legacy flat `{channel_id: video_id}` files are migrated automatically.
