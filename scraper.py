@@ -52,8 +52,13 @@ MAX_VIDEOS_PER_RUN = env_int("MAX_VIDEOS_PER_RUN", 3)
 NO_TRANSCRIPT_MAX_ATTEMPTS = env_int("NO_TRANSCRIPT_MAX_ATTEMPTS", 3)
 
 
-def _env_flag(name):
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+def _env_flag(name, default=False):
+    """Boolean env flag. Unset or empty (an unconfigured GitHub Actions repo
+    variable arrives as "") falls back to `default`."""
+    value = (os.getenv(name) or "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
 
 
 def _parse_timestamp(value):
@@ -434,8 +439,9 @@ def main():
             # message at the end of the run instead of one message per video.
             digest_mode = _env_flag("DAILY_DIGEST")
             digest_entries = []
-            # Market-signal recording (data/signals.jsonl) — opt-in via env.
-            market_signals = _env_flag("MARKET_SIGNALS")
+            # Market-signal recording (data/signals.jsonl) — on by default,
+            # disable with MARKET_SIGNALS=false.
+            market_signals = _env_flag("MARKET_SIGNALS", default=True)
             # Teaser copies of the digest entries for the free channel (only
             # populated when the free/premium split is enabled).
             free_digest_entries = []

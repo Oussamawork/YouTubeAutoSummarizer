@@ -290,10 +290,9 @@ def _run_main(monkeypatch, free_channel=None, premium_url=None, outcome="sent",
         else:
             monkeypatch.setenv(name, value)
     monkeypatch.delenv("DAILY_DIGEST", raising=False)
-    if market_signals:
-        monkeypatch.setenv("MARKET_SIGNALS", "true")
-    else:
-        monkeypatch.delenv("MARKET_SIGNALS", raising=False)
+    # Recording defaults ON; tests opt out explicitly so the flag-off paths
+    # stay covered.
+    monkeypatch.setenv("MARKET_SIGNALS", "true" if market_signals else "false")
 
     video = {
         "video_id": "v1", "channel_name": "Chan", "video_title": "Title",
@@ -400,8 +399,27 @@ def test_main_records_signals_when_enabled(monkeypatch):
 def test_main_no_signals_when_flag_off(monkeypatch):
     called = []
     monkeypatch.setattr(scraper, "extract_signals", lambda *a, **k: called.append(1))
-    _run_main(monkeypatch)  # MARKET_SIGNALS unset
+    _run_main(monkeypatch)  # _run_main sets MARKET_SIGNALS=false by default
     assert called == []
+
+
+def test_env_flag_defaults():
+    assert scraper._env_flag("NO_SUCH_FLAG_XYZ") is False
+    assert scraper._env_flag("NO_SUCH_FLAG_XYZ", default=True) is True
+
+
+def test_main_signals_default_on(monkeypatch):
+    # With MARKET_SIGNALS entirely unset, recording is enabled by default.
+    records = []
+    monkeypatch.setattr(
+        scraper, "extract_signals",
+        lambda *a, **k: {"assets": [], "market_sentiment": "neutral", "topics": []},
+    )
+    monkeypatch.setattr(scraper, "append_jsonl", lambda path, rec: records.append(rec) or True)
+    _run_main(monkeypatch, market_signals=True)
+    monkeypatch.delenv("MARKET_SIGNALS", raising=False)
+    scraper.main()
+    assert len(records) == 2  # once from _run_main, once from the unset-flag run
 
 
 def test_main_no_signals_for_warning_outcomes(monkeypatch):

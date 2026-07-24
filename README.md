@@ -112,15 +112,16 @@ or subscription link. Warning/deferral notices are never teased, and a failed
 teaser send never affects dedup state. Leave `TELEGRAM_FREE_CHANNEL_ID` unset to
 keep the original single-channel behavior.
 
-### Market signals (optional):
+### Market signals (on by default):
 
-Set the repo variable `MARKET_SIGNALS=true` and every delivered summary is also
+Every delivered summary is also
 analyzed by one extra LLM call that extracts structured market signals — the
 assets discussed, the speaker's stance (bullish/bearish/neutral), conviction,
 stated action, catalysts, price targets, and overall market sentiment. Each
 video appends one JSON line to `data/signals.jsonl` (date, video metadata,
 summary, signals), which the daily workflow commits back so the dataset grows
-run over run. Extraction is best-effort: failures are logged and never affect
+run over run. Disable it by setting the repo variable `MARKET_SIGNALS=false`.
+Extraction is best-effort: failures are logged and never affect
 Telegram delivery or dedup state. The data is research input for later
 aggregation (sentiment trends, consensus flips, per-channel track records) —
 it is not investment advice.

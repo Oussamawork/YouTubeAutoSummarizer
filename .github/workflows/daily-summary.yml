@@ -68,8 +68,8 @@ jobs:
           # public channel, full summaries stay in the main (premium) channel.
           TELEGRAM_FREE_CHANNEL_ID: ${{ secrets.TELEGRAM_FREE_CHANNEL_ID }}
           PREMIUM_INVITE_URL: ${{ vars.PREMIUM_INVITE_URL }}
-          # MARKET_SIGNALS=true records each delivered summary + LLM-extracted
-          # market signals to data/signals.jsonl (committed back below).
+          # Market-signal recording to data/signals.jsonl (committed back
+          # below) is ON by default; set the repo variable to false to disable.
           MARKET_SIGNALS: ${{ vars.MARKET_SIGNALS }}
 
       - name: Persist dedup state and signals
