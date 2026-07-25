@@ -16,6 +16,8 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   (opt-in via `MARKET_SIGNALS`; appends to `data/signals.jsonl`).
 - `market_pulse.py` — weekly aggregation over `data/signals.jsonl` (top assets,
   consensus flips, new-on-radar) sent to Telegram by `weekly-pulse.yml`.
+- `channel_scorecard.py` — Friday per-channel accuracy scorecard: directional
+  calls vs Stooq daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
 - `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback); digest builder.
 - `helpers.py` — channel file parsing (`<id> [digest] [max=N]` per line), dedup
   state (v2 schema + v1 migration), summary cleaning.
