@@ -132,6 +132,14 @@ Once records accumulate, a **weekly market pulse** is sent every Monday by
 with net stance and stated actions, consensus flips versus the prior week, and
 assets newly on the radar. Weeks with no data are skipped silently.
 
+Every Friday, `.github/workflows/weekly-scorecard.yml` sends a **per-channel
+accuracy scorecard** (`python channel_scorecard.py --dry-run` locally): each
+channel's directional calls are checked against free daily prices from Stooq —
+was the price higher after a bullish call, lower after a bearish one — at 7-
+and 30-day horizons, with hit rates and average move in the called direction.
+It waits automatically until the dataset spans at least a week, and always
+shows sample sizes (small samples are noise, not skill).
+
 ### Dedup state (`seen_videos.json`):
 
 The daily workflow commits this file back to the repo after each run. It stores a per-channel watermark (`last_video_id` + `last_published`) plus a `pending` map of videos deferred for retry (captions not up yet, LLM quota exhausted). Legacy flat `{channel_id: video_id}` files are migrated automatically.
