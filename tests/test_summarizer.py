@@ -210,4 +210,37 @@ def test_provider_model_empty_env_falls_back(monkeypatch):
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     providers = summarizer._provider_configs()
-    assert providers[0]["model"] == "gemini-2.5-flash"
+    # Preferred Gemini model first, proven 2.5-flash as same-key fallback.
+    assert providers[0]["model"] == "gemini-3-flash-preview"
+    assert providers[1]["model"] == "gemini-2.5-flash"
+
+
+def test_gemini_no_duplicate_when_pinned_to_25_flash(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    providers = summarizer._provider_configs()
+    assert [p["model"] for p in providers] == ["gemini-2.5-flash"]
+
+
+def test_bad_preferred_model_falls_through_to_next_provider(monkeypatch):
+    # Unknown model id -> non-transient 400 -> "" -> chain tries next entry.
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(json["model"])
+        r = type("R", (), {})()
+        r.status_code = 400 if json["model"] == "bad-model" else 200
+        r.text = "model not found"
+        r.json = lambda: {"choices": [{"message": {"content": "SUMMARY"}}]}
+        return r
+
+    monkeypatch.setattr(summarizer.requests, "post", fake_post)
+    monkeypatch.setattr(summarizer, "_provider_configs", lambda: [
+        {"name": "gemini", "base_url": "http://x", "api_key": "k", "model": "bad-model"},
+        {"name": "gemini-2.5-flash", "base_url": "http://x", "api_key": "k", "model": "gemini-2.5-flash"},
+    ])
+    monkeypatch.setattr(summarizer, "_EXHAUSTED_PROVIDERS", set())
+    assert summarizer.summarize_transcript("some transcript") == "SUMMARY"
+    assert calls == ["bad-model", "gemini-2.5-flash"]

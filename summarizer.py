@@ -136,12 +136,26 @@ def _provider_configs():
         })
 
     if os.getenv("GEMINI_API_KEY"):
+        gemini_base = "https://generativelanguage.googleapis.com/v1beta/openai"
+        # Preferred model first (Gemini 3 Flash: same free RPM as 2.5-flash but
+        # ~6x the daily request quota). If its ID is rejected or the model is
+        # unavailable, the chain falls through to the proven 2.5-flash entry in
+        # the same run — a bad preferred ID costs one failed call, never a
+        # missed summary.
+        preferred = os.getenv("GEMINI_MODEL") or "gemini-3-flash-preview"
         providers.append({
             "name": "gemini",
-            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "base_url": gemini_base,
             "api_key": os.getenv("GEMINI_API_KEY"),
-            "model": os.getenv("GEMINI_MODEL") or "gemini-2.5-flash",
+            "model": preferred,
         })
+        if preferred != "gemini-2.5-flash":
+            providers.append({
+                "name": "gemini-2.5-flash",
+                "base_url": gemini_base,
+                "api_key": os.getenv("GEMINI_API_KEY"),
+                "model": "gemini-2.5-flash",
+            })
 
     if os.getenv("GROQ_API_KEY"):
         providers.append({
