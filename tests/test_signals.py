@@ -79,24 +79,24 @@ def test_extract_empty_summary_skips_llm(monkeypatch):
 
 
 def test_extract_success(monkeypatch):
-    monkeypatch.setattr(signals, "complete", lambda sp, um: json.dumps(VALID))
+    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: json.dumps(VALID))
     out = signals.extract_signals("summary text", "title", "chan")
     assert out["assets"][0]["name"] == "Tesla"
 
 
 def test_extract_quota_or_failure_returns_none(monkeypatch):
-    monkeypatch.setattr(signals, "complete", lambda sp, um: signals.QUOTA_EXHAUSTED_SENTINEL)
+    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: signals.QUOTA_EXHAUSTED_SENTINEL)
     assert signals.extract_signals("summary") is None
-    monkeypatch.setattr(signals, "complete", lambda sp, um: "")
+    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: "")
     assert signals.extract_signals("summary") is None
-    monkeypatch.setattr(signals, "complete", lambda sp, um: "sorry, I cannot")
+    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: "sorry, I cannot")
     assert signals.extract_signals("summary") is None
 
 
 def test_extract_passes_context_and_faithfulness_rule(monkeypatch):
     captured = {}
 
-    def fake(system_prompt, user_message):
+    def fake(system_prompt, user_message, **kw):
         captured["sp"], captured["um"] = system_prompt, user_message
         return json.dumps(VALID)
 
@@ -105,3 +105,26 @@ def test_extract_passes_context_and_faithfulness_rule(monkeypatch):
     assert "My Video" in captured["um"] and "My Channel" in captured["um"]
     assert "the summary" in captured["um"]
     assert "Never infer" in captured["sp"]
+
+
+def test_parse_tolerates_preamble_and_trailing_prose():
+    wrapped = "Here is the JSON you asked for:\n" + json.dumps(VALID) + "\nLet me know if you need more."
+    parsed = signals._parse_signals(wrapped)
+    assert parsed is not None and parsed["assets"][0]["name"] == "Tesla"
+    # Fenced with a preamble (regex alone can't match) also works.
+    fenced = "Sure!\n```json\n" + json.dumps(VALID) + "\n```"
+    assert signals._parse_signals(fenced) is not None
+    # Still None when there is no JSON object at all.
+    assert signals._parse_signals("no braces here") is None
+
+
+def test_extract_requests_json_mode(monkeypatch):
+    captured = {}
+
+    def fake(system_prompt, user_message, **kw):
+        captured.update(kw)
+        return json.dumps(VALID)
+
+    monkeypatch.setattr(signals, "complete", fake)
+    signals.extract_signals("summary", "t", "c")
+    assert captured.get("json_mode") is True

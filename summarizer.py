@@ -124,12 +124,15 @@ def _provider_configs():
     """Build the ordered list of configured LLM providers from the environment."""
     providers = []
 
+    # `or` (not a getenv default): an unconfigured GitHub Actions repo variable
+    # arrives as "" — which must fall back to the code default, not become the
+    # literal model name.
     if os.getenv("LLM_API_KEY") and os.getenv("LLM_BASE_URL"):
         providers.append({
-            "name": os.getenv("LLM_NAME", "custom"),
+            "name": os.getenv("LLM_NAME") or "custom",
             "base_url": os.getenv("LLM_BASE_URL").rstrip("/"),
             "api_key": os.getenv("LLM_API_KEY"),
-            "model": os.getenv("LLM_MODEL", "gpt-4o-mini"),
+            "model": os.getenv("LLM_MODEL") or "gpt-4o-mini",
         })
 
     if os.getenv("GEMINI_API_KEY"):
@@ -137,7 +140,7 @@ def _provider_configs():
             "name": "gemini",
             "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
             "api_key": os.getenv("GEMINI_API_KEY"),
-            "model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            "model": os.getenv("GEMINI_MODEL") or "gemini-2.5-flash",
         })
 
     if os.getenv("GROQ_API_KEY"):
@@ -145,7 +148,7 @@ def _provider_configs():
             "name": "groq",
             "base_url": "https://api.groq.com/openai/v1",
             "api_key": os.getenv("GROQ_API_KEY"),
-            "model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            "model": os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile",
         })
 
     return providers
@@ -198,14 +201,18 @@ def _parse_retry_after(resp):
     return max(0, min(secs, LLM_RETRY_AFTER_CAP))
 
 
-def _call_provider(provider, transcript, title=None, system_prompt=None, user_message=None):
+def _call_provider(provider, transcript, title=None, system_prompt=None, user_message=None,
+                   json_mode=False):
     """
     Call one provider's chat-completions endpoint with retry on transient errors.
     Returns the summary text, "" on failure, or QUOTA_EXHAUSTED_SENTINEL when the
     provider is persistently rate-limited / out of quota (HTTP 429).
 
     `user_message`, when given, is sent verbatim instead of the transcript
-    template — used by complete() for non-summarization calls.
+    template — used by complete() for non-summarization calls. `json_mode`
+    requests forced-JSON output (response_format json_object — supported by
+    Gemini's OpenAI-compat endpoint and Groq), so structured-output callers
+    don't depend on the model resisting the urge to add prose or fences.
     """
     url = f"{provider['base_url']}/chat/completions"
     headers = {
@@ -221,6 +228,8 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
         "temperature": LLM_TEMPERATURE,
         "max_tokens": LLM_MAX_TOKENS,
     }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
 
     for attempt in range(1, LLM_MAX_RETRIES + 1):
         try:
@@ -273,13 +282,14 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
     return ""
 
 
-def complete(system_prompt, user_message):
+def complete(system_prompt, user_message, json_mode=False):
     """
     Generic completion over the same provider chain as summarize_transcript:
     first configured provider that succeeds wins, quota-exhausted providers are
     skipped for the rest of the run. Returns the response text, "" when no
     provider is configured or all fail, or QUOTA_EXHAUSTED_SENTINEL when every
-    available provider is rate-limited. Never raises.
+    available provider is rate-limited. Never raises. `json_mode` forces JSON
+    output at the API level for structured-output callers.
     """
     if not (user_message or "").strip():
         log_warn("Empty prompt for completion; nothing to do.")
@@ -301,7 +311,8 @@ def complete(system_prompt, user_message):
             continue
 
         text = _call_provider(
-            provider, "", system_prompt=system_prompt, user_message=user_message
+            provider, "", system_prompt=system_prompt, user_message=user_message,
+            json_mode=json_mode,
         )
         if text == QUOTA_EXHAUSTED_SENTINEL:
             log_warn(f"{provider['name']} quota/rate limit hit; skipping it for the rest of the run.")

@@ -109,15 +109,27 @@ def _normalize_asset(asset):
 def _parse_signals(text):
     """
     Parse the model's output into a validated signals dict, or None when it
-    isn't usable JSON of the expected shape. Never raises.
+    isn't usable JSON of the expected shape. Tolerates code fences and prose
+    around the JSON object (models add preambles despite instructions — seen
+    in production with gemini-2.5-flash). Never raises.
     """
     if not text:
         return None
+    stripped = _strip_code_fences(text)
     try:
-        data = json.loads(_strip_code_fences(text))
-    except (ValueError, TypeError) as e:
-        log_warn(f"Signal extraction returned unparseable JSON: {e}")
-        return None
+        data = json.loads(stripped)
+    except (ValueError, TypeError):
+        # Fall back to the outermost {...} span — handles "Here is the JSON:"
+        # preambles, trailing commentary, and fences the regex didn't match.
+        start, end = stripped.find("{"), stripped.rfind("}")
+        if start == -1 or end <= start:
+            log_warn("Signal extraction returned no JSON object; discarding.")
+            return None
+        try:
+            data = json.loads(stripped[start:end + 1])
+        except (ValueError, TypeError) as e:
+            log_warn(f"Signal extraction returned unparseable JSON: {e}")
+            return None
     if not isinstance(data, dict):
         log_warn("Signal extraction returned JSON that is not an object; discarding.")
         return None
@@ -158,7 +170,7 @@ def extract_signals(summary, video_title=None, channel_name=None):
         video_title=(video_title or "unknown").strip() or "unknown",
         summary=summary,
     )
-    text = complete(SIGNALS_SYSTEM_PROMPT, user_message)
+    text = complete(SIGNALS_SYSTEM_PROMPT, user_message, json_mode=True)
     if text == QUOTA_EXHAUSTED_SENTINEL:
         log_warn("Signal extraction skipped: LLM quota exhausted.")
         return None
