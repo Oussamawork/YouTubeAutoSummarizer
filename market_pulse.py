@@ -30,6 +30,12 @@ NET_THRESHOLD = 0.15
 
 DISCLAIMER = "⚠️ Aggregated creator opinions — research input, not investment advice."
 
+# Accuracy weighting: once a channel has at least this many scorecard-evaluated
+# calls, its stances are weighted by track record (0.5 + hit rate → 0.5..1.5)
+# instead of counting 1.0 like everyone else. Proven channels move the
+# consensus more; proven-wrong channels move it less.
+MIN_TRACK_CALLS = 5
+
 
 def load_signals(path=SIGNALS_FILE):
     """Read signal records from the JSONL file; malformed lines are skipped
@@ -88,30 +94,41 @@ def _iter_assets(records):
                 yield record, asset
 
 
-def aggregate_assets(records):
+def aggregate_assets(records, channel_weights=None):
     """
     Fold records into per-asset stats:
-    {key: {label, mentions, channels, bull, bear, neutral, actions, targets}}
+    {key: {label, type, mentions, channels, bull, bear, neutral,
+           bull_w, bear_w, neutral_w, actions, targets}}
+    Raw counts drive the display; the *_w sums (each stance counted at its
+    channel's weight, default 1.0) drive the net-stance consensus.
     """
+    channel_weights = channel_weights or {}
     stats = {}
     for record, asset in _iter_assets(records):
         key = _asset_key(asset)
         entry = stats.setdefault(key, {
             "label": asset.get("ticker") or asset.get("name") or key,
+            "ticker": asset.get("ticker"),
+            "type": asset.get("type"),
             "mentions": 0, "channels": set(),
             "bull": 0, "bear": 0, "neutral": 0,
+            "bull_w": 0.0, "bear_w": 0.0, "neutral_w": 0.0,
             "actions": Counter(), "targets": [],
         })
         entry["mentions"] += 1
         if record.get("channel_name"):
             entry["channels"].add(record["channel_name"])
+        weight = channel_weights.get(record.get("channel_name"), 1.0)
         stance = asset.get("stance")
         if stance == "bullish":
             entry["bull"] += 1
+            entry["bull_w"] += weight
         elif stance == "bearish":
             entry["bear"] += 1
+            entry["bear_w"] += weight
         else:
             entry["neutral"] += 1
+            entry["neutral_w"] += weight
         action = asset.get("action")
         if action and action != "none":
             entry["actions"][action] += 1
@@ -122,11 +139,39 @@ def aggregate_assets(records):
 
 
 def net_stance(entry):
-    """Mean stance score in [-1, 1] for one aggregated asset entry."""
-    total = entry["bull"] + entry["bear"] + entry["neutral"]
+    """Weighted mean stance score in [-1, 1] for one aggregated asset entry."""
+    total = entry["bull_w"] + entry["bear_w"] + entry["neutral_w"]
     if not total:
         return 0.0
-    return (entry["bull"] - entry["bear"]) / total
+    return (entry["bull_w"] - entry["bear_w"]) / total
+
+
+def channel_weights_from_track_record(records, today, price_fetcher=None):
+    """
+    Weight per channel from its scorecard track record: 0.5 + 7-day hit rate,
+    only once the channel has MIN_TRACK_CALLS evaluated calls. Channels without
+    enough history weigh the default 1.0. Best-effort: returns ({}, {}) on any
+    failure so the pulse still goes out unweighted.
+
+    Returns (weights, details) — details maps channel -> (hits, total) for the
+    report footer.
+    """
+    try:
+        # Imported lazily: channel_scorecard imports helpers from this module,
+        # so a top-level import would be circular.
+        import channel_scorecard as cs
+        fetcher = price_fetcher or cs.fetch_prices
+        stats = cs.evaluate(records, today, price_fetcher=fetcher)
+        weights, details = {}, {}
+        for channel, horizons in stats.items():
+            bucket = horizons.get(7, {"hits": 0, "total": 0})
+            if bucket["total"] >= MIN_TRACK_CALLS:
+                weights[channel] = 0.5 + bucket["hits"] / bucket["total"]
+                details[channel] = (bucket["hits"], bucket["total"])
+        return weights, details
+    except Exception as e:
+        log_warn(f"Track-record weighting unavailable this week: {e}")
+        return {}, {}
 
 
 def _direction(score):
@@ -175,7 +220,7 @@ def _overall_tone(records):
     return tone
 
 
-def _format_asset_line(entry):
+def _format_asset_line(entry, latest_price=None):
     score = net_stance(entry)
     parts = [
         f"• {entry['label']} — {entry['mentions']} mention{'s' if entry['mentions'] != 1 else ''}",
@@ -187,20 +232,62 @@ def _format_asset_line(entry):
         parts.append(actions)
     if entry["targets"]:
         avg = sum(entry["targets"]) / len(entry["targets"])
-        parts.append(f"avg target {avg:,.0f}")
+        target_part = f"avg target {avg:,.0f}"
+        if latest_price:
+            implied = (avg - latest_price) / latest_price
+            target_part += f" ({implied:+.0%} implied)"
+        parts.append(target_part)
     return " · ".join(parts)
 
 
-def build_pulse(current_records, previous_records, older_records, start, end):
+def _latest_price(series):
+    """Most recent close from a {date: close} series, or None."""
+    if not series:
+        return None
+    return series[max(series)]
+
+
+def fetch_latest_prices(entries, price_fetcher=None, today=None):
+    """
+    Best-effort latest close per asset key for the entries that carry price
+    targets (that's the only place the pulse uses live prices). Any failure
+    just means no implied-upside annotation.
+    """
+    try:
+        import channel_scorecard as cs
+        fetcher = price_fetcher or cs.fetch_prices
+        today = today or datetime.now(timezone.utc).date()
+        prices = {}
+        for key, entry in entries.items():
+            if not entry["targets"] or not entry.get("ticker"):
+                continue
+            symbol = cs.symbol_for({"ticker": entry["ticker"], "type": entry["type"]})
+            if not symbol:
+                continue
+            series = fetcher(symbol, today - timedelta(days=10), today)
+            latest = _latest_price(series)
+            if latest:
+                prices[key] = latest
+        return prices
+    except Exception as e:
+        log_warn(f"Latest-price lookup unavailable this week: {e}")
+        return {}
+
+
+def build_pulse(current_records, previous_records, older_records, start, end,
+                channel_weights=None, weight_details=None, latest_prices=None):
     """
     Render the plain-text weekly pulse. Returns "" when the current window has
-    no analyzable records (caller skips the send).
+    no analyzable records (caller skips the send). `channel_weights` biases the
+    net-stance consensus by track record; `latest_prices` (asset key -> close)
+    annotates price targets with the implied move.
     """
     if not current_records:
         return ""
 
-    current = aggregate_assets(current_records)
-    previous = aggregate_assets(previous_records)
+    current = aggregate_assets(current_records, channel_weights)
+    previous = aggregate_assets(previous_records, channel_weights)
+    latest_prices = latest_prices or {}
 
     channels = {r.get("channel_name") for r in current_records if r.get("channel_name")}
     lines = [
@@ -217,11 +304,11 @@ def build_pulse(current_records, previous_records, older_records, start, end):
         lines.append("")
         lines.append("Top assets:")
         ranked = sorted(
-            current.values(),
-            key=lambda e: (-e["mentions"], -abs(net_stance(e)), e["label"]),
+            current.items(),
+            key=lambda kv: (-kv[1]["mentions"], -abs(net_stance(kv[1])), kv[1]["label"]),
         )
-        for entry in ranked[:MAX_ASSETS_IN_REPORT]:
-            lines.append(_format_asset_line(entry))
+        for key, entry in ranked[:MAX_ASSETS_IN_REPORT]:
+            lines.append(_format_asset_line(entry, latest_prices.get(key)))
         if len(ranked) > MAX_ASSETS_IN_REPORT:
             lines.append(f"…and {len(ranked) - MAX_ASSETS_IN_REPORT} more.")
 
@@ -239,13 +326,23 @@ def build_pulse(current_records, previous_records, older_records, start, end):
         for entry in sorted(new_assets.values(), key=lambda e: -e["mentions"])[:5]:
             lines.append(f"• {entry['label']} — {_direction(net_stance(entry))}")
 
+    if weight_details:
+        lines.append("")
+        weighted = " · ".join(
+            f"{channel} {channel_weights[channel]:.2f} ({hits}/{total})"
+            for channel, (hits, total) in sorted(weight_details.items())
+        )
+        lines.append(f"⚖️ Consensus weighted by 7d track record: {weighted}")
+
     lines.append("")
     lines.append(DISCLAIMER)
     return "\n".join(lines)
 
 
-def generate_pulse(days=7, today=None, path=SIGNALS_FILE):
-    """Load the dataset and build the pulse text for the trailing `days` window."""
+def generate_pulse(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None):
+    """Load the dataset and build the pulse text for the trailing `days` window.
+    Track-record weighting and implied-upside annotations are best-effort and
+    switch on automatically once enough scorecard history exists."""
     today = today or datetime.now(timezone.utc).date()
     records = load_signals(path)
     window_start = today - timedelta(days=days)
@@ -255,7 +352,19 @@ def generate_pulse(days=7, today=None, path=SIGNALS_FILE):
     current = [r for r in records if _in_window(r, window_start, today)]
     previous = [r for r in records if _in_window(r, prev_start, window_start)]
     older = [r for r in records if _in_window(r, lookback_start, window_start)]
-    return build_pulse(current, previous, older, window_start, today)
+
+    if not current:
+        return ""
+    weights, details = channel_weights_from_track_record(
+        records, today, price_fetcher=price_fetcher
+    )
+    latest_prices = fetch_latest_prices(
+        aggregate_assets(current), price_fetcher=price_fetcher, today=today
+    )
+    return build_pulse(
+        current, previous, older, window_start, today,
+        channel_weights=weights, weight_details=details, latest_prices=latest_prices,
+    )
 
 
 def main():

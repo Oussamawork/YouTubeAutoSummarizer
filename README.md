@@ -130,7 +130,12 @@ Once records accumulate, a **weekly market pulse** is sent every Monday by
 `.github/workflows/weekly-pulse.yml` (also runnable on demand, or locally with
 `python market_pulse.py --dry-run`): the trailing week's top mentioned assets
 with net stance and stated actions, consensus flips versus the prior week, and
-assets newly on the radar. Weeks with no data are skipped silently.
+assets newly on the radar. Weeks with no data are skipped silently. Once the
+Friday scorecard has enough history (5+ evaluated calls for a channel), the
+pulse's consensus becomes **accuracy-weighted** — each channel's stance counts
+at 0.5 + its 7-day hit rate, shown in a report footer — and price targets are
+annotated with the **implied move** versus the latest close (via Stooq,
+best-effort).
 
 Every Friday, `.github/workflows/weekly-scorecard.yml` sends a **per-channel
 accuracy scorecard** (`python channel_scorecard.py --dry-run` locally): each

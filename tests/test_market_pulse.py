@@ -111,7 +111,8 @@ def test_generate_pulse_windows(tmp_path, monkeypatch):
         _rec("2026-05-01", "A", [_asset(ticker="OLD1234")]),   # outside lookback
     ]
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-    text = mp.generate_pulse(days=7, today=date(2026, 7, 24), path=str(path))
+    text = mp.generate_pulse(days=7, today=date(2026, 7, 24), path=str(path),
+                             price_fetcher=lambda symbol, start, end: {})
     assert "Videos analyzed: 1" in text
     assert "Consensus flips" in text  # bearish (prev) -> bullish (current)
     assert "OLD1234" not in text
@@ -119,3 +120,71 @@ def test_generate_pulse_windows(tmp_path, monkeypatch):
 
 def test_generate_pulse_no_data(tmp_path):
     assert mp.generate_pulse(days=7, today=date(2026, 7, 24), path=str(tmp_path / "none.jsonl")) == ""
+
+
+# --- Track-record weighting and implied upside ---
+
+
+def test_weighted_consensus_changes_direction():
+    records = [
+        _rec("2026-07-20", "Good", [_asset(stance="bullish")]),
+        _rec("2026-07-21", "Bad", [_asset(stance="bearish")]),
+    ]
+    unweighted = mp.aggregate_assets(records)
+    assert mp._direction(mp.net_stance(unweighted["TSLA"])) == "mixed"
+    weighted = mp.aggregate_assets(records, {"Good": 1.5, "Bad": 0.5})
+    assert mp._direction(mp.net_stance(weighted["TSLA"])) == "bullish"
+    # Raw display counts stay unweighted.
+    assert weighted["TSLA"]["bull"] == 1 and weighted["TSLA"]["bear"] == 1
+
+
+def test_channel_weights_from_track_record():
+    from datetime import timedelta
+    d0 = date(2026, 7, 1)
+    series = {"tsla.us": {d0: 100.0, d0 + timedelta(days=7): 110.0}}
+    # 5 evaluated calls for "Proven" (meets MIN_TRACK_CALLS), 1 for "Rookie".
+    records = [_rec("2026-07-01", "Proven", [_asset(stance="bullish")]) for _ in range(5)]
+    records.append(_rec("2026-07-01", "Rookie", [_asset(stance="bullish")]))
+    weights, details = mp.channel_weights_from_track_record(
+        records, date(2026, 7, 24), price_fetcher=lambda s, a, b: series.get(s, {})
+    )
+    assert weights == {"Proven": 1.5}  # 5/5 hits -> 0.5 + 1.0
+    assert details == {"Proven": (5, 5)}
+    assert "Rookie" not in weights  # below MIN_TRACK_CALLS
+
+
+def test_asset_line_implied_upside():
+    entry = mp.aggregate_assets([
+        _rec("2026-07-20", "A", [_asset(stance="bullish", price_target=110)]),
+    ])["TSLA"]
+    line = mp._format_asset_line(entry, latest_price=100.0)
+    assert "avg target 110 (+10% implied)" in line
+    assert "implied" not in mp._format_asset_line(entry)  # no price -> no annotation
+
+
+def test_build_pulse_weight_footer():
+    current = [_rec("2026-07-20", "A", [_asset(stance="bullish")])]
+    text = mp.build_pulse(
+        current, [], [], date(2026, 7, 17), date(2026, 7, 24),
+        channel_weights={"A": 1.25}, weight_details={"A": (6, 8)},
+    )
+    assert "⚖️ Consensus weighted by 7d track record: A 1.25 (6/8)" in text
+    # No details -> no footer line.
+    text2 = mp.build_pulse(current, [], [], date(2026, 7, 17), date(2026, 7, 24))
+    assert "⚖️" not in text2
+
+
+def test_fetch_latest_prices_only_for_targeted_tickers():
+    entries = mp.aggregate_assets([
+        _rec("2026-07-20", "A", [_asset(stance="bullish", price_target=110)]),
+        _rec("2026-07-20", "A", [_asset(name="No Target", ticker="NT", stance="bullish")]),
+    ])
+    calls = []
+
+    def fetcher(symbol, start, end):
+        calls.append(symbol)
+        return {date(2026, 7, 23): 100.0}
+
+    prices = mp.fetch_latest_prices(entries, price_fetcher=fetcher, today=date(2026, 7, 24))
+    assert calls == ["tsla.us"]  # NT has no price target -> not fetched
+    assert prices == {"TSLA": 100.0}
