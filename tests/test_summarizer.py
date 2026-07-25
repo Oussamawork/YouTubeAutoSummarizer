@@ -178,3 +178,36 @@ def test_summarize_quota_then_success(monkeypatch):
     monkeypatch.setattr(summarizer, "_call_provider", fake_call)
     assert summarizer.summarize_transcript("text") == "OK"
     assert "a" in summarizer._EXHAUSTED_PROVIDERS
+
+
+def test_json_mode_sets_response_format(monkeypatch):
+    payloads = []
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        payloads.append(json)
+        return R()
+
+    monkeypatch.setattr(summarizer.requests, "post", fake_post)
+    monkeypatch.setattr(summarizer, "_provider_configs", lambda: [
+        {"name": "p", "base_url": "http://x", "api_key": "k", "model": "m"},
+    ])
+    monkeypatch.setattr(summarizer, "_EXHAUSTED_PROVIDERS", set())
+    assert summarizer.complete("sys", "user", json_mode=True) == '{"ok": true}'
+    assert payloads[0]["response_format"] == {"type": "json_object"}
+    assert summarizer.complete("sys", "user") == '{"ok": true}'
+    assert "response_format" not in payloads[1]
+
+
+def test_provider_model_empty_env_falls_back(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "")  # unset repo variable arrives as ""
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    providers = summarizer._provider_configs()
+    assert providers[0]["model"] == "gemini-2.5-flash"
