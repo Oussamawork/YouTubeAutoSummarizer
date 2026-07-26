@@ -446,3 +446,90 @@ def test_main_records_row_even_when_extraction_returns_none(monkeypatch):
     _run_main(monkeypatch, market_signals=True)
     assert len(records) == 1
     assert records[0]["signals"] is None  # summary row still kept for the dataset
+
+
+# --- @handle resolution ---
+
+
+def test_resolve_channel_handle_success(monkeypatch):
+    monkeypatch.setattr(
+        scraper.requests, "get",
+        lambda *a, **k: FakeResp(200, {"items": [{"id": "UCabc123"}]}),
+    )
+    assert scraper.resolve_channel_handle("KEY", "@hkcm") == "UCabc123"
+
+
+def test_resolve_channel_handle_sends_forhandle_param(monkeypatch):
+    captured = {}
+
+    def fake_get(url, params=None, timeout=None):
+        captured["url"], captured["params"] = url, params
+        return FakeResp(200, {"items": [{"id": "UCabc123"}]})
+
+    monkeypatch.setattr(scraper.requests, "get", fake_get)
+    scraper.resolve_channel_handle("KEY", "@hkcm")
+    assert captured["url"] == scraper.YOUTUBE_CHANNELS_URL
+    assert captured["params"]["forHandle"] == "@hkcm"
+    assert captured["params"]["part"] == "id"
+
+
+def test_resolve_channel_handle_unknown_returns_none(monkeypatch):
+    monkeypatch.setattr(scraper.requests, "get", lambda *a, **k: FakeResp(200, {"items": []}))
+    assert scraper.resolve_channel_handle("KEY", "@nope") is None
+
+
+def test_resolve_channel_handle_http_error_returns_none(monkeypatch):
+    monkeypatch.setattr(scraper.requests, "get", lambda *a, **k: FakeResp(403, {}, text="forbidden"))
+    assert scraper.resolve_channel_handle("KEY", "@x") is None
+
+
+def test_main_resolves_handle_and_keys_state_by_id(monkeypatch):
+    """A handle entry is resolved once, and dedup state uses the resolved id."""
+    saved = []
+    monkeypatch.setenv("YOUTUBE_API_KEY", "yt")
+    monkeypatch.setenv("TELEGRAM_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHANNEL_ID", "premium")
+    monkeypatch.delenv("TELEGRAM_FREE_CHANNEL_ID", raising=False)
+    monkeypatch.delenv("DAILY_DIGEST", raising=False)
+    monkeypatch.setenv("MARKET_SIGNALS", "false")
+
+    video = {
+        "video_id": "v1", "channel_name": "HKCM", "video_title": "T",
+        "video_url": "http://u", "published_at": "2026-07-01T00:00:00+00:00",
+    }
+    calls = []
+    monkeypatch.setattr(scraper, "read_channels", lambda p: [
+        {"channel_id": "@hkcm", "digest": False, "max_per_run": 3},
+        {"channel_id": "@hkcm", "digest": False, "max_per_run": 3},  # same handle twice
+    ])
+    monkeypatch.setattr(scraper, "load_state", lambda p: {"channels": {}, "pending": {}})
+    monkeypatch.setattr(scraper, "save_state", lambda p, s: saved.append(
+        {k: dict(v) for k, v in s["channels"].items()}))
+    monkeypatch.setattr(scraper, "save_to_json", lambda r, f: None)
+    monkeypatch.setattr(scraper, "resolve_channel_handle",
+                        lambda key, handle: calls.append(handle) or "UCresolved")
+    monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: [video] if cid == "UCresolved" else [])
+    monkeypatch.setattr(scraper, "_summarize_video", lambda d, a, compact=False: ("S", "sent", True))
+    monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
+    scraper.main()
+
+    assert calls == ["@hkcm"]  # resolved once, cached for the second entry
+    assert saved and "UCresolved" in saved[-1]  # state keyed by id, not handle
+
+
+def test_main_skips_unresolvable_handle(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "yt")
+    monkeypatch.setenv("TELEGRAM_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHANNEL_ID", "premium")
+    monkeypatch.setenv("MARKET_SIGNALS", "false")
+    fetched = []
+    monkeypatch.setattr(scraper, "read_channels", lambda p: [
+        {"channel_id": "@bad", "digest": False, "max_per_run": 3},
+    ])
+    monkeypatch.setattr(scraper, "load_state", lambda p: {"channels": {}, "pending": {}})
+    monkeypatch.setattr(scraper, "save_state", lambda p, s: None)
+    monkeypatch.setattr(scraper, "save_to_json", lambda r, f: None)
+    monkeypatch.setattr(scraper, "resolve_channel_handle", lambda key, handle: None)
+    monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: fetched.append(cid) or [])
+    scraper.main()
+    assert fetched == []  # never fetches with an unresolved handle

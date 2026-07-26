@@ -22,6 +22,9 @@ load_dotenv('.env')
 
 # YouTube API request tuning
 YOUTUBE_API_URL = "https://www.googleapis.com/youtube/v3/search"
+# Channels endpoint, used to resolve an @handle to its channel id (1 quota unit
+# per call, vs 100 for a search) so channel_ids.txt can list handles directly.
+YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 # Channel RSS feed: free, keyless, no API quota, and lists the last ~15 uploads
 # (so channels that upload more than once between runs aren't missed). Primary
 # video source; the Data API is only the fallback.
@@ -145,6 +148,49 @@ def get_recent_videos(youtube_api_key, channel_id):
     log_warn("RSS feed unavailable; falling back to the YouTube Data API (latest video only).")
     video = get_latest_video(youtube_api_key, channel_id)
     return [video] if video else []
+
+
+def resolve_channel_handle(youtube_api_key, handle):
+    """
+    Resolve an @handle (e.g. "@hkcm") to its UC… channel id via the YouTube
+    Data API. Returns the channel id, or None when it can't be resolved
+    (logged, never raises) so the caller can skip that channel for this run.
+    """
+    params = {"part": "id", "forHandle": handle, "key": youtube_api_key}
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.get(YOUTUBE_CHANNELS_URL, params=params, timeout=REQUEST_TIMEOUT)
+        except requests.RequestException as e:
+            log_warn(f"Handle lookup error for {handle} (attempt {attempt}/{MAX_RETRIES}): {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF * attempt)
+                continue
+            log_error(f"Could not resolve {handle}: YouTube API unreachable.")
+            return None
+
+        if response.status_code == 200:
+            try:
+                items = (response.json() or {}).get("items") or []
+            except ValueError as e:
+                log_error(f"Unexpected handle-lookup response for {handle}: {e}")
+                return None
+            channel_id = (items[0] or {}).get("id") if items else None
+            if not channel_id:
+                log_error(f"No channel found for handle {handle}; check the spelling.")
+                return None
+            log_info(f"Resolved {handle} to channel id {channel_id}.")
+            return channel_id
+
+        if response.status_code in TRANSIENT_STATUS and attempt < MAX_RETRIES:
+            log_warn(
+                f"Transient handle-lookup status {response.status_code} for {handle} "
+                f"(attempt {attempt}/{MAX_RETRIES}); retrying."
+            )
+            time.sleep(RETRY_BACKOFF * attempt)
+            continue
+
+        log_error(f"Handle lookup for {handle} returned {response.status_code}: {response.text[:200]}")
+        return None
 
 
 def _select_candidates(videos, channel_state, pending, limit=None):
@@ -454,11 +500,25 @@ def main():
                 "no_video": 0, "error": 0,
             }
 
+            # Handles (@name) are resolved to channel ids once per run; the
+            # dedup state is always keyed by the resolved id, so switching a
+            # line between a handle and its id doesn't re-send old videos.
+            resolved_handles = {}
+
             for channel in channels:
                 channel_id = channel["channel_id"]
                 # Isolate each channel: one malformed response or unexpected error
                 # must not abort the whole run and skip every remaining channel.
                 try:
+                    if channel_id.startswith("@"):
+                        handle = channel_id
+                        channel_id = resolved_handles.get(handle)
+                        if channel_id is None:
+                            channel_id = resolve_channel_handle(YOUTUBE_API_KEY, handle)
+                            if not channel_id:
+                                outcomes["error"] += 1
+                                continue
+                            resolved_handles[handle] = channel_id
                     log_info(f"Processing channel ID: {channel_id}")
                     videos = get_recent_videos(YOUTUBE_API_KEY, channel_id)
                     if not videos:
