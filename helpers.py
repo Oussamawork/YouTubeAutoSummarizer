@@ -36,9 +36,11 @@ def env_float(name, default):
 # Function to read channel entries from a file
 def read_channels(file_path):
     """
-    Read channel entries, one per line: a channel ID optionally followed by
-    whitespace-separated options. Blank lines and lines starting with '#'
-    (comments) are ignored. Returns [] if the file is missing.
+    Read channel entries, one per line: a channel ID (UC…) or an @handle,
+    optionally followed by whitespace-separated options. Handles are resolved
+    to channel IDs at run time (see scraper.resolve_channel_handle). Blank
+    lines and lines starting with '#' (comments) are ignored. Returns [] if
+    the file is missing.
 
     Supported options:
       digest — bundle this channel's new videos into one compact TL;DR digest

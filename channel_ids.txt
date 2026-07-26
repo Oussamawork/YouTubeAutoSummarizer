@@ -1,4 +1,5 @@
-# One channel per line: <channel_id> [options]
+# One entry per line: <channel_id> | @handle  [options]
+# Handles are resolved to channel IDs at run time (1 YouTube API quota unit).
 # Options:
 #   digest — bundle this channel's new videos into ONE compact TL;DR message
 #            per run (for prolific channels, so the chat isn't flooded)
@@ -7,3 +8,8 @@ UCrGLm-Drgv0vbbemwwHeXJw
 UCngIhBkikUe6e7tZTjpKK7Q digest
 UCwKB_00dPL3x5XmHF9IJCrg
 UCfCT7SSFEWyG4th9ZmaGYqQ
+# HKCM (German Elliott-Wave chart analysis). The main channel is prolific, so
+# it runs in digest mode with a per-run cap to keep the chat readable.
+@hkcm digest max=5
+@HKCM_GLOBAL digest
+@phantombyhkcm

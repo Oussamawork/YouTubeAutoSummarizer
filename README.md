@@ -61,13 +61,15 @@ pip install -r requirements.txt
    ```
 
 ### 4. Format of `channel_ids.txt`:
-   One YouTube channel ID per line, optionally followed by per-channel options. Blank lines and `#` comments are ignored. For example:
+   One YouTube channel ID **or `@handle`** per line, optionally followed by per-channel options. Blank lines and `#` comments are ignored. For example:
 
    ```txt
    UC_x5XG1OV2P6uZZ5FSM9Ttw
    UCBR8-60-B28hp2BmDPdntcQ digest
-   UC123456789 digest max=5
+   @somechannel digest max=5
    ```
+
+   Handles are resolved to channel IDs at run time (1 YouTube API quota unit each, resolved once per run). Dedup state is always keyed by the resolved ID, so switching a line between a handle and its ID never re-sends old videos. A handle that can't be resolved (typo, renamed channel) is logged and skipped for that run without affecting the other channels.
 
    | Option | Effect |
    | --- | --- |
