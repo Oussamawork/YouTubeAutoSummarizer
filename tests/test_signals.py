@@ -128,3 +128,79 @@ def test_extract_requests_json_mode(monkeypatch):
     monkeypatch.setattr(signals, "complete", fake)
     signals.extract_signals("summary", "t", "c")
     assert captured.get("json_mode") is True
+
+
+# --- Combined summarize + extract (one call instead of two) ---
+
+
+COMBINED_OK = {"summary": "TL;DR line\n\n• bullet one", "signals": VALID}
+
+
+def test_summarize_with_signals_success(monkeypatch):
+    captured = {}
+
+    def fake(system_prompt, user_message, **kw):
+        captured.update(kw, sp=system_prompt, um=user_message)
+        return json.dumps(COMBINED_OK)
+
+    monkeypatch.setattr(signals, "complete", fake)
+    summary, sig = signals.summarize_with_signals("a transcript", "Title")
+    assert summary == "TL;DR line\n\n• bullet one"
+    assert sig["assets"][0]["ticker"] == "TSLA"
+    assert captured["json_mode"] is True
+    assert captured["max_tokens"] == signals.COMBINED_MAX_TOKENS
+    assert "a transcript" in captured["um"]
+    # Prompt carries both the summary rules and the signals schema.
+    assert "TL;DR" in captured["sp"] and '"market_sentiment"' in captured["sp"]
+
+
+def test_summarize_with_signals_compact_prompt(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(signals, "complete",
+                        lambda sp, um, **kw: seen.update(sp=sp) or json.dumps(COMBINED_OK))
+    signals.summarize_with_signals("t", "T", compact=True)
+    assert "COMPACT digest entries" in seen["sp"]
+
+
+def test_summarize_with_signals_bad_json_falls_back(monkeypatch):
+    # None tells the caller to use the separate summarize/extract calls.
+    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: "not json at all")
+    assert signals.summarize_with_signals("t") is None
+    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: json.dumps({"signals": VALID}))
+    assert signals.summarize_with_signals("t") is None  # no summary field
+    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: "")
+    assert signals.summarize_with_signals("t") is None
+
+
+def test_summarize_with_signals_quota_propagates(monkeypatch):
+    # Quota is the provider chain's verdict — don't burn a second request.
+    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: signals.QUOTA_EXHAUSTED_SENTINEL)
+    summary, sig = signals.summarize_with_signals("t")
+    assert summary == signals.QUOTA_EXHAUSTED_SENTINEL and sig is None
+
+
+def test_summarize_with_signals_insufficient_sentinel(monkeypatch):
+    monkeypatch.setattr(
+        signals, "complete",
+        lambda sp, um, **kw: json.dumps({"summary": "INSUFFICIENT_TRANSCRIPT", "signals": {}}),
+    )
+    summary, sig = signals.summarize_with_signals("t")
+    assert summary == signals.INSUFFICIENT_TRANSCRIPT_SENTINEL and sig is None
+
+
+def test_summarize_with_signals_summary_survives_bad_signals(monkeypatch):
+    # A malformed signals object must not cost us the summary.
+    monkeypatch.setattr(
+        signals, "complete",
+        lambda sp, um, **kw: json.dumps({"summary": "Good summary", "signals": "oops"}),
+    )
+    summary, sig = signals.summarize_with_signals("t")
+    assert summary == "Good summary" and sig is None
+
+
+def test_summarize_with_signals_empty_transcript_skips_call(monkeypatch):
+    monkeypatch.setattr(
+        signals, "complete",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call")),
+    )
+    assert signals.summarize_with_signals("   ") is None

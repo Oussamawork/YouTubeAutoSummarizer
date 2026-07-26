@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from defusedxml import ElementTree as SafeET
 from transcript import get_transcript_from_video
 from helpers import read_channels, save_to_json, clean_summary, load_state, save_state, env_int, append_jsonl
-from signals import extract_signals
+from signals import extract_signals, summarize_with_signals
 from summarizer import (
     summarize_transcript,
     INSUFFICIENT_TRANSCRIPT_SENTINEL,
@@ -331,17 +331,22 @@ def get_latest_video(YOUTUBE_api_key, channel_id):
         return None
 
 
-def _summarize_video(video_details, no_transcript_attempts=0, compact=False):
+def _summarize_video(video_details, no_transcript_attempts=0, compact=False, want_signals=False):
     """
     Fetch and summarize one video's transcript. `compact` requests a short
     TL;DR-style summary (for digest-mode channels) instead of a full one.
+    `want_signals` asks for the market signals in the same LLM call (one
+    request instead of two), falling back to a plain summary call if the
+    combined response isn't usable.
 
-    Returns (telegram_body, outcome, decided):
+    Returns (telegram_body, outcome, decided, signals):
       telegram_body — text to deliver, or None when nothing should be sent yet
         (silent deferral while waiting for captions to appear);
       outcome — key for the run-summary tally;
       decided — True when the video is final (advance dedup state), False when
-        it must be retried on a later run.
+        it must be retried on a later run;
+      signals — extracted signals dict when the combined call produced them,
+        else None (the caller can extract separately).
     """
     log_info(f"Fetching transcript for {video_details['video_url']} ...")
     transcript = get_transcript_from_video(video_details['video_url'])
@@ -359,18 +364,30 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False):
                 f"No transcript yet (attempt {attempt}/{NO_TRANSCRIPT_MAX_ATTEMPTS}); "
                 "captions may still be processing — deferring to the next run."
             )
-            return None, "no_transcript_deferred", False
+            return None, "no_transcript_deferred", False, None
         log_warn("Transcript still unavailable after retries. Notifying Telegram.")
         return (
             f"⚠️ No transcript available for this video (checked {NO_TRANSCRIPT_MAX_ATTEMPTS} runs), "
             "so no summary could be generated. Manual review needed.",
             "no_transcript",
             True,
+            None,
         )
 
     video_details['transcript'] = transcript
     log_info("Transcript fetched successfully. Summarizing...")
-    raw_summary = summarize_transcript(transcript_text, video_details['video_title'], compact=compact)
+    raw_summary, signals = None, None
+    if want_signals:
+        # One call for both; None means "not usable" — fall back to the plain
+        # summary call so a combined-format hiccup can never cost a summary.
+        combined = summarize_with_signals(
+            transcript_text, video_details['video_title'], compact=compact,
+            channel_name=video_details.get('channel_name'),
+        )
+        if combined is not None:
+            raw_summary, signals = combined
+    if raw_summary is None:
+        raw_summary = summarize_transcript(transcript_text, video_details['video_title'], compact=compact)
 
     if raw_summary == INSUFFICIENT_TRANSCRIPT_SENTINEL:
         # A transcript existed but was too garbled/incomplete for the model to
@@ -381,6 +398,7 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False):
             "⚠️ The transcript was too garbled or incomplete to summarize. Manual review needed.",
             "insufficient",
             True,
+            None,
         )
 
     if raw_summary == QUOTA_EXHAUSTED_SENTINEL:
@@ -392,13 +410,14 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False):
             "This video will be retried on the next run.",
             "quota_deferred",
             False,
+            None,
         )
 
     summary = clean_summary(raw_summary)
     if summary:
         video_details['summary'] = summary
         log_info("Summary generated.")
-        return summary, "sent", True
+        return summary, "sent", True, signals
 
     # Transcript existed but the summarizer produced nothing.
     video_details['summary'] = "Summary not available."
@@ -407,19 +426,23 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False):
         "⚠️ A transcript was found, but summarization produced no output. Manual review needed.",
         "summary_failed",
         True,
+        None,
     )
 
 
-def _record_market_signals(channel_id, video_details, summary):
+def _record_market_signals(channel_id, video_details, summary, signals=None):
     """
-    Best-effort: extract structured market signals from a delivered summary and
-    append the record to SIGNALS_FILE. Any failure is logged and swallowed —
-    signal recording must never affect delivery, outcomes, or dedup state.
+    Best-effort: append the delivered summary plus its market signals to
+    SIGNALS_FILE. `signals` comes free from the combined summarize+extract
+    call; when it's None (combined path unavailable or unusable) a separate
+    extraction call is made. Any failure is logged and swallowed — signal
+    recording must never affect delivery, outcomes, or dedup state.
     """
     try:
-        signals = extract_signals(
-            summary, video_details.get("video_title"), video_details.get("channel_name")
-        )
+        if signals is None:
+            signals = extract_signals(
+                summary, video_details.get("video_title"), video_details.get("channel_name")
+            )
         record = {
             "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "video_id": video_details.get("video_id"),
@@ -549,8 +572,9 @@ def main():
                             f"(published: {video_details['published_at']})"
                         )
 
-                        telegram_body, outcome, decided = _summarize_video(
-                            video_details, attempts, compact=channel["digest"]
+                        telegram_body, outcome, decided, signals = _summarize_video(
+                            video_details, attempts, compact=channel["digest"],
+                            want_signals=market_signals,
                         )
                         outcomes[outcome] += 1
 
@@ -591,7 +615,7 @@ def main():
                                     )
 
                         if market_signals and outcome == "sent":
-                            _record_market_signals(channel_id, video_details, telegram_body)
+                            _record_market_signals(channel_id, video_details, telegram_body, signals)
 
                         if decided:
                             # Final outcome: advance the watermark and drop any
@@ -714,7 +738,7 @@ def summarize_on_demand(video_url):
 
     # Prime the attempt counter so a missing transcript reports immediately
     # instead of deferring — there is no "next run" for an on-demand request.
-    telegram_body, outcome, _ = _summarize_video(
+    telegram_body, outcome, _, _ = _summarize_video(
         video_details, no_transcript_attempts=NO_TRANSCRIPT_MAX_ATTEMPTS - 1
     )
     sent = send_telegram_message(

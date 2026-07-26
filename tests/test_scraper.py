@@ -220,7 +220,7 @@ def test_advance_channel_state_never_regresses():
 
 def test_summarize_video_defers_missing_transcript(monkeypatch):
     monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": ""})
-    body, outcome, decided = scraper._summarize_video(_vid("v1", ""), no_transcript_attempts=0)
+    body, outcome, decided, _sig = scraper._summarize_video(_vid("v1", ""), no_transcript_attempts=0)
     # Captions may still be processing: stay silent and retry next run.
     assert body is None
     assert outcome == "no_transcript_deferred"
@@ -229,7 +229,7 @@ def test_summarize_video_defers_missing_transcript(monkeypatch):
 
 def test_summarize_video_gives_up_after_max_attempts(monkeypatch):
     monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": ""})
-    body, outcome, decided = scraper._summarize_video(
+    body, outcome, decided, _sig = scraper._summarize_video(
         _vid("v1", ""), no_transcript_attempts=scraper.NO_TRANSCRIPT_MAX_ATTEMPTS - 1
     )
     assert body is not None and "No transcript" in body
@@ -240,7 +240,7 @@ def test_summarize_video_gives_up_after_max_attempts(monkeypatch):
 def test_summarize_video_quota_deferral_not_decided(monkeypatch):
     monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "words"})
     monkeypatch.setattr(scraper, "summarize_transcript", lambda t, title, **kw: scraper.QUOTA_EXHAUSTED_SENTINEL)
-    body, outcome, decided = scraper._summarize_video(_vid("v1", ""))
+    body, outcome, decided, _sig = scraper._summarize_video(_vid("v1", ""))
     assert outcome == "quota_deferred"
     assert decided is False
 
@@ -265,7 +265,7 @@ def test_summarize_video_success(monkeypatch):
     monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "words"})
     monkeypatch.setattr(scraper, "summarize_transcript", lambda t, title, **kw: "TLDR\n\n• point")
     details = _vid("v1", "")
-    body, outcome, decided = scraper._summarize_video(details)
+    body, outcome, decided, _sig = scraper._summarize_video(details)
     assert body == "TLDR\n\n• point"
     assert outcome == "sent"
     assert decided is True
@@ -307,7 +307,7 @@ def _run_main(monkeypatch, free_channel=None, premium_url=None, outcome="sent",
     monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: [video])
     monkeypatch.setattr(
         scraper, "_summarize_video",
-        lambda details, attempts, compact=False: (body, outcome, True),
+        lambda details, attempts, compact=False, want_signals=False: (body, outcome, True, None),
     )
 
     calls = {"message": [], "teaser": []}
@@ -509,7 +509,7 @@ def test_main_resolves_handle_and_keys_state_by_id(monkeypatch):
     monkeypatch.setattr(scraper, "resolve_channel_handle",
                         lambda key, handle: calls.append(handle) or "UCresolved")
     monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: [video] if cid == "UCresolved" else [])
-    monkeypatch.setattr(scraper, "_summarize_video", lambda d, a, compact=False: ("S", "sent", True))
+    monkeypatch.setattr(scraper, "_summarize_video", lambda d, a, compact=False, want_signals=False: ("S", "sent", True, None))
     monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
     scraper.main()
 
@@ -533,3 +533,63 @@ def test_main_skips_unresolvable_handle(monkeypatch):
     monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: fetched.append(cid) or [])
     scraper.main()
     assert fetched == []  # never fetches with an unresolved handle
+
+
+# --- Combined summarize+extract wiring (one LLM call instead of two) ---
+
+
+def test_summarize_video_uses_combined_call(monkeypatch):
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "text"})
+    monkeypatch.setattr(
+        scraper, "summarize_with_signals",
+        lambda t, title=None, compact=False, channel_name=None: ("Summary", {"assets": []}),
+    )
+    monkeypatch.setattr(
+        scraper, "summarize_transcript",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("second call should not happen")),
+    )
+    body, outcome, decided, sig = scraper._summarize_video(
+        _vid("v1", ""), want_signals=True)
+    assert (body, outcome, decided) == ("Summary", "sent", True)
+    assert sig == {"assets": []}
+
+
+def test_summarize_video_falls_back_when_combined_unusable(monkeypatch):
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "text"})
+    monkeypatch.setattr(
+        scraper, "summarize_with_signals",
+        lambda t, title=None, compact=False, channel_name=None: None,
+    )
+    monkeypatch.setattr(scraper, "summarize_transcript", lambda *a, **k: "Plain summary")
+    body, outcome, decided, sig = scraper._summarize_video(_vid("v1", ""), want_signals=True)
+    assert body == "Plain summary" and outcome == "sent" and sig is None
+
+
+def test_summarize_video_skips_combined_when_signals_off(monkeypatch):
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "text"})
+    monkeypatch.setattr(
+        scraper, "summarize_with_signals",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("combined call should not happen")),
+    )
+    monkeypatch.setattr(scraper, "summarize_transcript", lambda *a, **k: "Plain summary")
+    body, _, _, sig = scraper._summarize_video(_vid("v1", ""))
+    assert body == "Plain summary" and sig is None
+
+
+def test_record_market_signals_reuses_combined_result(monkeypatch):
+    rows = []
+    monkeypatch.setattr(
+        scraper, "extract_signals",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not re-extract")),
+    )
+    monkeypatch.setattr(scraper, "append_jsonl", lambda p, r: rows.append(r) or True)
+    scraper._record_market_signals("c1", _vid("v1", ""), "S", {"assets": [], "market_sentiment": "neutral"})
+    assert rows[0]["signals"]["market_sentiment"] == "neutral"
+
+
+def test_record_market_signals_extracts_when_not_supplied(monkeypatch):
+    rows, calls = [], []
+    monkeypatch.setattr(scraper, "extract_signals", lambda *a, **k: calls.append(1) or {"assets": []})
+    monkeypatch.setattr(scraper, "append_jsonl", lambda p, r: rows.append(r) or True)
+    scraper._record_market_signals("c1", _vid("v1", ""), "S", None)
+    assert calls == [1] and rows[0]["signals"] == {"assets": []}
