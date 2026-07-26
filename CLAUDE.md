@@ -35,6 +35,12 @@ first, capped at `MAX_VIDEOS_PER_RUN`. `pending` maps video-id → retry record 
 deferred videos (captions not up yet → up to `NO_TRANSCRIPT_MAX_ATTEMPTS` runs;
 LLM quota exhausted). Deciding a video advances the watermark; deferring does not.
 
+## Design docs
+- `docs/tdd-transcript-budget.md` — measured findings on transcript-credit
+  efficiency (≈2.9 credits per delivered summary), the budget/pacing design and
+  its critique, options considered, and the sequenced next steps. Read before
+  changing `transcript.py` budget logic or channel caps.
+
 ## Dev workflow
 ```bash
 pip install -r requirements-dev.txt   # runtime + pytest (the SessionStart hook does this on web)
