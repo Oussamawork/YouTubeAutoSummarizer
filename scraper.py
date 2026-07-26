@@ -4,7 +4,7 @@ import sys
 import time
 from dotenv import load_dotenv
 from defusedxml import ElementTree as SafeET
-from transcript import get_transcript_from_video
+from transcript import get_transcript_from_video, budget_status
 from helpers import read_channels, save_to_json, clean_summary, load_state, save_state, env_int, append_jsonl
 from signals import extract_signals, summarize_with_signals
 from summarizer import (
@@ -247,6 +247,27 @@ def _select_candidates(videos, channel_state, pending, limit=None):
     return ordered
 
 
+def _evict_orphaned_pending(pending, channel_id, feed_video_ids):
+    """
+    Drop this channel's retry records for videos that are no longer in its feed.
+
+    `_select_candidates` can only re-include a pending video while it is still
+    in the ~15-entry RSS window, so once a deferred video scrolls out it can
+    never be retried or cleared — it just accumulates in the committed state
+    file forever. Only called with a feed we actually fetched, so a failed
+    fetch never evicts anything. Returns the number of records dropped.
+    """
+    orphaned = [
+        video_id for video_id, record in pending.items()
+        if isinstance(record, dict)
+        and record.get("channel_id") == channel_id
+        and video_id not in feed_video_ids
+    ]
+    for video_id in orphaned:
+        pending.pop(video_id, None)
+    return len(orphaned)
+
+
 def _advance_channel_state(channels_state, channel_id, video_details):
     """
     Record a decided video as the channel's watermark. Deciding an older
@@ -358,6 +379,11 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     if not transcript_text:
         video_details['transcript'] = "Transcript not found."
         video_details['summary'] = "Summary not available."
+        if isinstance(transcript, dict) and transcript.get("budget_exhausted"):
+            # We chose not to spend a transcript credit, so this is not the
+            # video's fault: defer silently without consuming a retry attempt.
+            log_info("Transcript budget spent; deferring this video to a later run.")
+            return None, "budget_deferred", False, None
         attempt = no_transcript_attempts + 1
         if attempt < NO_TRANSCRIPT_MAX_ATTEMPTS:
             log_warn(
@@ -492,6 +518,12 @@ def main():
                 "SUPADATA_API_KEY not set; transcript fetching may fail on CI "
                 "where YouTube blocks the runner IP."
             )
+        else:
+            allowed, used, remaining = budget_status()
+            log_info(
+                f"Transcript budget: {used}/{allowed} used today, "
+                f"{remaining} credit(s) left this month."
+            )
 
         # Read channel entries (id + per-channel options) from the file
         channels = read_channels("channel_ids.txt")
@@ -520,8 +552,12 @@ def main():
             outcomes = {
                 "sent": 0, "unchanged": 0, "no_transcript": 0, "no_transcript_deferred": 0,
                 "insufficient": 0, "summary_failed": 0, "quota_deferred": 0,
-                "no_video": 0, "error": 0,
+                "budget_deferred": 0, "no_video": 0, "error": 0,
             }
+
+            # Count of retry records dropped this run because their video left
+            # the feed (reported in the run summary).
+            evicted_pending = 0
 
             # Handles (@name) are resolved to channel ids once per run; the
             # dedup state is always keyed by the resolved id, so switching a
@@ -548,6 +584,12 @@ def main():
                         log_warn(f"No videos found for channel ID: {channel_id}.")
                         outcomes["no_video"] += 1
                         continue
+
+                    # The feed fetch succeeded, so anything still pending for
+                    # this channel that isn't in the feed can never be retried.
+                    evicted_pending += _evict_orphaned_pending(
+                        pending, channel_id, {v["video_id"] for v in videos}
+                    )
 
                     candidates = _select_candidates(
                         videos, channels_state.get(channel_id), pending,
@@ -685,6 +727,8 @@ def main():
 
             # End-of-run report: one line summarizing what happened this run.
             summary_line = ", ".join(f"{k}={v}" for k, v in outcomes.items() if v)
+            if evicted_pending:
+                summary_line += f", pending_evicted={evicted_pending}"
             log_info(f"Run summary: {len(channels)} channels | {summary_line or 'nothing to do'}")
 
             # Save the results to a JSON file

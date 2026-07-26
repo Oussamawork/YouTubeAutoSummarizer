@@ -1,9 +1,13 @@
+import calendar
+import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
 
 import requests
+from helpers import env_int
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
@@ -25,6 +29,112 @@ SUPADATA_POLL_DELAY = 5  # seconds between polls for async (202) jobs
 SUPADATA_MAX_RETRIES = 3
 SUPADATA_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
 SUPADATA_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+# Supadata answers "you're out of credits" with these; the request itself did
+# not deliver a transcript, so we rotate to the next key rather than retrying.
+SUPADATA_CREDIT_STATUS = {402, 403}
+
+# --- Free-tier budget -------------------------------------------------------
+#
+# Supadata's free tier is a small monthly credit pool per key, and a spent pool
+# means no transcripts at all (the youtube-transcript-api fallback is blocked
+# from CI IPs). So usage is metered here: each key contributes
+# SUPADATA_CREDITS_PER_KEY to a monthly budget, and the budget is spread evenly
+# across the days left in the month. Hitting the daily allowance defers videos
+# to a later run instead of burning the month's credits in the first week.
+SUPADATA_CREDITS_PER_KEY = env_int("SUPADATA_CREDITS_PER_KEY", 100)
+SUPADATA_USAGE_FILE = os.getenv("SUPADATA_USAGE_FILE") or "data/supadata_usage.json"
+
+
+def _supadata_keys():
+    """
+    Configured Supadata keys, in order. Reads SUPADATA_API_KEYS (comma
+    separated) plus the numbered SUPADATA_API_KEY / _2 / _3 forms, de-duped
+    and read at call time so tests and reloads see the current environment.
+    """
+    raw = [os.getenv("SUPADATA_API_KEYS") or ""]
+    raw += [os.getenv(name) or "" for name in
+            ("SUPADATA_API_KEY", "SUPADATA_API_KEY_2", "SUPADATA_API_KEY_3")]
+    keys, seen = [], set()
+    for value in raw:
+        for key in value.split(","):
+            key = key.strip()
+            if key and key not in seen:
+                seen.add(key)
+                keys.append(key)
+    return keys
+
+
+def monthly_budget():
+    """Total transcript fetches allowed this month across all configured keys."""
+    explicit = env_int("SUPADATA_MONTHLY_BUDGET", 0)
+    if explicit > 0:
+        return explicit
+    return len(_supadata_keys()) * SUPADATA_CREDITS_PER_KEY
+
+
+def _load_usage():
+    """Usage counters for the current month/day; resets when either rolls over."""
+    today = datetime.now(timezone.utc).date()
+    month, day = today.strftime("%Y-%m"), today.isoformat()
+    try:
+        with open(SUPADATA_USAGE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("usage file is not an object")
+    except (OSError, ValueError):
+        data = {}
+    if data.get("month") != month:
+        data = {"month": month, "count": 0}
+    if data.get("day") != day:
+        data["day"], data["day_count"] = day, 0
+    data.setdefault("count", 0)
+    data.setdefault("day_count", 0)
+    return data
+
+
+def _save_usage(usage):
+    try:
+        directory = os.path.dirname(SUPADATA_USAGE_FILE)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(SUPADATA_USAGE_FILE, "w", encoding="utf-8") as f:
+            json.dump(usage, f, indent=2)
+    except OSError as e:
+        # Losing a counter update is better than losing the run; the worst case
+        # is over-counting next run, which errs toward saving credits.
+        log_warn(f"Could not persist Supadata usage: {e}")
+
+
+def _record_call(usage):
+    """Count one Supadata request against the month's and today's budget."""
+    usage["count"] = usage.get("count", 0) + 1
+    usage["day_count"] = usage.get("day_count", 0) + 1
+    _save_usage(usage)
+
+
+def daily_allowance(usage=None, today=None):
+    """
+    How many fetches today may use: the remaining monthly budget spread over
+    the days left in the month (today included), so credits last all month.
+    Returns 0 when the monthly budget is spent.
+    """
+    usage = usage if usage is not None else _load_usage()
+    today = today or datetime.now(timezone.utc).date()
+    remaining = monthly_budget() - usage.get("count", 0)
+    if remaining <= 0:
+        return 0
+    days_left = calendar.monthrange(today.year, today.month)[1] - today.day + 1
+    return max(1, remaining // max(1, days_left))
+
+
+def budget_status():
+    """(allowed_today, used_today, remaining_this_month) — for logging."""
+    usage = _load_usage()
+    return (
+        daily_allowance(usage),
+        usage.get("day_count", 0),
+        max(0, monthly_budget() - usage.get("count", 0)),
+    )
 
 
 def _extract_video_id(video_url_or_id):
@@ -102,13 +212,47 @@ def _supadata_text_from_payload(data):
 def _fetch_supadata(vid):
     """
     Primary source: Supadata hosted API (free tier). Server-side fetch, so it
-    works from blocked CI IPs. Returns "" if no key, on error, or if empty.
+    works from blocked CI IPs. Returns (text, budget_exhausted): text is "" if
+    no key, on error, or if empty; budget_exhausted is True when the call was
+    skipped because this month's/today's credits are spent (the caller defers
+    the video instead of reporting a missing transcript).
     Uses mode=native so only existing captions are returned (no paid AI generation).
     """
-    if not SUPADATA_API_KEY:
-        return ""
+    keys = _supadata_keys()
+    if not keys:
+        return "", False
 
-    headers = {"x-api-key": SUPADATA_API_KEY}
+    usage = _load_usage()
+    allowance = daily_allowance(usage)
+    if usage.get("day_count", 0) >= allowance:
+        remaining = max(0, monthly_budget() - usage.get("count", 0))
+        log_warn(
+            f"Supadata budget reached for today ({usage['day_count']}/{allowance}; "
+            f"{remaining} left this month) — deferring {vid} to a later run."
+        )
+        return "", True
+
+    for index, key in enumerate(keys):
+        text = _fetch_supadata_with_key(vid, key, usage)
+        if text is not None:
+            return text, False
+        if index + 1 < len(keys):
+            log_warn(f"Supadata key {index + 1} is out of credits; trying the next key.")
+
+    # Every key reported no credits. That is exhaustion, not a video without
+    # captions: report it as such so the caller defers instead of eventually
+    # writing the video off as untranscribable.
+    log_warn("All Supadata keys are out of credits; deferring this video.")
+    return "", True
+
+
+def _fetch_supadata_with_key(vid, api_key, usage):
+    """
+    One key's attempt at a transcript. Returns the text ("" when the key worked
+    but there is no transcript), or None when the key is out of credits so the
+    caller should rotate to the next one. Every request sent is metered.
+    """
+    headers = {"x-api-key": api_key}
     params = {
         "url": f"https://www.youtube.com/watch?v={vid}",
         "text": "true",
@@ -126,6 +270,18 @@ def _fetch_supadata(vid):
                 continue
             log_error("Supadata unreachable after retries.")
             return ""
+
+        # Out of credits on this key: rotate rather than retry. Nothing was
+        # delivered, so this must not be metered.
+        if resp.status_code in SUPADATA_CREDIT_STATUS:
+            log_warn(f"Supadata key rejected ({resp.status_code}): {resp.text[:120]}")
+            return None
+
+        # Meter only answers that consume a credit — a served transcript (200)
+        # or an accepted async job (202). Counting rejections and transient
+        # retries would defer videos while credits are still available.
+        if resp.status_code in (200, 202):
+            _record_call(usage)
 
         # Large videos are processed asynchronously: 202 + a job id to poll.
         if resp.status_code == 202:
@@ -196,19 +352,23 @@ def get_transcript_from_video(video_id):
     set, then falls back to youtube-transcript-api (free, no key, works locally).
 
     `video_id` may be a full URL or a bare ID. Always returns a dict shaped
-    {"transcript": <str>} so callers never have to handle exceptions or None;
-    an empty string means no usable transcript was available.
+    {"transcript": <str>, "budget_exhausted": <bool>} so callers never have to
+    handle exceptions or None; an empty transcript means none was available,
+    and budget_exhausted marks the "we chose not to spend a credit" case, which
+    the caller should retry on a later run rather than report as missing.
     """
     vid = _extract_video_id(video_id)
     if not vid:
         log_warn("No valid video ID; cannot fetch transcript.")
-        return {"transcript": ""}
+        return {"transcript": "", "budget_exhausted": False}
 
-    text = _fetch_supadata(vid)
+    text, budget_exhausted = _fetch_supadata(vid)
     if not text:
         text = _fetch_youtube_transcript_api(vid)
 
-    if not text:
+    if text:
+        budget_exhausted = False
+    elif not budget_exhausted:
         log_warn(f"No transcript available for video {vid} from any source.")
 
-    return {"transcript": text}
+    return {"transcript": text, "budget_exhausted": budget_exhausted}
