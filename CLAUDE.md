@@ -9,7 +9,10 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `scraper.py` — entry point / orchestration; RSS feed (primary) + YouTube Data API
   (fallback); candidate selection against the dedup watermark; per-video outcomes
   (send / defer / give up); digest mode; `--video-url` on-demand path.
-- `transcript.py` — transcript fetch (Supadata → youtube-transcript-api fallback).
+- `transcript.py` — transcript fetch (Supadata → youtube-transcript-api fallback);
+  meters Supadata free-tier credits in `data/supadata_usage.json`, rotates across
+  multiple keys, and paces a monthly budget over the days left in the month
+  (over-budget videos defer silently via the `budget_exhausted` flag).
 - `summarizer.py` — provider-agnostic LLM summarization (OpenAI-compatible API);
   also exposes `complete()` for generic calls over the same provider chain.
 - `signals.py` — LLM extraction of structured market signals from summaries

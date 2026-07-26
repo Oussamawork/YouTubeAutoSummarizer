@@ -114,6 +114,25 @@ or subscription link. Warning/deferral notices are never teased, and a failed
 teaser send never affects dedup state. Leave `TELEGRAM_FREE_CHANNEL_ID` unset to
 keep the original single-channel behavior.
 
+### Transcript budget (Supadata free tier):
+
+Supadata's free tier gives a fixed number of transcript fetches per key per
+month (100 by default), and a spent pool means no transcripts at all — the
+`youtube-transcript-api` fallback is blocked from CI IPs. So usage is metered
+and **paced automatically**: each configured key adds `SUPADATA_CREDITS_PER_KEY`
+to a monthly budget, and each day may use `remaining ÷ days left in the month`.
+Videos beyond the day's allowance are deferred silently (no "manual review"
+message, no retry attempt consumed) and picked up on a later run, so credits
+last the whole month instead of being spent in the first week. Counters live in
+`data/supadata_usage.json`, committed back by the daily workflow, and every run
+logs `Transcript budget: used/allowed today, N left this month`.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SUPADATA_API_KEY`, `SUPADATA_API_KEY_2`, `SUPADATA_API_KEY_3` (secrets) | — | Free-tier keys; used in order, rotating when one reports no credits. `SUPADATA_API_KEYS` also accepts a comma-separated list. |
+| `SUPADATA_CREDITS_PER_KEY` | `100` | Monthly credits each key contributes to the budget. |
+| `SUPADATA_MONTHLY_BUDGET` | keys × credits | Explicit override for the whole month's budget. |
+
 ### Market signals (on by default):
 
 Every delivered summary is also

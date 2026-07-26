@@ -593,3 +593,45 @@ def test_record_market_signals_extracts_when_not_supplied(monkeypatch):
     monkeypatch.setattr(scraper, "append_jsonl", lambda p, r: rows.append(r) or True)
     scraper._record_market_signals("c1", _vid("v1", ""), "S", None)
     assert calls == [1] and rows[0]["signals"] == {"assets": []}
+
+
+# --- Transcript budget deferral and pending eviction ---
+
+
+def test_summarize_video_budget_deferral_is_silent(monkeypatch):
+    # Budget exhaustion is our choice, not the video's fault: no message, no
+    # retry attempt consumed, watermark stays put.
+    monkeypatch.setattr(
+        scraper, "get_transcript_from_video",
+        lambda url: {"transcript": "", "budget_exhausted": True},
+    )
+    body, outcome, decided, sig = scraper._summarize_video(_vid("v1", ""), no_transcript_attempts=2)
+    assert body is None and outcome == "budget_deferred" and decided is False and sig is None
+
+
+def test_summarize_video_missing_transcript_still_reports(monkeypatch):
+    # Without the budget flag, the normal give-up path is unchanged.
+    monkeypatch.setattr(
+        scraper, "get_transcript_from_video",
+        lambda url: {"transcript": "", "budget_exhausted": False},
+    )
+    body, outcome, decided, _ = scraper._summarize_video(
+        _vid("v1", ""), no_transcript_attempts=scraper.NO_TRANSCRIPT_MAX_ATTEMPTS - 1)
+    assert outcome == "no_transcript" and decided is True and "No transcript" in body
+
+
+def test_evict_stale_pending_drops_exhausted_records():
+    pending = {
+        "a": {"channel_id": "c", "attempts": scraper.NO_TRANSCRIPT_MAX_ATTEMPTS},
+        "b": {"channel_id": "c", "attempts": 1},
+        "c": {"channel_id": "c", "attempts": 0},
+        "d": "not a dict",
+    }
+    dropped = scraper._evict_stale_pending(pending)
+    assert dropped == 1
+    assert set(pending) == {"b", "c", "d"}  # only the exhausted record goes
+
+
+def test_evict_stale_pending_noop_when_all_fresh():
+    pending = {"a": {"attempts": 0}}
+    assert scraper._evict_stale_pending(pending) == 0 and set(pending) == {"a"}

@@ -4,7 +4,7 @@ import sys
 import time
 from dotenv import load_dotenv
 from defusedxml import ElementTree as SafeET
-from transcript import get_transcript_from_video
+from transcript import get_transcript_from_video, budget_status
 from helpers import read_channels, save_to_json, clean_summary, load_state, save_state, env_int, append_jsonl
 from signals import extract_signals, summarize_with_signals
 from summarizer import (
@@ -247,6 +247,23 @@ def _select_candidates(videos, channel_state, pending, limit=None):
     return ordered
 
 
+def _evict_stale_pending(pending):
+    """
+    Remove retry records that have used up their attempts. Without this they
+    linger forever: a video whose captions never appear is re-fetched (and
+    re-charged against the transcript budget) on every run while it stays in
+    the feed, and it competes with new videos for the per-run cap.
+    Returns the number of records dropped.
+    """
+    stale = [
+        video_id for video_id, record in pending.items()
+        if isinstance(record, dict) and record.get("attempts", 0) >= NO_TRANSCRIPT_MAX_ATTEMPTS
+    ]
+    for video_id in stale:
+        pending.pop(video_id, None)
+    return len(stale)
+
+
 def _advance_channel_state(channels_state, channel_id, video_details):
     """
     Record a decided video as the channel's watermark. Deciding an older
@@ -358,6 +375,11 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     if not transcript_text:
         video_details['transcript'] = "Transcript not found."
         video_details['summary'] = "Summary not available."
+        if isinstance(transcript, dict) and transcript.get("budget_exhausted"):
+            # We chose not to spend a transcript credit, so this is not the
+            # video's fault: defer silently without consuming a retry attempt.
+            log_info("Transcript budget spent; deferring this video to a later run.")
+            return None, "budget_deferred", False, None
         attempt = no_transcript_attempts + 1
         if attempt < NO_TRANSCRIPT_MAX_ATTEMPTS:
             log_warn(
@@ -492,6 +514,12 @@ def main():
                 "SUPADATA_API_KEY not set; transcript fetching may fail on CI "
                 "where YouTube blocks the runner IP."
             )
+        else:
+            allowed, used, remaining = budget_status()
+            log_info(
+                f"Transcript budget: {used}/{allowed} used today, "
+                f"{remaining} credit(s) left this month."
+            )
 
         # Read channel entries (id + per-channel options) from the file
         channels = read_channels("channel_ids.txt")
@@ -520,8 +548,15 @@ def main():
             outcomes = {
                 "sent": 0, "unchanged": 0, "no_transcript": 0, "no_transcript_deferred": 0,
                 "insufficient": 0, "summary_failed": 0, "quota_deferred": 0,
-                "no_video": 0, "error": 0,
+                "budget_deferred": 0, "no_video": 0, "error": 0,
             }
+
+            # Drop retry records that can no longer succeed, so they stop
+            # costing a transcript credit on every run (and stop crowding out
+            # new videos in the per-run cap).
+            evicted = _evict_stale_pending(pending)
+            if evicted:
+                log_warn(f"Evicted {evicted} stale pending video(s) that exceeded their retry budget.")
 
             # Handles (@name) are resolved to channel ids once per run; the
             # dedup state is always keyed by the resolved id, so switching a

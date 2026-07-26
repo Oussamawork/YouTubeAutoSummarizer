@@ -52,6 +52,14 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
+          # Optional extra free-tier keys; each adds SUPADATA_CREDITS_PER_KEY
+          # to the monthly transcript budget and is used when earlier keys run out.
+          SUPADATA_API_KEY_2: ${{ secrets.SUPADATA_API_KEY_2 }}
+          SUPADATA_API_KEY_3: ${{ secrets.SUPADATA_API_KEY_3 }}
+          # Free-tier credits per key (default 100) and an optional explicit
+          # monthly budget override, both repo variables.
+          SUPADATA_CREDITS_PER_KEY: ${{ vars.SUPADATA_CREDITS_PER_KEY }}
+          SUPADATA_MONTHLY_BUDGET: ${{ vars.SUPADATA_MONTHLY_BUDGET }}
           # LLM summarizer (provider-agnostic). Set whichever you use; the
           # summarizer tries the generic LLM_* provider first, then Gemini, then Groq.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -79,12 +87,15 @@ jobs:
       - name: Persist dedup state and signals
         if: always()  # commit progress even if the scraper step failed mid-run
         run: |
-          if git status --porcelain seen_videos.json data/signals.jsonl | grep -q .; then
+          if git status --porcelain seen_videos.json data/signals.jsonl data/supadata_usage.json | grep -q .; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add seen_videos.json
             if [ -f data/signals.jsonl ]; then
               git add data/signals.jsonl
+            fi
+            if [ -f data/supadata_usage.json ]; then
+              git add data/supadata_usage.json
             fi
             git commit -m "chore: update seen videos and signals [skip ci]"
             # Rebase onto any concurrent change, then push — retry on rejection,
