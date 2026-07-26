@@ -1,8 +1,17 @@
 import json
 import re
 
+from helpers import env_int
 from log import log_info, log_warn
-from summarizer import complete, QUOTA_EXHAUSTED_SENTINEL
+from summarizer import (
+    complete,
+    QUOTA_EXHAUSTED_SENTINEL,
+    INSUFFICIENT_TRANSCRIPT_SENTINEL,
+    SUMMARY_SYSTEM_PROMPT,
+    COMPACT_SUMMARY_SYSTEM_PROMPT,
+    _build_user_message,
+    _truncate_transcript,
+)
 
 # Structured market-signal extraction from finance-video summaries.
 #
@@ -20,10 +29,9 @@ ACTIONS = {"buy", "sell", "hold", "watch", "none"}
 HORIZONS = {"short", "medium", "long", "unspecified"}
 MARKET_SENTIMENTS = {"bullish", "bearish", "neutral", "mixed"}
 
-SIGNALS_SYSTEM_PROMPT = (
-    "You extract structured market signals from the summary of a finance-related "
-    "YouTube video. Output ONLY a JSON object — no markdown fences, no prose — "
-    "with exactly this shape:\n"
+# The signals object's shape and rules, shared by the standalone extraction
+# prompt and the combined summarize+extract prompt so they can never drift.
+SIGNALS_SCHEMA = (
     "{\n"
     '  "assets": [\n'
     "    {\n"
@@ -49,8 +57,14 @@ SIGNALS_SYSTEM_PROMPT = (
     '"none" when they state no action.\n'
     '- "market_sentiment" is the speaker\'s overall tone about markets in this '
     "video, not your own view.\n"
-    "- If the summary contains no market-relevant content, output exactly "
+    "- If there is no market-relevant content, use "
     '{"assets": [], "market_sentiment": "neutral", "topics": []}.'
+)
+
+SIGNALS_SYSTEM_PROMPT = (
+    "You extract structured market signals from the summary of a finance-related "
+    "YouTube video. Output ONLY a JSON object — no markdown fences, no prose — "
+    "with exactly this shape:\n" + SIGNALS_SCHEMA
 )
 
 SIGNALS_USER_TEMPLATE = (
@@ -152,6 +166,88 @@ def _parse_signals(text):
     topics = [t.strip() for t in topics if isinstance(t, str) and t.strip()]
 
     return {"assets": assets, "market_sentiment": sentiment, "topics": topics}
+
+
+# Combined summarize+extract: one call returns both the Telegram summary and
+# the structured signals, halving per-video LLM requests (which is what the
+# per-minute rate limit actually counts). Needs a bigger output budget than a
+# summary alone, since the JSON carries both.
+COMBINED_MAX_TOKENS = env_int("LLM_COMBINED_MAX_TOKENS", 3000)
+
+COMBINED_SUFFIX = (
+    "\n\n"
+    "=== OUTPUT ENVELOPE ===\n"
+    "Return ONE JSON object and nothing else (no markdown fences, no prose):\n"
+    '{"summary": "<the summary described above, as a single JSON string using '
+    '\\n for line breaks>", "signals": <the object described below>}\n'
+    "\n"
+    "The \"signals\" value captures the market content of the summary you just "
+    "wrote, with exactly this shape:\n" + SIGNALS_SCHEMA
+)
+
+
+def _build_combined_prompt(compact=False):
+    """Summary rules + the JSON envelope that also carries the signals."""
+    base = COMPACT_SUMMARY_SYSTEM_PROMPT if compact else SUMMARY_SYSTEM_PROMPT
+    return base + COMBINED_SUFFIX
+
+
+def summarize_with_signals(transcript, title=None, compact=False, channel_name=None):
+    """
+    One LLM call producing both the summary and its market signals.
+
+    Returns (summary, signals) on success — where `summary` may be the
+    INSUFFICIENT_TRANSCRIPT sentinel and `signals` may be None — or None when
+    the combined path didn't work, telling the caller to fall back to the
+    separate summarize/extract calls. Never raises.
+    """
+    transcript = (transcript or "").strip()
+    if not transcript:
+        return None
+
+    text = complete(
+        _build_combined_prompt(compact),
+        _build_user_message(_truncate_transcript(transcript), title),
+        json_mode=True,
+        max_tokens=COMBINED_MAX_TOKENS,
+    )
+    if not text or text == QUOTA_EXHAUSTED_SENTINEL:
+        # Quota/failure is the provider chain's verdict, not a parsing problem:
+        # falling back would just burn another request against the same wall.
+        return (text, None) if text == QUOTA_EXHAUSTED_SENTINEL else None
+
+    stripped = _strip_code_fences(text)
+    try:
+        data = json.loads(stripped)
+    except (ValueError, TypeError):
+        start, end = stripped.find("{"), stripped.rfind("}")
+        if start == -1 or end <= start:
+            log_warn("Combined summary+signals call returned no JSON; using the separate calls.")
+            return None
+        try:
+            data = json.loads(stripped[start:end + 1])
+        except (ValueError, TypeError) as e:
+            log_warn(f"Combined summary+signals JSON unparseable ({e}); using the separate calls.")
+            return None
+
+    if not isinstance(data, dict):
+        return None
+    summary = data.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        log_warn("Combined call produced no summary; using the separate calls.")
+        return None
+
+    summary = summary.strip()
+    if summary.upper().startswith(INSUFFICIENT_TRANSCRIPT_SENTINEL):
+        return INSUFFICIENT_TRANSCRIPT_SENTINEL, None
+
+    raw_signals = data.get("signals")
+    signals = _parse_signals(json.dumps(raw_signals)) if isinstance(raw_signals, dict) else None
+    log_info(
+        "Combined summary+signals call succeeded"
+        + (f" ({len(signals['assets'])} asset(s))." if signals else " (no signals).")
+    )
+    return summary, signals
 
 
 def extract_signals(summary, video_title=None, channel_name=None):

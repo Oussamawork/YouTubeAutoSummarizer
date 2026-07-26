@@ -216,7 +216,7 @@ def _parse_retry_after(resp):
 
 
 def _call_provider(provider, transcript, title=None, system_prompt=None, user_message=None,
-                   json_mode=False):
+                   json_mode=False, max_tokens=None):
     """
     Call one provider's chat-completions endpoint with retry on transient errors.
     Returns the summary text, "" on failure, or QUOTA_EXHAUSTED_SENTINEL when the
@@ -240,7 +240,7 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
             {"role": "user", "content": user_message if user_message is not None else _build_user_message(transcript, title)},
         ],
         "temperature": LLM_TEMPERATURE,
-        "max_tokens": LLM_MAX_TOKENS,
+        "max_tokens": max_tokens or LLM_MAX_TOKENS,
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
@@ -296,7 +296,7 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
     return ""
 
 
-def complete(system_prompt, user_message, json_mode=False):
+def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
     """
     Generic completion over the same provider chain as summarize_transcript:
     first configured provider that succeeds wins, quota-exhausted providers are
@@ -326,7 +326,7 @@ def complete(system_prompt, user_message, json_mode=False):
 
         text = _call_provider(
             provider, "", system_prompt=system_prompt, user_message=user_message,
-            json_mode=json_mode,
+            json_mode=json_mode, max_tokens=max_tokens,
         )
         if text == QUOTA_EXHAUSTED_SENTINEL:
             log_warn(f"{provider['name']} quota/rate limit hit; skipping it for the rest of the run.")
