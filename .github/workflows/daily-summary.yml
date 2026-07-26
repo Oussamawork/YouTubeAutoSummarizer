@@ -60,6 +60,9 @@ jobs:
           # monthly budget override, both repo variables.
           SUPADATA_CREDITS_PER_KEY: ${{ vars.SUPADATA_CREDITS_PER_KEY }}
           SUPADATA_MONTHLY_BUDGET: ${{ vars.SUPADATA_MONTHLY_BUDGET }}
+          # Day of month the plan's credits reset (Supadata dashboard shows it,
+          # e.g. "Credits reset on 08/17" -> 17). Default 1 = calendar month.
+          SUPADATA_RESET_DAY: ${{ vars.SUPADATA_RESET_DAY }}
           # LLM summarizer (provider-agnostic). Set whichever you use; the
           # summarizer tries the generic LLM_* provider first, then Gemini, then Groq.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

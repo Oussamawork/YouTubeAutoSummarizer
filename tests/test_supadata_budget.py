@@ -37,26 +37,28 @@ def test_daily_allowance_paces_over_the_month(monkeypatch):
     monkeypatch.setenv("SUPADATA_API_KEY_2", "b")   # 200/month
     # 1st of a 31-day month, nothing used: 200 // 31 = 6 per day.
     assert tr.daily_allowance({"count": 0}, today=date(2026, 7, 1)) == 6
-    # Same month, 100 already spent with 6 days left: 100 // 6 = 16.
-    assert tr.daily_allowance({"count": 100}, today=date(2026, 7, 26)) == 16
+    # 100 spent with 6 days left would pace to 16/day, but the per-day ceiling
+    # (budget/28) keeps a late-cycle spike from draining the pool in two runs.
+    assert tr.daily_allowance({"count": 100}, today=date(2026, 7, 26)) == 200 // 28
     # Budget spent -> nothing allowed.
     assert tr.daily_allowance({"count": 200}, today=date(2026, 7, 26)) == 0
-    # Last day of the month gets whatever is left.
-    assert tr.daily_allowance({"count": 190}, today=date(2026, 7, 31)) == 10
+    # Near the end of the cycle the remainder is still ceiling-capped.
+    assert tr.daily_allowance({"count": 190}, today=date(2026, 7, 31)) == 7
 
 
 def test_usage_resets_on_new_month_and_day(monkeypatch, tmp_path):
     path = tmp_path / "usage.json"
-    path.write_text(json.dumps({"month": "2026-06", "count": 99, "day": "2026-06-30", "day_count": 5}))
-    usage = tr._load_usage()          # today is not June
+    path.write_text(json.dumps({"cycle": "2026-06-01", "count": 99, "day": "2026-06-30", "day_count": 5}))
+    usage = tr._load_usage()          # today is not in that cycle
     assert usage["count"] == 0 and usage["day_count"] == 0
 
 
 def test_budget_blocks_call_and_signals_exhaustion(monkeypatch):
     monkeypatch.setenv("SUPADATA_API_KEY", "a")
     monkeypatch.setenv("SUPADATA_MONTHLY_BUDGET", "1")
-    tr._save_usage({"month": tr._load_usage()["month"], "count": 1,
-                    "day": tr._load_usage()["day"], "day_count": 1})
+    current = tr._load_usage()
+    tr._save_usage({"cycle": current["cycle"], "count": 1,
+                    "day": current["day"], "day_count": 1})
     monkeypatch.setattr(
         tr.requests, "get",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spend a credit")),
@@ -164,3 +166,50 @@ def test_credit_rejections_and_retries_are_not_metered(monkeypatch):
     text, _ = tr._fetch_supadata("vid00000002")
     assert text == "ok"
     assert tr._load_usage()["count"] == 1  # 3 requests, one credit
+
+
+# --- Billing cycle (credits reset on the plan's anniversary day, not the 1st) ---
+
+
+def test_cycle_bounds_follow_the_reset_day(monkeypatch):
+    monkeypatch.setattr(tr, "SUPADATA_RESET_DAY", 17)
+    # On/after the reset day: cycle started this month.
+    assert tr.cycle_bounds(date(2026, 7, 26)) == (date(2026, 7, 17), date(2026, 8, 17))
+    assert tr.cycle_bounds(date(2026, 7, 17)) == (date(2026, 7, 17), date(2026, 8, 17))
+    # Before it: cycle started last month.
+    assert tr.cycle_bounds(date(2026, 7, 16)) == (date(2026, 6, 17), date(2026, 7, 17))
+    # Year boundary.
+    assert tr.cycle_bounds(date(2026, 12, 20)) == (date(2026, 12, 17), date(2027, 1, 17))
+
+
+def test_cycle_bounds_default_is_calendar_month(monkeypatch):
+    monkeypatch.setattr(tr, "SUPADATA_RESET_DAY", 1)
+    assert tr.cycle_bounds(date(2026, 7, 26)) == (date(2026, 7, 1), date(2026, 8, 1))
+
+
+def test_allowance_paces_over_the_billing_cycle_not_the_month(monkeypatch):
+    monkeypatch.setattr(tr, "SUPADATA_RESET_DAY", 17)
+    monkeypatch.setenv("SUPADATA_MONTHLY_BUDGET", "300")
+    # Jul 26 with 86 spent: 214 left over 22 days to the Aug 17 reset -> 9/day.
+    # A calendar-month assumption would have said 214/6 = 35/day and drained it.
+    assert tr.daily_allowance({"count": 86}, today=date(2026, 7, 26)) == 9
+
+
+def test_allowance_ceiling_survives_a_wrong_reset_day(monkeypatch):
+    # Even with the default reset day (wrong for this plan), the per-day
+    # ceiling of budget/28 stops the pool being drained in one run.
+    monkeypatch.setattr(tr, "SUPADATA_RESET_DAY", 1)
+    monkeypatch.setenv("SUPADATA_MONTHLY_BUDGET", "300")
+    assert tr.daily_allowance({"count": 86}, today=date(2026, 7, 31)) == 300 // 28
+
+
+def test_usage_counters_reset_on_cycle_rollover(monkeypatch, tmp_path):
+    monkeypatch.setattr(tr, "SUPADATA_RESET_DAY", 17)
+    path = tmp_path / "usage.json"
+    monkeypatch.setattr(tr, "SUPADATA_USAGE_FILE", str(path))
+    path.write_text(json.dumps({"cycle": "2026-06-17", "count": 250,
+                                "day": "2026-07-16", "day_count": 9}))
+    # Still inside the old cycle: counters kept.
+    assert tr._load_usage(date(2026, 7, 16))["count"] == 250
+    # Past the reset day: fresh cycle, counters cleared.
+    assert tr._load_usage(date(2026, 7, 17))["count"] == 0

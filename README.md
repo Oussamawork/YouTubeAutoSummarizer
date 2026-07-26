@@ -138,7 +138,8 @@ logs `Transcript budget: used/allowed today, N left this month`.
 | --- | --- | --- |
 | `SUPADATA_API_KEY`, `SUPADATA_API_KEY_2`, `SUPADATA_API_KEY_3` (secrets) | — | Free-tier keys; used in order, rotating when one reports no credits. `SUPADATA_API_KEYS` also accepts a comma-separated list. |
 | `SUPADATA_CREDITS_PER_KEY` | `100` | Monthly credits each key contributes to the budget. |
-| `SUPADATA_MONTHLY_BUDGET` | keys × credits | Explicit override for the whole month's budget. |
+| `SUPADATA_MONTHLY_BUDGET` | keys × credits | Explicit override for the whole cycle's budget. |
+| `SUPADATA_RESET_DAY` | `1` | Day of the month the plan's credits reset. Supadata resets on the plan's anniversary, not the 1st — the dashboard shows it ("Credits reset on 08/17" → set `17`). Getting this wrong makes the pacing think the cycle ends sooner than it does; a per-day ceiling of budget ÷ 28 limits the damage, but set it correctly. |
 
 ### Market signals (on by default):
 
