@@ -63,8 +63,8 @@ def test_budget_blocks_call_and_signals_exhaustion(monkeypatch):
         tr.requests, "get",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spend a credit")),
     )
-    text, exhausted = tr._fetch_supadata("vid00000001")
-    assert text == "" and exhausted is True
+    text, exhausted, reason = tr._fetch_supadata("vid00000001")
+    assert text == "" and exhausted is True and reason == "budget_paced"
 
 
 def test_successful_fetch_meters_one_credit(monkeypatch):
@@ -78,8 +78,8 @@ def test_successful_fetch_meters_one_credit(monkeypatch):
             return {"content": "hello transcript"}
 
     monkeypatch.setattr(tr.requests, "get", lambda *a, **k: R())
-    text, exhausted = tr._fetch_supadata("vid00000001")
-    assert text == "hello transcript" and exhausted is False
+    text, exhausted, reason = tr._fetch_supadata("vid00000001")
+    assert text == "hello transcript" and exhausted is False and reason == "ok"
     assert tr._load_usage()["count"] == 1
 
 
@@ -100,25 +100,26 @@ def test_rotates_to_second_key_when_first_is_out_of_credits(monkeypatch):
         return R()
 
     monkeypatch.setattr(tr.requests, "get", fake_get)
-    text, exhausted = tr._fetch_supadata("vid00000001")
-    assert text == "second key transcript" and exhausted is False
+    text, exhausted, reason = tr._fetch_supadata("vid00000001")
+    assert text == "second key transcript" and exhausted is False and reason == "ok"
     assert seen == ["spent", "fresh"]
     # Only the delivering request costs a credit; the rejection does not.
     assert tr._load_usage()["count"] == 1
 
 
 def test_get_transcript_reports_budget_exhaustion(monkeypatch):
-    monkeypatch.setattr(tr, "_fetch_supadata", lambda vid: ("", True))
+    monkeypatch.setattr(tr, "_fetch_supadata", lambda vid: ("", True, "no_credits"))
     monkeypatch.setattr(tr, "_fetch_youtube_transcript_api", lambda vid: "")
     out = tr.get_transcript_from_video("https://www.youtube.com/watch?v=vid00000001")
-    assert out == {"transcript": "", "budget_exhausted": True}
+    assert out == {"transcript": "", "budget_exhausted": True, "reason": "no_credits"}
 
 
 def test_fallback_success_clears_budget_flag(monkeypatch):
-    monkeypatch.setattr(tr, "_fetch_supadata", lambda vid: ("", True))
+    monkeypatch.setattr(tr, "_fetch_supadata", lambda vid: ("", True, "no_credits"))
     monkeypatch.setattr(tr, "_fetch_youtube_transcript_api", lambda vid: "from fallback")
     out = tr.get_transcript_from_video("https://www.youtube.com/watch?v=vid00000001")
-    assert out == {"transcript": "from fallback", "budget_exhausted": False}
+    assert out == {"transcript": "from fallback", "budget_exhausted": False,
+                   "reason": "fallback_ok"}
 
 
 def test_all_keys_out_of_credits_defers_instead_of_writing_off(monkeypatch):
@@ -132,7 +133,7 @@ def test_all_keys_out_of_credits_defers_instead_of_writing_off(monkeypatch):
         text = "no credits"
 
     monkeypatch.setattr(tr.requests, "get", lambda *a, **k: R())
-    assert tr._fetch_supadata("vid00000001") == ("", True)
+    assert tr._fetch_supadata("vid00000001") == ("", True, "no_credits")
 
 
 def test_credit_rejections_and_retries_are_not_metered(monkeypatch):
@@ -163,7 +164,7 @@ def test_credit_rejections_and_retries_are_not_metered(monkeypatch):
 
     monkeypatch.setattr(tr.requests, "get", flaky)
     monkeypatch.setattr(tr.time, "sleep", lambda s: None)
-    text, _ = tr._fetch_supadata("vid00000002")
+    text, _, _ = tr._fetch_supadata("vid00000002")
     assert text == "ok"
     assert tr._load_usage()["count"] == 1  # 3 requests, one credit
 
@@ -213,3 +214,32 @@ def test_usage_counters_reset_on_cycle_rollover(monkeypatch, tmp_path):
     assert tr._load_usage(date(2026, 7, 16))["count"] == 250
     # Past the reset day: fresh cycle, counters cleared.
     assert tr._load_usage(date(2026, 7, 17))["count"] == 0
+
+
+def test_empty_200_is_reported_as_empty_content(monkeypatch):
+    """The most valuable diagnostic: Supadata served a response but had no
+    captions for the video — a credit spent for nothing."""
+    monkeypatch.setenv("SUPADATA_API_KEY", "a")
+
+    class R:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"content": ""}
+
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: R())
+    text, exhausted, reason = tr._fetch_supadata("vid00000001")
+    assert (text, exhausted, reason) == ("", False, "empty_content")
+    assert tr._load_usage()["count"] == 1  # still charged
+
+
+def test_http_error_reason_carries_status(monkeypatch):
+    monkeypatch.setenv("SUPADATA_API_KEY", "a")
+
+    class R:
+        status_code = 404
+        text = "not found"
+
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: R())
+    assert tr._fetch_supadata("vid00000001")[2] == "http_404"
