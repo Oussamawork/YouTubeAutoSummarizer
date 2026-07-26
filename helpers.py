@@ -47,11 +47,14 @@ def read_channels(file_path):
                message per run instead of one full summary per video (for
                prolific channels that would otherwise flood the chat).
       max=N  — per-run video cap for this channel (overrides the global default).
+      only=a,b,c — process a video only when its title mentions one of these
+               keywords (whole words, case-insensitive). Filtering happens
+               before the transcript fetch, so skipped videos cost nothing.
 
     Unknown or malformed options are logged and ignored, so a typo can't make
     the whole channel list unreadable.
 
-    Returns a list of {"channel_id", "digest", "max_per_run"} dicts.
+    Returns a list of {"channel_id", "digest", "max_per_run", "only"} dicts.
     """
     try:
         with open(file_path, "r") as file:
@@ -63,7 +66,8 @@ def read_channels(file_path):
                 if not line:
                     continue
                 tokens = line.split()
-                entry = {"channel_id": tokens[0], "digest": False, "max_per_run": None}
+                entry = {"channel_id": tokens[0], "digest": False, "max_per_run": None,
+                         "only": []}
                 for token in tokens[1:]:
                     option = token.lower()
                     if option == "digest":
@@ -73,6 +77,12 @@ def read_channels(file_path):
                             entry["max_per_run"] = max(1, int(option[4:]))
                         except ValueError:
                             log_error(f"Ignoring malformed channel option '{token}' for {tokens[0]}")
+                    elif option.startswith("only="):
+                        keywords = [k.strip() for k in option[5:].split(",") if k.strip()]
+                        if keywords:
+                            entry["only"].extend(keywords)
+                        else:
+                            log_error(f"Ignoring empty channel option '{token}' for {tokens[0]}")
                     else:
                         log_error(f"Ignoring unknown channel option '{token}' for {tokens[0]}")
                 channels.append(entry)
@@ -154,6 +164,27 @@ def save_state(file_path, seen):
 
 
 # Function to save results to a JSON file
+def title_matches(title, keywords):
+    """
+    True when `title` mentions any keyword as a whole word (case-insensitive),
+    or when `keywords` is empty (no filter configured).
+
+    Whole-word matching is the point: a substring test for "eth" would match
+    "whether" and "together", and "sol" would match "solve" — so tickers must
+    stand on their own. Punctuation is not a word character, so "$BTC",
+    "BTC/USD" and "Bitcoin's" all match; note that "sol" does NOT match
+    "solana", so list every alias you want (e.g. only=sol,solana).
+    """
+    if not keywords:
+        return True
+    if not title:
+        return False
+    for keyword in keywords:
+        if re.search(rf"\b{re.escape(keyword)}\b", title, re.IGNORECASE):
+            return True
+    return False
+
+
 def append_jsonl(path, record):
     """
     Append one record as a JSON line to `path`, creating parent directories as

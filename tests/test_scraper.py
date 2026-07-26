@@ -636,3 +636,60 @@ def test_evict_orphaned_pending_noop_when_all_present():
     pending = {"a": {"channel_id": "c1", "attempts": 1}}
     assert scraper._evict_orphaned_pending(pending, "c1", {"a"}) == 0
     assert set(pending) == {"a"}
+
+
+# --- Title filter wiring (only=) ---
+
+
+def _filter_run(monkeypatch, only, titles):
+    """Run main() over one channel whose feed has the given titles."""
+    for name, value in {"YOUTUBE_API_KEY": "yt", "TELEGRAM_TOKEN": "tok",
+                        "TELEGRAM_CHANNEL_ID": "premium"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MARKET_SIGNALS", "false")
+    monkeypatch.delenv("DAILY_DIGEST", raising=False)
+    monkeypatch.delenv("TELEGRAM_FREE_CHANNEL_ID", raising=False)
+
+    feed = [
+        {"video_id": f"v{i}", "channel_name": "C", "video_title": t,
+         "video_url": f"http://u/{i}", "published_at": f"2026-07-0{i+1}T00:00:00+00:00"}
+        for i, t in enumerate(titles)
+    ]
+    summarized = []
+    monkeypatch.setattr(scraper, "read_channels", lambda p: [
+        {"channel_id": "c1", "digest": False, "max_per_run": 10, "only": only},
+    ])
+    monkeypatch.setattr(scraper, "load_state", lambda p: {
+        "channels": {"c1": {"last_video_id": "seed", "last_published": "2026-01-01T00:00:00+00:00"}},
+        "pending": {},
+    })
+    monkeypatch.setattr(scraper, "save_state", lambda p, s: None)
+    monkeypatch.setattr(scraper, "save_to_json", lambda r, f: None)
+    monkeypatch.setattr(scraper, "get_recent_videos", lambda k, c: feed)
+    monkeypatch.setattr(
+        scraper, "_summarize_video",
+        lambda d, a, compact=False, want_signals=False: summarized.append(d["video_title"]) or ("S", "sent", True, None),
+    )
+    monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
+    scraper.main()
+    return summarized
+
+
+def test_main_title_filter_skips_before_transcript(monkeypatch):
+    # Non-matching videos must never reach _summarize_video — that is where a
+    # transcript credit would be spent.
+    seen = _filter_run(
+        monkeypatch, ["btc", "bitcoin"],
+        ["XRP Price Analysis", "Has Bitcoin Started the Sell-off?", "HBAR Wave Count"],
+    )
+    assert seen == ["Has Bitcoin Started the Sell-off?"]
+
+
+def test_main_no_filter_processes_everything(monkeypatch):
+    seen = _filter_run(monkeypatch, [], ["XRP Price Analysis", "Bitcoin update"])
+    assert len(seen) == 2
+
+
+def test_main_filter_matching_nothing_is_a_clean_skip(monkeypatch):
+    seen = _filter_run(monkeypatch, ["btc"], ["XRP Price Analysis", "HBAR Wave Count"])
+    assert seen == []

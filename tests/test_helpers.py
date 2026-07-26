@@ -84,10 +84,10 @@ def test_read_channels_plain_and_options(tmp_path):
         "UCboth digest max=2\n"
     )
     assert helpers.read_channels(str(p)) == [
-        {"channel_id": "UCplain", "digest": False, "max_per_run": None},
-        {"channel_id": "UCdigest", "digest": True, "max_per_run": None},
-        {"channel_id": "UCcapped", "digest": False, "max_per_run": 5},
-        {"channel_id": "UCboth", "digest": True, "max_per_run": 2},
+        {"channel_id": "UCplain", "digest": False, "max_per_run": None, "only": []},
+        {"channel_id": "UCdigest", "digest": True, "max_per_run": None, "only": []},
+        {"channel_id": "UCcapped", "digest": False, "max_per_run": 5, "only": []},
+        {"channel_id": "UCboth", "digest": True, "max_per_run": 2, "only": []},
     ]
 
 
@@ -96,7 +96,7 @@ def test_read_channels_ignores_bad_options(tmp_path):
     p = tmp_path / "channels.txt"
     p.write_text("UCx digset max=oops\n")
     assert helpers.read_channels(str(p)) == [
-        {"channel_id": "UCx", "digest": False, "max_per_run": None}
+        {"channel_id": "UCx", "digest": False, "max_per_run": None, "only": []}
     ]
 
 
@@ -161,3 +161,51 @@ def test_read_channels_strips_inline_comments(tmp_path):
     assert channels[0]["digest"] is True and channels[0]["max_per_run"] == 5
     assert channels[1]["digest"] is False and channels[1]["max_per_run"] is None
     assert channels[2]["digest"] is True
+
+
+# --- Title filtering (only=) ---
+
+
+def test_title_matches_whole_words_only():
+    kw = ["btc", "bitcoin", "eth", "ethereum", "sol", "solana"]
+    assert helpers.title_matches("Has Bitcoin Started the Next Sell-off?", kw)
+    assert helpers.title_matches("ETH | Market Resistance Testing", kw)
+    assert helpers.title_matches("$BTC/USD breakout", kw)          # punctuation is a boundary
+    assert helpers.title_matches("Bitcoin's Secret 260-Day Cycle", kw)
+    assert helpers.title_matches("Solana flips higher", kw)
+    # The reason this uses word boundaries rather than substrings:
+    assert not helpers.title_matches("Whether markets rally together", kw)  # 'eth' inside words
+    assert not helpers.title_matches("Solve the console problem", kw)       # 'sol' inside words
+    assert not helpers.title_matches("XRP Price Analysis", kw)
+    assert not helpers.title_matches("HBAR Elliott Wave Analysis", kw)
+
+
+def test_title_matches_no_keywords_keeps_everything():
+    assert helpers.title_matches("anything at all", []) is True
+    assert helpers.title_matches("anything at all", None) is True
+
+
+def test_title_matches_empty_title():
+    assert helpers.title_matches("", ["btc"]) is False
+    assert helpers.title_matches(None, ["btc"]) is False
+
+
+def test_title_matches_is_case_insensitive():
+    assert helpers.title_matches("bitcoin rallies", ["BITCOIN"])
+    assert helpers.title_matches("BITCOIN rallies", ["bitcoin"])
+
+
+def test_read_channels_parses_only_option(tmp_path):
+    path = tmp_path / "channels.txt"
+    path.write_text(
+        "UC1 digest only=btc,bitcoin\n"
+        "UC2 only=ETH,Solana max=2\n"
+        "UC3\n"
+        "UC4 only=\n",  # malformed: ignored, no filter
+        encoding="utf-8",
+    )
+    channels = helpers.read_channels(str(path))
+    assert channels[0]["only"] == ["btc", "bitcoin"] and channels[0]["digest"] is True
+    assert channels[1]["only"] == ["eth", "solana"] and channels[1]["max_per_run"] == 2
+    assert channels[2]["only"] == []
+    assert channels[3]["only"] == []
