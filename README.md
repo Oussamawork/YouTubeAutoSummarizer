@@ -102,6 +102,8 @@ This skips the channel scan and dedup state entirely — useful for any video, s
 | `MAX_VIDEOS_PER_RUN` | `3` | Max videos processed per channel per run; older ones go first, the rest wait for the next run. |
 | `NO_TRANSCRIPT_MAX_ATTEMPTS` | `3` | Runs to retry a video whose captions aren't up yet before notifying and giving up. |
 | `DAILY_DIGEST` | off | `true` bundles all of a run's summaries into one combined Telegram message. |
+| `MIN_VIDEO_SECONDS` | `90` | Skip videos shorter than this before fetching a transcript — Shorts and clips rarely carry usable captions and aren't worth a transcript credit. Checked with one `videos.list` call per 50 videos (1 quota unit of 10,000/day). Videos whose metadata can't be read are kept. `0` disables the check. |
+| `SKIP_UNCAPTIONED` | off | Also skip videos the API reports as having no captions. **Off by default**: the API's `caption` flag tracks *uploaded* captions and is commonly `false` for videos that only have auto-generated ones, which Supadata can still fetch. Enable only if a run's failure breakdown shows it is safe. |
 
 ### Free/premium channel split (optional):
 

@@ -247,15 +247,17 @@ def _supadata_text_from_payload(data):
 def _fetch_supadata(vid):
     """
     Primary source: Supadata hosted API (free tier). Server-side fetch, so it
-    works from blocked CI IPs. Returns (text, budget_exhausted): text is "" if
-    no key, on error, or if empty; budget_exhausted is True when the call was
-    skipped because this month's/today's credits are spent (the caller defers
-    the video instead of reporting a missing transcript).
+    works from blocked CI IPs. Returns (text, budget_exhausted, reason): text is
+    "" if no key, on error, or if empty; budget_exhausted is True when the call
+    was skipped because this cycle's/today's credits are spent (the caller
+    defers the video instead of reporting a missing transcript); reason is a
+    short tag naming what happened, so a run can report *why* fetches failed
+    rather than only how often.
     Uses mode=native so only existing captions are returned (no paid AI generation).
     """
     keys = _supadata_keys()
     if not keys:
-        return "", False
+        return "", False, "no_key"
 
     usage = _load_usage()
     allowance = daily_allowance(usage)
@@ -263,14 +265,15 @@ def _fetch_supadata(vid):
         remaining = max(0, monthly_budget() - usage.get("count", 0))
         log_warn(
             f"Supadata budget reached for today ({usage['day_count']}/{allowance}; "
-            f"{remaining} left this month) — deferring {vid} to a later run."
+            f"{remaining} left this cycle) — deferring {vid} to a later run."
         )
-        return "", True
+        return "", True, "budget_paced"
 
+    reason = "no_credits"
     for index, key in enumerate(keys):
-        text = _fetch_supadata_with_key(vid, key, usage)
+        text, reason = _fetch_supadata_with_key(vid, key, usage)
         if text is not None:
-            return text, False
+            return text, False, reason
         if index + 1 < len(keys):
             log_warn(f"Supadata key {index + 1} is out of credits; trying the next key.")
 
@@ -278,14 +281,15 @@ def _fetch_supadata(vid):
     # captions: report it as such so the caller defers instead of eventually
     # writing the video off as untranscribable.
     log_warn("All Supadata keys are out of credits; deferring this video.")
-    return "", True
+    return "", True, "no_credits"
 
 
 def _fetch_supadata_with_key(vid, api_key, usage):
     """
-    One key's attempt at a transcript. Returns the text ("" when the key worked
-    but there is no transcript), or None when the key is out of credits so the
-    caller should rotate to the next one. Every request sent is metered.
+    One key's attempt at a transcript. Returns (text, reason): text is "" when
+    the key worked but there is no transcript, or None when the key is out of
+    credits so the caller should rotate to the next one. `reason` names the
+    outcome for run diagnostics. Every request sent is metered.
     """
     headers = {"x-api-key": api_key}
     params = {
@@ -304,13 +308,13 @@ def _fetch_supadata_with_key(vid, api_key, usage):
                 time.sleep(SUPADATA_RETRY_BACKOFF * attempt)
                 continue
             log_error("Supadata unreachable after retries.")
-            return ""
+            return "", "unreachable"
 
         # Out of credits on this key: rotate rather than retry. Nothing was
         # delivered, so this must not be metered.
         if resp.status_code in SUPADATA_CREDIT_STATUS:
             log_warn(f"Supadata key rejected ({resp.status_code}): {resp.text[:120]}")
-            return None
+            return None, "no_credits"
 
         # Meter only answers that consume a credit — a served transcript (200)
         # or an accepted async job (202). Counting rejections and transient
@@ -326,17 +330,24 @@ def _fetch_supadata_with_key(vid, api_key, usage):
                 job_id = None
             if not job_id:
                 log_warn("Supadata returned 202 without a jobId.")
-                return ""
-            return _poll_supadata_job(job_id, headers)
+                return "", "job_no_id"
+            job_text = _poll_supadata_job(job_id, headers)
+            return job_text, ("ok" if job_text else "job_incomplete")
 
         if resp.status_code == 200:
             try:
                 text = _supadata_text_from_payload(resp.json())
             except ValueError as e:
                 log_error(f"Supadata returned invalid JSON: {e}")
-                return ""
+                return "", "invalid_json"
+            if not text:
+                # 200 with no content is Supadata saying "this video has no
+                # captions I can serve" — the single most useful thing to
+                # distinguish, since it is a wasted credit by definition.
+                log_warn(f"Supadata returned 200 but no transcript content for {vid}.")
+                return "", "empty_content"
             log_info(f"Supadata returned {len(text)} chars")
-            return text
+            return text, "ok"
 
         # Retry transient server/rate-limit errors; give up on anything else.
         if resp.status_code in SUPADATA_TRANSIENT_STATUS and attempt < SUPADATA_MAX_RETRIES:
@@ -348,9 +359,9 @@ def _fetch_supadata_with_key(vid, api_key, usage):
             continue
 
         log_warn(f"Supadata returned {resp.status_code}: {resp.text[:200]}")
-        return ""
+        return "", f"http_{resp.status_code}"
 
-    return ""
+    return "", "retries_exhausted"
 
 
 def _poll_supadata_job(job_id, headers):
@@ -387,23 +398,26 @@ def get_transcript_from_video(video_id):
     set, then falls back to youtube-transcript-api (free, no key, works locally).
 
     `video_id` may be a full URL or a bare ID. Always returns a dict shaped
-    {"transcript": <str>, "budget_exhausted": <bool>} so callers never have to
-    handle exceptions or None; an empty transcript means none was available,
-    and budget_exhausted marks the "we chose not to spend a credit" case, which
-    the caller should retry on a later run rather than report as missing.
+    {"transcript": <str>, "budget_exhausted": <bool>, "reason": <str>} so
+    callers never have to handle exceptions or None; an empty transcript means
+    none was available, budget_exhausted marks the "we chose not to spend a
+    credit" case (retry later rather than report as missing), and reason names
+    the outcome so a run can report why fetches failed.
     """
     vid = _extract_video_id(video_id)
     if not vid:
         log_warn("No valid video ID; cannot fetch transcript.")
-        return {"transcript": "", "budget_exhausted": False}
+        return {"transcript": "", "budget_exhausted": False, "reason": "bad_video_id"}
 
-    text, budget_exhausted = _fetch_supadata(vid)
+    text, budget_exhausted, reason = _fetch_supadata(vid)
     if not text:
-        text = _fetch_youtube_transcript_api(vid)
+        fallback = _fetch_youtube_transcript_api(vid)
+        if fallback:
+            text, reason = fallback, "fallback_ok"
 
     if text:
         budget_exhausted = False
     elif not budget_exhausted:
-        log_warn(f"No transcript available for video {vid} from any source.")
+        log_warn(f"No transcript available for video {vid} from any source (reason: {reason}).")
 
-    return {"transcript": text, "budget_exhausted": budget_exhausted}
+    return {"transcript": text, "budget_exhausted": budget_exhausted, "reason": reason}

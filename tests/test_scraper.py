@@ -693,3 +693,122 @@ def test_main_no_filter_processes_everything(monkeypatch):
 def test_main_filter_matching_nothing_is_a_clean_skip(monkeypatch):
     seen = _filter_run(monkeypatch, ["btc"], ["XRP Price Analysis", "HBAR Wave Count"])
     assert seen == []
+
+
+# --- Duration gate (skip Shorts before spending a transcript credit) ---
+
+
+def test_parse_iso_duration():
+    assert scraper.parse_iso_duration("PT58S") == 58
+    assert scraper.parse_iso_duration("PT4M13S") == 253
+    assert scraper.parse_iso_duration("PT1H2M3S") == 3723
+    assert scraper.parse_iso_duration("PT15M") == 900
+    assert scraper.parse_iso_duration("P1DT2H") == 93600
+    assert scraper.parse_iso_duration("bogus") is None
+    assert scraper.parse_iso_duration("") is None
+    assert scraper.parse_iso_duration(None) is None
+
+
+def test_fetch_video_details_batches_by_fifty(monkeypatch, real_fetch_video_details):
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        ids = params["id"].split(",")
+        calls.append(len(ids))
+        return FakeResp(200, {"items": [
+            {"id": i, "contentDetails": {"duration": "PT5M", "caption": "true"}} for i in ids
+        ]})
+
+    monkeypatch.setattr(scraper.requests, "get", fake_get)
+    details = real_fetch_video_details("KEY", [f"v{i}" for i in range(120)])
+    assert calls == [50, 50, 20]      # 3 requests = 3 quota units for 120 videos
+    assert len(details) == 120
+    assert details["v0"] == {"duration_seconds": 300, "has_captions": True}
+
+
+def test_fetch_video_details_http_error_returns_empty(monkeypatch, real_fetch_video_details):
+    monkeypatch.setattr(scraper.requests, "get", lambda *a, **k: FakeResp(403, {}, text="denied"))
+    assert real_fetch_video_details("KEY", ["v1"]) == {}
+
+
+def test_fetch_video_details_parses_caption_flag(monkeypatch, real_fetch_video_details):
+    monkeypatch.setattr(scraper.requests, "get", lambda *a, **k: FakeResp(200, {"items": [
+        {"id": "a", "contentDetails": {"duration": "PT1M", "caption": "false"}},
+        {"id": "b", "contentDetails": {"duration": "PT1M"}},           # missing flag
+    ]}))
+    details = real_fetch_video_details("KEY", ["a", "b"])
+    assert details["a"]["has_captions"] is False
+    assert details["b"]["has_captions"] is None
+
+
+def test_filter_by_duration_skips_shorts_and_keeps_unknown():
+    videos = [_vid("short", ""), _vid("long", ""), _vid("unknown", "")]
+    details = {
+        "short": {"duration_seconds": 45, "has_captions": None},
+        "long": {"duration_seconds": 600, "has_captions": None},
+        # "unknown" absent: metadata lookup failed for it
+    }
+    kept, short, uncaptioned = scraper.filter_by_duration(videos, details, 90)
+    assert [v["video_id"] for v in kept] == ["long", "unknown"]  # fail open
+    assert short == 1 and uncaptioned == 0
+    assert kept[0]["duration_seconds"] == 600  # recorded for diagnostics
+
+
+def test_filter_by_duration_caption_skip_is_opt_in():
+    videos = [_vid("v1", "")]
+    details = {"v1": {"duration_seconds": 600, "has_captions": False}}
+    kept, _, uncaptioned = scraper.filter_by_duration(videos, details, 90)
+    assert len(kept) == 1 and uncaptioned == 0          # off by default
+    kept, _, uncaptioned = scraper.filter_by_duration(videos, details, 90, skip_uncaptioned=True)
+    assert kept == [] and uncaptioned == 1
+
+
+def test_filter_by_duration_disabled_with_zero():
+    videos = [_vid("tiny", "")]
+    details = {"tiny": {"duration_seconds": 5, "has_captions": None}}
+    kept, short, _ = scraper.filter_by_duration(videos, details, 0)
+    assert len(kept) == 1 and short == 0
+
+
+def test_main_duration_gate_skips_before_transcript(monkeypatch):
+    """A Short must never reach _summarize_video — that is where a credit goes."""
+    summarized = []
+    for name, value in {"YOUTUBE_API_KEY": "yt", "TELEGRAM_TOKEN": "tok",
+                        "TELEGRAM_CHANNEL_ID": "premium"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MARKET_SIGNALS", "false")
+    monkeypatch.delenv("DAILY_DIGEST", raising=False)
+    monkeypatch.delenv("TELEGRAM_FREE_CHANNEL_ID", raising=False)
+
+    feed = [_vid("shorty", "2026-07-02T00:00:00+00:00"), _vid("real", "2026-07-03T00:00:00+00:00")]
+    monkeypatch.setattr(scraper, "read_channels", lambda p: [
+        {"channel_id": "c1", "digest": False, "max_per_run": 10, "only": []},
+    ])
+    monkeypatch.setattr(scraper, "load_state", lambda p: {
+        "channels": {"c1": {"last_video_id": "seed", "last_published": "2026-01-01T00:00:00+00:00"}},
+        "pending": {},
+    })
+    monkeypatch.setattr(scraper, "save_state", lambda p, s: None)
+    monkeypatch.setattr(scraper, "save_to_json", lambda r, f: None)
+    monkeypatch.setattr(scraper, "get_recent_videos", lambda k, c: feed)
+    monkeypatch.setattr(scraper, "fetch_video_details", lambda key, ids: {
+        "shorty": {"duration_seconds": 40, "has_captions": None},
+        "real": {"duration_seconds": 900, "has_captions": None},
+    })
+    monkeypatch.setattr(
+        scraper, "_summarize_video",
+        lambda d, a, compact=False, want_signals=False: summarized.append(d["video_id"]) or ("S", "sent", True, None),
+    )
+    monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
+    scraper.main()
+    assert summarized == ["real"]
+
+
+def test_summarize_video_records_transcript_reason(monkeypatch):
+    monkeypatch.setattr(
+        scraper, "get_transcript_from_video",
+        lambda url: {"transcript": "", "budget_exhausted": False, "reason": "empty_content"},
+    )
+    details = _vid("v1", "")
+    scraper._summarize_video(details, no_transcript_attempts=0)
+    assert details["transcript_reason"] == "empty_content"

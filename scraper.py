@@ -1,4 +1,5 @@
 import argparse
+import re
 import requests
 import sys
 import time
@@ -28,6 +29,10 @@ YOUTUBE_API_URL = "https://www.googleapis.com/youtube/v3/search"
 # Channels endpoint, used to resolve an @handle to its channel id (1 quota unit
 # per call, vs 100 for a search) so channel_ids.txt can list handles directly.
 YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
+# videos.list: duration + caption flag for up to 50 ids per request, 1 quota
+# unit each (of 10,000/day) — cheap enough to screen every candidate before
+# spending a transcript credit on it.
+YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 # Channel RSS feed: free, keyless, no API quota, and lists the last ~15 uploads
 # (so channels that upload more than once between runs aren't missed). Primary
 # video source; the Data API is only the fallback.
@@ -56,6 +61,10 @@ MAX_VIDEOS_PER_RUN = env_int("MAX_VIDEOS_PER_RUN", 3)
 # Captions (especially auto-generated ones) often appear hours after upload, so
 # a video with no transcript is retried this many runs before giving up.
 NO_TRANSCRIPT_MAX_ATTEMPTS = env_int("NO_TRANSCRIPT_MAX_ATTEMPTS", 3)
+# Videos shorter than this are skipped before any transcript is fetched:
+# Shorts and clips rarely carry usable captions and aren't worth summarizing.
+# 0 disables the check.
+MIN_VIDEO_SECONDS = env_int("MIN_VIDEO_SECONDS", 90)
 
 
 def _env_flag(name, default=False):
@@ -151,6 +160,110 @@ def get_recent_videos(youtube_api_key, channel_id):
     log_warn("RSS feed unavailable; falling back to the YouTube Data API (latest video only).")
     video = get_latest_video(youtube_api_key, channel_id)
     return [video] if video else []
+
+
+_ISO_DURATION_RE = re.compile(
+    r"^P(?:(?P<days>\d+)D)?T?(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?$"
+)
+
+
+def parse_iso_duration(value):
+    """
+    Seconds from an ISO-8601 duration as returned by the YouTube API
+    ("PT4M13S"), or None when it can't be parsed. Never raises.
+    """
+    match = _ISO_DURATION_RE.match((value or "").strip())
+    if not match or not any(match.groupdict().values()):
+        return None
+    parts = {k: int(v) if v else 0 for k, v in match.groupdict().items()}
+    return parts["days"] * 86400 + parts["hours"] * 3600 + parts["minutes"] * 60 + parts["seconds"]
+
+
+def fetch_video_details(youtube_api_key, video_ids):
+    """
+    Duration and caption flag for each video id, as
+    {video_id: {"duration_seconds": int|None, "has_captions": bool|None}}.
+
+    videos.list accepts 50 ids per request and costs 1 quota unit per request
+    (of 10,000/day), so this is effectively free compared with the transcript
+    credit it can save. Ids that can't be looked up are simply absent from the
+    result and the caller keeps the video — failing open, never dropping a
+    video because a metadata lookup broke.
+    """
+    details = {}
+    ids = [vid for vid in video_ids if vid]
+    for start in range(0, len(ids), 50):
+        batch = ids[start:start + 50]
+        params = {"part": "contentDetails", "id": ",".join(batch), "key": youtube_api_key}
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                response = requests.get(YOUTUBE_VIDEOS_URL, params=params, timeout=REQUEST_TIMEOUT)
+            except requests.RequestException as e:
+                log_warn(f"videos.list request error (attempt {attempt}/{MAX_RETRIES}): {e}")
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_BACKOFF * attempt)
+                    continue
+                break
+
+            if response.status_code == 200:
+                try:
+                    items = (response.json() or {}).get("items") or []
+                except ValueError as e:
+                    log_warn(f"videos.list returned invalid JSON: {e}")
+                    break
+                for item in items:
+                    content = (item or {}).get("contentDetails") or {}
+                    video_id = (item or {}).get("id")
+                    if not video_id:
+                        continue
+                    details[video_id] = {
+                        "duration_seconds": parse_iso_duration(content.get("duration")),
+                        # Note: this flag tracks *uploaded* captions and is
+                        # commonly "false" for videos that only have
+                        # auto-generated ones, so it is recorded for diagnostics
+                        # but not used to skip videos unless explicitly enabled.
+                        "has_captions": {"true": True, "false": False}.get(
+                            str(content.get("caption")).lower()
+                        ),
+                    }
+                break
+
+            if response.status_code in TRANSIENT_STATUS and attempt < MAX_RETRIES:
+                log_warn(
+                    f"Transient videos.list status {response.status_code} "
+                    f"(attempt {attempt}/{MAX_RETRIES}); retrying."
+                )
+                time.sleep(RETRY_BACKOFF * attempt)
+                continue
+
+            log_warn(f"videos.list returned {response.status_code}: {response.text[:200]}")
+            break
+    return details
+
+
+def filter_by_duration(videos, details, min_seconds, skip_uncaptioned=False):
+    """
+    Drop videos shorter than `min_seconds` (Shorts and clips, which rarely have
+    captions and aren't worth a transcript credit) and, when explicitly enabled,
+    those the API reports as having no captions.
+
+    Videos with no metadata are KEPT: a failed lookup must never silently drop
+    content. Returns (kept, skipped_short, skipped_uncaptioned).
+    """
+    kept, short, uncaptioned = [], 0, 0
+    for video in videos:
+        info = details.get(video.get("video_id")) or {}
+        seconds = info.get("duration_seconds")
+        if seconds is not None:
+            video["duration_seconds"] = seconds
+            if min_seconds > 0 and seconds < min_seconds:
+                short += 1
+                continue
+        if skip_uncaptioned and info.get("has_captions") is False:
+            uncaptioned += 1
+            continue
+        kept.append(video)
+    return kept, short, uncaptioned
 
 
 def resolve_channel_handle(youtube_api_key, handle):
@@ -379,6 +492,12 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     transcript_text = transcript.get('transcript', '') if isinstance(transcript, dict) else ''
     transcript_text = transcript_text.strip() if transcript_text else ''
 
+    # Why the fetch went the way it did, surfaced so a run can report the mix
+    # of failure causes instead of just a count.
+    video_details['transcript_reason'] = (
+        transcript.get("reason") if isinstance(transcript, dict) else None
+    )
+
     if not transcript_text:
         video_details['transcript'] = "Transcript not found."
         video_details['summary'] = "Summary not available."
@@ -562,6 +681,14 @@ def main():
             # their video left the feed, and videos skipped by a title filter.
             evicted_pending = 0
             filtered_out = 0
+            skipped_short = 0
+            skipped_uncaptioned = 0
+            # Opt-in: the API's caption flag tracks uploaded captions and is
+            # commonly false for auto-captioned videos, so skipping on it is
+            # off until a run's diagnostics show it is safe here.
+            skip_uncaptioned = _env_flag("SKIP_UNCAPTIONED")
+            # Why transcript fetches failed this run, for the run summary.
+            transcript_reasons = {}
 
             # Handles (@name) are resolved to channel ids once per run; the
             # dedup state is always keyed by the resolved id, so switching a
@@ -607,6 +734,29 @@ def main():
                             outcomes["unchanged"] += 1
                             continue
 
+                    # Duration gate: one batched videos.list call (1 quota unit
+                    # per 50 ids) screens out Shorts before any transcript
+                    # credit is spent on them. Videos whose metadata can't be
+                    # read are kept, so a lookup failure never drops content.
+                    if MIN_VIDEO_SECONDS > 0 or skip_uncaptioned:
+                        details = fetch_video_details(
+                            YOUTUBE_API_KEY, [v["video_id"] for v in videos]
+                        )
+                        videos, n_short, n_uncaptioned = filter_by_duration(
+                            videos, details, MIN_VIDEO_SECONDS, skip_uncaptioned
+                        )
+                        skipped_short += n_short
+                        skipped_uncaptioned += n_uncaptioned
+                        if n_short or n_uncaptioned:
+                            log_info(
+                                f"Skipped {n_short} short and {n_uncaptioned} caption-less "
+                                f"video(s) for channel {channel_id} before fetching transcripts."
+                            )
+                        if not videos:
+                            log_info(f"No videos left after the duration gate for {channel_id}.")
+                            outcomes["unchanged"] += 1
+                            continue
+
                     # The feed fetch succeeded, so anything still pending for
                     # this channel that isn't in the feed can never be retried.
                     # Filtered-out videos count as gone, clearing any retry
@@ -643,6 +793,9 @@ def main():
                             want_signals=market_signals,
                         )
                         outcomes[outcome] += 1
+                        reason = video_details.get("transcript_reason")
+                        if reason and reason not in ("ok", "fallback_ok"):
+                            transcript_reasons[reason] = transcript_reasons.get(reason, 0) + 1
 
                         # One quota notice per run is enough; later deferrals are logged only.
                         if outcome == "quota_deferred" and outcomes["quota_deferred"] > 1:
@@ -755,7 +908,18 @@ def main():
                 summary_line += f", pending_evicted={evicted_pending}"
             if filtered_out:
                 summary_line += f", title_filtered={filtered_out}"
+            if skipped_short:
+                summary_line += f", too_short={skipped_short}"
+            if skipped_uncaptioned:
+                summary_line += f", uncaptioned={skipped_uncaptioned}"
             log_info(f"Run summary: {len(channels)} channels | {summary_line or 'nothing to do'}")
+            if transcript_reasons:
+                # The point of this line: turn "65% of credits produce nothing"
+                # into a breakdown that says which fix would actually help.
+                breakdown = ", ".join(
+                    f"{k}={v}" for k, v in sorted(transcript_reasons.items(), key=lambda kv: -kv[1])
+                )
+                log_warn(f"Transcript failures by reason: {breakdown}")
 
             # Save the results to a JSON file
             if results:

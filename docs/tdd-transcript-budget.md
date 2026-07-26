@@ -1,6 +1,6 @@
 # TDD — Transcript budget and summarization efficiency
 
-**Status:** findings documented, next steps proposed (not yet implemented)
+**Status:** Steps 1–2 implemented (PR #28); Step 3 deferred as nice-to-have
 **Date:** 2026-07-26
 **Scope:** how transcripts are obtained and paid for, and what limits how many
 videos the pipeline can summarize per day.
@@ -131,7 +131,7 @@ finding unaddressed).
 
 Sequenced so each step's evidence informs the next.
 
-### Step 1 — Instrument the failure path (do first)
+### Step 1 — Instrument the failure path — ✅ IMPLEMENTED (PR #28)
 - In `_fetch_supadata`, log the HTTP status and payload shape for every
   non-delivering response; count outcomes per category in the run summary.
 - Record video duration alongside each `pending` record so Shorts can be
@@ -141,7 +141,7 @@ Sequenced so each step's evidence informs the next.
 - **Exit criterion:** if failures are *not* concentrated in Shorts/caption-less
   videos, skip Step 2 and go straight to Step 3.
 
-### Step 2 — Gate on duration/captions before spending a credit
+### Step 2 — Gate on duration/captions before spending a credit — ✅ IMPLEMENTED (PR #28)
 - Batch candidate video ids (≤50) into one `videos.list?part=contentDetails`
   call; skip videos under a configurable `min_duration` (default ~90 s) and
   optionally those reporting no captions.
@@ -149,7 +149,7 @@ Sequenced so each step's evidence informs the next.
 - **Acceptance:** credits per delivered summary drops measurably below 2.9;
   no drop in wanted summaries (verify against a run's title list).
 
-### Step 3 — Pilot Gemini direct YouTube URL (behind a flag, one channel)
+### Step 3 — Pilot Gemini direct YouTube URL — 🔵 NICE TO HAVE (deferred)
 - New code path in `summarizer.py` using the native endpoint with a
   `file_data` YouTube URL part; Supadata remains the fallback.
 - Measure: summary quality vs the transcript path, tokens consumed, and whether
@@ -157,6 +157,11 @@ Sequenced so each step's evidence informs the next.
 - **Acceptance:** equal-or-better summaries for one channel for a week with no
   quota incidents → widen; otherwise keep as an opportunistic fallback for
   videos whose transcripts fail.
+- **Deferred by decision (2026-07-26):** Steps 1–2 attack the same waste at a
+  fraction of the risk, and this path needs a second, non-OpenAI-compatible
+  code path in `summarizer.py` against a preview API. Revisit if the failure
+  breakdown shows the waste is *not* Shorts/caption-related, or if the
+  transcript budget becomes binding again after Step 2's savings.
 
 ### Step 4 — Re-evaluate the pacing layer
 - Scheduled follow-up already exists for **2026-08-17** (trigger
