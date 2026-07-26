@@ -124,7 +124,13 @@ and **paced automatically**: each configured key adds `SUPADATA_CREDITS_PER_KEY`
 to a monthly budget, and each day may use `remaining ÷ days left in the month`.
 Videos beyond the day's allowance are deferred silently (no "manual review"
 message, no retry attempt consumed) and picked up on a later run, so credits
-last the whole month instead of being spent in the first week. Counters live in
+last the whole month instead of being spent in the first week.
+
+**Channel order is priority order**: channels are processed top to bottom in
+`channel_ids.txt` and the day's allowance is spent in that order, so list the
+channels you least want to miss first — the ones at the bottom absorb whatever
+is left. A channel also needs `max=` at or above its publishing rate, or its
+backlog grows every day and never drains. Counters live in
 `data/supadata_usage.json`, committed back by the daily workflow, and every run
 logs `Transcript budget: used/allowed today, N left this month`.
 
