@@ -1,4 +1,3 @@
-import calendar
 import json
 import os
 import re
@@ -43,6 +42,31 @@ SUPADATA_CREDIT_STATUS = {402, 403}
 # to a later run instead of burning the month's credits in the first week.
 SUPADATA_CREDITS_PER_KEY = env_int("SUPADATA_CREDITS_PER_KEY", 100)
 SUPADATA_USAGE_FILE = os.getenv("SUPADATA_USAGE_FILE") or "data/supadata_usage.json"
+# Supadata resets credits on the plan's anniversary day, which is usually NOT
+# the 1st (a dashboard may read e.g. "Credits reset on 08/17"). Pacing has to
+# follow that cycle: assuming calendar months would compute a huge allowance in
+# the last days of a month and drain the real pool in a day or two. Clamped to
+# 1..28 so every month has the day.
+SUPADATA_RESET_DAY = min(max(env_int("SUPADATA_RESET_DAY", 1), 1), 28)
+# Safety net against a misconfigured reset day: never spend more than this
+# fraction of the budget in a single day, whatever the cycle math says.
+SUPADATA_MIN_CYCLE_DAYS = 28
+
+
+def _shift_month(day, months):
+    """Same day-of-month, `months` later/earlier (day is already <= 28)."""
+    index = (day.year * 12 + day.month - 1) + months
+    return day.replace(year=index // 12, month=index % 12 + 1)
+
+
+def cycle_bounds(today=None):
+    """(start, end) of the billing cycle containing `today`, per the reset day."""
+    today = today or datetime.now(timezone.utc).date()
+    if today.day >= SUPADATA_RESET_DAY:
+        start = today.replace(day=SUPADATA_RESET_DAY)
+        return start, _shift_month(start, 1)
+    end = today.replace(day=SUPADATA_RESET_DAY)
+    return _shift_month(end, -1), end
 
 
 def _supadata_keys():
@@ -72,10 +96,13 @@ def monthly_budget():
     return len(_supadata_keys()) * SUPADATA_CREDITS_PER_KEY
 
 
-def _load_usage():
-    """Usage counters for the current month/day; resets when either rolls over."""
-    today = datetime.now(timezone.utc).date()
-    month, day = today.strftime("%Y-%m"), today.isoformat()
+def _load_usage(today=None):
+    """Usage counters for the current billing cycle and day; each resets when
+    its period rolls over. Counters carry a `cycle` (the cycle's start date)
+    rather than a calendar month, so a mid-month reset day is honored."""
+    today = today or datetime.now(timezone.utc).date()
+    cycle_start = cycle_bounds(today)[0].isoformat()
+    day = today.isoformat()
     try:
         with open(SUPADATA_USAGE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -83,8 +110,8 @@ def _load_usage():
             raise ValueError("usage file is not an object")
     except (OSError, ValueError):
         data = {}
-    if data.get("month") != month:
-        data = {"month": month, "count": 0}
+    if data.get("cycle") != cycle_start:
+        data = {"cycle": cycle_start, "count": 0}
     if data.get("day") != day:
         data["day"], data["day_count"] = day, 0
     data.setdefault("count", 0)
@@ -114,24 +141,32 @@ def _record_call(usage):
 
 def daily_allowance(usage=None, today=None):
     """
-    How many fetches today may use: the remaining monthly budget spread over
-    the days left in the month (today included), so credits last all month.
-    Returns 0 when the monthly budget is spent.
+    How many fetches today may use: the credits left in this billing cycle
+    spread over the days remaining in it (today included), so they last until
+    the reset date. Returns 0 when the cycle's budget is spent.
+
+    Also capped at budget/SUPADATA_MIN_CYCLE_DAYS per day, so a wrong reset day
+    (which would make "days remaining" tiny) can't authorise draining the pool
+    in a single run.
     """
-    usage = usage if usage is not None else _load_usage()
     today = today or datetime.now(timezone.utc).date()
-    remaining = monthly_budget() - usage.get("count", 0)
+    usage = usage if usage is not None else _load_usage(today)
+    budget = monthly_budget()
+    remaining = budget - usage.get("count", 0)
     if remaining <= 0:
         return 0
-    days_left = calendar.monthrange(today.year, today.month)[1] - today.day + 1
-    return max(1, remaining // max(1, days_left))
+    days_left = max(1, (cycle_bounds(today)[1] - today).days)
+    paced = remaining // days_left
+    ceiling = max(1, budget // SUPADATA_MIN_CYCLE_DAYS)
+    return max(1, min(paced, ceiling))
 
 
-def budget_status():
-    """(allowed_today, used_today, remaining_this_month) — for logging."""
-    usage = _load_usage()
+def budget_status(today=None):
+    """(allowed_today, used_today, remaining_this_cycle) — for logging."""
+    today = today or datetime.now(timezone.utc).date()
+    usage = _load_usage(today)
     return (
-        daily_allowance(usage),
+        daily_allowance(usage, today),
         usage.get("day_count", 0),
         max(0, monthly_budget() - usage.get("count", 0)),
     )
