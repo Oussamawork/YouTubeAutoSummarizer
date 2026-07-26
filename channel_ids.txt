@@ -5,7 +5,10 @@
 #            per run (for prolific channels, so the chat isn't flooded)
 #   max=N  — per-run video cap for this channel (default: MAX_VIDEOS_PER_RUN)
 UCrGLm-Drgv0vbbemwwHeXJw
-UCngIhBkikUe6e7tZTjpKK7Q digest
+# More Crypto Online posts a per-coin analysis for many altcoins; only the
+# majors are worth a transcript credit. Aliases are listed explicitly because
+# matching is whole-word ("sol" alone does not match "solana").
+UCngIhBkikUe6e7tZTjpKK7Q digest only=btc,bitcoin,eth,ethereum,sol,solana
 UCwKB_00dPL3x5XmHF9IJCrg
 UCfCT7SSFEWyG4th9ZmaGYqQ
 # HKCM (German Elliott-Wave chart analysis). The main channel is prolific, so

@@ -22,8 +22,9 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `channel_scorecard.py` — Friday per-channel accuracy scorecard: directional
   calls vs Stooq daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
 - `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback); digest builder.
-- `helpers.py` — channel file parsing (`<id|@handle> [digest] [max=N]` per line; handles
-  resolved at run time by `scraper.resolve_channel_handle`), dedup
+- `helpers.py` — channel file parsing (`<id|@handle> [digest] [max=N] [only=a,b]` per
+  line; handles resolved at run time by `scraper.resolve_channel_handle`; `only=`
+  is a whole-word title filter applied before any transcript fetch), dedup
   state (v2 schema + v1 migration), summary cleaning.
 - `log.py` — colored logging helpers.
 

@@ -75,6 +75,7 @@ pip install -r requirements.txt
    | --- | --- |
    | `digest` | For prolific channels: instead of one full-summary message per video, bundle the channel's new videos into **one compact TL;DR digest message per run** (short TL;DR + up to 3 bullets each), so the chat isn't flooded. |
    | `max=N` | Per-run video cap for this channel (overrides `MAX_VIDEOS_PER_RUN`). |
+   | `only=a,b,c` | Process a video only when its **title** mentions one of these keywords. Matching is case-insensitive and **whole-word**, so `eth` does not match "wh*eth*er" and `sol` does not match "*sol*ve" — which also means `sol` does not match "solana", so list each alias you want (e.g. `only=sol,solana`). Filtering happens before the transcript fetch, so skipped videos cost no transcript credits and no LLM calls. |
 
 ## Usage
 

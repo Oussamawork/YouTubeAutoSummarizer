@@ -5,7 +5,10 @@ import time
 from dotenv import load_dotenv
 from defusedxml import ElementTree as SafeET
 from transcript import get_transcript_from_video, budget_status
-from helpers import read_channels, save_to_json, clean_summary, load_state, save_state, env_int, append_jsonl
+from helpers import (
+    read_channels, save_to_json, clean_summary, load_state, save_state, env_int,
+    append_jsonl, title_matches,
+)
 from signals import extract_signals, summarize_with_signals
 from summarizer import (
     summarize_transcript,
@@ -555,9 +558,10 @@ def main():
                 "budget_deferred": 0, "no_video": 0, "error": 0,
             }
 
-            # Count of retry records dropped this run because their video left
-            # the feed (reported in the run summary).
+            # Counts reported in the run summary: retry records dropped because
+            # their video left the feed, and videos skipped by a title filter.
             evicted_pending = 0
+            filtered_out = 0
 
             # Handles (@name) are resolved to channel ids once per run; the
             # dedup state is always keyed by the resolved id, so switching a
@@ -585,8 +589,28 @@ def main():
                         outcomes["no_video"] += 1
                         continue
 
+                    # Title filter (only=…): drop non-matching videos before any
+                    # transcript is fetched, so they cost nothing. Applied to
+                    # the feed itself, so the watermark simply moves past them
+                    # and they are never reconsidered.
+                    if channel.get("only"):
+                        kept = [v for v in videos if title_matches(v["video_title"], channel.get("only"))]
+                        if len(kept) != len(videos):
+                            filtered_out += len(videos) - len(kept)
+                            log_info(
+                                f"Title filter kept {len(kept)}/{len(videos)} videos for "
+                                f"channel {channel_id} (only={','.join(channel.get('only') or [])})."
+                            )
+                        videos = kept
+                        if not videos:
+                            log_info(f"No videos matching the title filter for {channel_id}. Skipping.")
+                            outcomes["unchanged"] += 1
+                            continue
+
                     # The feed fetch succeeded, so anything still pending for
                     # this channel that isn't in the feed can never be retried.
+                    # Filtered-out videos count as gone, clearing any retry
+                    # records the filter now excludes.
                     evicted_pending += _evict_orphaned_pending(
                         pending, channel_id, {v["video_id"] for v in videos}
                     )
@@ -729,6 +753,8 @@ def main():
             summary_line = ", ".join(f"{k}={v}" for k, v in outcomes.items() if v)
             if evicted_pending:
                 summary_line += f", pending_evicted={evicted_pending}"
+            if filtered_out:
+                summary_line += f", title_filtered={filtered_out}"
             log_info(f"Run summary: {len(channels)} channels | {summary_line or 'nothing to do'}")
 
             # Save the results to a JSON file
