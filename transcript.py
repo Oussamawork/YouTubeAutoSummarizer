@@ -238,7 +238,12 @@ def _fetch_supadata(vid):
             return text, False
         if index + 1 < len(keys):
             log_warn(f"Supadata key {index + 1} is out of credits; trying the next key.")
-    return "", False
+
+    # Every key reported no credits. That is exhaustion, not a video without
+    # captions: report it as such so the caller defers instead of eventually
+    # writing the video off as untranscribable.
+    log_warn("All Supadata keys are out of credits; deferring this video.")
+    return "", True
 
 
 def _fetch_supadata_with_key(vid, api_key, usage):
@@ -266,14 +271,17 @@ def _fetch_supadata_with_key(vid, api_key, usage):
             log_error("Supadata unreachable after retries.")
             return ""
 
-        # The request reached Supadata, so count it against the budget whatever
-        # it answers — an unanswered credit is still a spent one.
-        _record_call(usage)
-
-        # Out of credits on this key: rotate rather than retry.
+        # Out of credits on this key: rotate rather than retry. Nothing was
+        # delivered, so this must not be metered.
         if resp.status_code in SUPADATA_CREDIT_STATUS:
             log_warn(f"Supadata key rejected ({resp.status_code}): {resp.text[:120]}")
             return None
+
+        # Meter only answers that consume a credit — a served transcript (200)
+        # or an accepted async job (202). Counting rejections and transient
+        # retries would defer videos while credits are still available.
+        if resp.status_code in (200, 202):
+            _record_call(usage)
 
         # Large videos are processed asynchronously: 202 + a job id to poll.
         if resp.status_code == 202:

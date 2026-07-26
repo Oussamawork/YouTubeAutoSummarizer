@@ -101,19 +101,8 @@ def test_rotates_to_second_key_when_first_is_out_of_credits(monkeypatch):
     text, exhausted = tr._fetch_supadata("vid00000001")
     assert text == "second key transcript" and exhausted is False
     assert seen == ["spent", "fresh"]
-    assert tr._load_usage()["count"] == 2  # both requests metered
-
-
-def test_all_keys_out_of_credits_is_not_budget_exhausted(monkeypatch):
-    # Provider says no; that's a real failure, so the caller may fall back.
-    monkeypatch.setenv("SUPADATA_API_KEY", "spent")
-
-    class R:
-        status_code = 402
-        text = "no credits"
-
-    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: R())
-    assert tr._fetch_supadata("vid00000001") == ("", False)
+    # Only the delivering request costs a credit; the rejection does not.
+    assert tr._load_usage()["count"] == 1
 
 
 def test_get_transcript_reports_budget_exhaustion(monkeypatch):
@@ -128,3 +117,50 @@ def test_fallback_success_clears_budget_flag(monkeypatch):
     monkeypatch.setattr(tr, "_fetch_youtube_transcript_api", lambda vid: "from fallback")
     out = tr.get_transcript_from_video("https://www.youtube.com/watch?v=vid00000001")
     assert out == {"transcript": "from fallback", "budget_exhausted": False}
+
+
+def test_all_keys_out_of_credits_defers_instead_of_writing_off(monkeypatch):
+    # Exhaustion must not look like "this video has no captions", or the video
+    # is eventually written off permanently.
+    monkeypatch.setenv("SUPADATA_API_KEY", "spent1")
+    monkeypatch.setenv("SUPADATA_API_KEY_2", "spent2")
+
+    class R:
+        status_code = 402
+        text = "no credits"
+
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: R())
+    assert tr._fetch_supadata("vid00000001") == ("", True)
+
+
+def test_credit_rejections_and_retries_are_not_metered(monkeypatch):
+    # Only answers that actually consume a credit may count, otherwise we
+    # defer videos while credits remain.
+    monkeypatch.setenv("SUPADATA_API_KEY", "spent")
+
+    class R:
+        status_code = 402
+        text = "no credits"
+
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: R())
+    tr._fetch_supadata("vid00000001")
+    assert tr._load_usage()["count"] == 0
+
+    calls = []
+
+    def flaky(*a, **k):
+        calls.append(1)
+
+        class T:
+            status_code = 503 if len(calls) < 3 else 200
+            text = "busy"
+
+            def json(self):
+                return {"content": "ok"}
+        return T()
+
+    monkeypatch.setattr(tr.requests, "get", flaky)
+    monkeypatch.setattr(tr.time, "sleep", lambda s: None)
+    text, _ = tr._fetch_supadata("vid00000002")
+    assert text == "ok"
+    assert tr._load_usage()["count"] == 1  # 3 requests, one credit

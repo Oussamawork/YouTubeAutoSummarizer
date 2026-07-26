@@ -247,21 +247,25 @@ def _select_candidates(videos, channel_state, pending, limit=None):
     return ordered
 
 
-def _evict_stale_pending(pending):
+def _evict_orphaned_pending(pending, channel_id, feed_video_ids):
     """
-    Remove retry records that have used up their attempts. Without this they
-    linger forever: a video whose captions never appear is re-fetched (and
-    re-charged against the transcript budget) on every run while it stays in
-    the feed, and it competes with new videos for the per-run cap.
-    Returns the number of records dropped.
+    Drop this channel's retry records for videos that are no longer in its feed.
+
+    `_select_candidates` can only re-include a pending video while it is still
+    in the ~15-entry RSS window, so once a deferred video scrolls out it can
+    never be retried or cleared — it just accumulates in the committed state
+    file forever. Only called with a feed we actually fetched, so a failed
+    fetch never evicts anything. Returns the number of records dropped.
     """
-    stale = [
+    orphaned = [
         video_id for video_id, record in pending.items()
-        if isinstance(record, dict) and record.get("attempts", 0) >= NO_TRANSCRIPT_MAX_ATTEMPTS
+        if isinstance(record, dict)
+        and record.get("channel_id") == channel_id
+        and video_id not in feed_video_ids
     ]
-    for video_id in stale:
+    for video_id in orphaned:
         pending.pop(video_id, None)
-    return len(stale)
+    return len(orphaned)
 
 
 def _advance_channel_state(channels_state, channel_id, video_details):
@@ -551,12 +555,9 @@ def main():
                 "budget_deferred": 0, "no_video": 0, "error": 0,
             }
 
-            # Drop retry records that can no longer succeed, so they stop
-            # costing a transcript credit on every run (and stop crowding out
-            # new videos in the per-run cap).
-            evicted = _evict_stale_pending(pending)
-            if evicted:
-                log_warn(f"Evicted {evicted} stale pending video(s) that exceeded their retry budget.")
+            # Count of retry records dropped this run because their video left
+            # the feed (reported in the run summary).
+            evicted_pending = 0
 
             # Handles (@name) are resolved to channel ids once per run; the
             # dedup state is always keyed by the resolved id, so switching a
@@ -583,6 +584,12 @@ def main():
                         log_warn(f"No videos found for channel ID: {channel_id}.")
                         outcomes["no_video"] += 1
                         continue
+
+                    # The feed fetch succeeded, so anything still pending for
+                    # this channel that isn't in the feed can never be retried.
+                    evicted_pending += _evict_orphaned_pending(
+                        pending, channel_id, {v["video_id"] for v in videos}
+                    )
 
                     candidates = _select_candidates(
                         videos, channels_state.get(channel_id), pending,
@@ -720,6 +727,8 @@ def main():
 
             # End-of-run report: one line summarizing what happened this run.
             summary_line = ", ".join(f"{k}={v}" for k, v in outcomes.items() if v)
+            if evicted_pending:
+                summary_line += f", pending_evicted={evicted_pending}"
             log_info(f"Run summary: {len(channels)} channels | {summary_line or 'nothing to do'}")
 
             # Save the results to a JSON file

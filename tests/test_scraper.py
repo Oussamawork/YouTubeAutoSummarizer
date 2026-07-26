@@ -620,18 +620,19 @@ def test_summarize_video_missing_transcript_still_reports(monkeypatch):
     assert outcome == "no_transcript" and decided is True and "No transcript" in body
 
 
-def test_evict_stale_pending_drops_exhausted_records():
+def test_evict_orphaned_pending_drops_videos_gone_from_feed():
     pending = {
-        "a": {"channel_id": "c", "attempts": scraper.NO_TRANSCRIPT_MAX_ATTEMPTS},
-        "b": {"channel_id": "c", "attempts": 1},
-        "c": {"channel_id": "c", "attempts": 0},
-        "d": "not a dict",
+        "gone": {"channel_id": "c1", "attempts": 2},      # not in feed -> evict
+        "still": {"channel_id": "c1", "attempts": 1},     # in feed -> keep
+        "other": {"channel_id": "c2", "attempts": 2},     # other channel -> keep
+        "bad": "not a dict",
     }
-    dropped = scraper._evict_stale_pending(pending)
+    dropped = scraper._evict_orphaned_pending(pending, "c1", {"still", "new"})
     assert dropped == 1
-    assert set(pending) == {"b", "c", "d"}  # only the exhausted record goes
+    assert set(pending) == {"still", "other", "bad"}
 
 
-def test_evict_stale_pending_noop_when_all_fresh():
-    pending = {"a": {"attempts": 0}}
-    assert scraper._evict_stale_pending(pending) == 0 and set(pending) == {"a"}
+def test_evict_orphaned_pending_noop_when_all_present():
+    pending = {"a": {"channel_id": "c1", "attempts": 1}}
+    assert scraper._evict_orphaned_pending(pending, "c1", {"a"}) == 0
+    assert set(pending) == {"a"}
