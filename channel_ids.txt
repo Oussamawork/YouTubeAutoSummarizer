@@ -10,6 +10,6 @@ UCwKB_00dPL3x5XmHF9IJCrg
 UCfCT7SSFEWyG4th9ZmaGYqQ
 # HKCM (German Elliott-Wave chart analysis). The main channel is prolific, so
 # it runs in digest mode with a per-run cap to keep the chat readable.
-@hkcm digest max=5
-@HKCM_GLOBAL digest
-@phantombyhkcm
+UC3AdN1bEmEonuSwXNS8LixQ digest max=5   # @hkcm
+UCvLnTGJQthqju38QPtaD64Q digest         # @HKCM_GLOBAL
+UC_niVs5ITmD-qgnxph8CohA                # @phantombyhkcm

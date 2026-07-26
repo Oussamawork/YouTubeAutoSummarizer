@@ -144,3 +144,20 @@ def test_append_jsonl_failure_returns_false(tmp_path):
     assert helpers.append_jsonl(str(tmp_path), {"a": 1}) is False
     # Unserializable record -> TypeError, swallowed.
     assert helpers.append_jsonl(str(tmp_path / "f.jsonl"), {"x": {1, 2}}) is False
+
+
+def test_read_channels_strips_inline_comments(tmp_path):
+    path = tmp_path / "channels.txt"
+    path.write_text(
+        "# full-line comment\n"
+        "UC111 digest max=5   # @somehandle\n"
+        "UC222   # another name\n"
+        "\n"
+        "@handle3 digest\n",
+        encoding="utf-8",
+    )
+    channels = helpers.read_channels(str(path))
+    assert [c["channel_id"] for c in channels] == ["UC111", "UC222", "@handle3"]
+    assert channels[0]["digest"] is True and channels[0]["max_per_run"] == 5
+    assert channels[1]["digest"] is False and channels[1]["max_per_run"] is None
+    assert channels[2]["digest"] is True

@@ -39,8 +39,8 @@ def read_channels(file_path):
     Read channel entries, one per line: a channel ID (UC…) or an @handle,
     optionally followed by whitespace-separated options. Handles are resolved
     to channel IDs at run time (see scraper.resolve_channel_handle). Blank
-    lines and lines starting with '#' (comments) are ignored. Returns [] if
-    the file is missing.
+    lines and comments ('#' to end of line, whether the line starts with it or
+    it follows an entry) are ignored. Returns [] if the file is missing.
 
     Supported options:
       digest — bundle this channel's new videos into one compact TL;DR digest
@@ -57,8 +57,10 @@ def read_channels(file_path):
         with open(file_path, "r") as file:
             channels = []
             for line in file:
-                line = line.strip()
-                if not line or line.startswith("#"):
+                # Strip inline comments too, so an entry can be annotated with
+                # the channel's name/handle without it parsing as an option.
+                line = line.split("#", 1)[0].strip()
+                if not line:
                     continue
                 tokens = line.split()
                 entry = {"channel_id": tokens[0], "digest": False, "max_per_run": None}
