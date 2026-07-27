@@ -1,8 +1,8 @@
 # TDD — Transcript budget and summarization efficiency
 
-**Status:** Steps 1–2 implemented (PR #28). Next action: read the first
-diagnostics run (§6, Step 2b). Step 3 deferred as nice-to-have. 17 open review
-findings tracked in §9.
+**Status:** Steps 1–2 implemented and **validated in production** (§2.5):
+credits per delivered summary fell from 2.9 to **1.0**. Step 3 deferred as
+nice-to-have. 17 open review findings tracked in §9.
 **Date:** 2026-07-26
 **Scope:** how transcripts are obtained and paid for, and what limits how many
 videos the pipeline can summarize per day.
@@ -69,6 +69,42 @@ A calendar-month assumption computed `300 ÷ 6 days left in July = 50 fetches/da
 and would have drained the pool in ~4 days. Cycle-aware pacing gives **9/day**
 (214 ÷ 22 days to the earliest reset), which matches demand (~9/day: Parkev 4 +
 five channels at ~1).
+
+### 2.5 Result of Steps 1–2 (first run, 2026-07-26 22:56 UTC)
+
+The gates and the diagnostics shipped together, so the first nightly run on
+`86a6794` is the measurement.
+
+```
+Run summary: 7 channels | sent=10, unchanged=4, pending_evicted=47,
+             title_filtered=2, too_short=16
+```
+
+| Metric | Before (§2.1) | This run | |
+| --- | --- | --- | --- |
+| Credits per delivered summary | 2.9 | **1.0** | 10 credits (`data/supadata_usage.json`) → 10 summaries |
+| Hit rate | ~35 % | **100 %** | no `Transcript failures by reason` line was emitted at all |
+| Shorts skipped before any credit | — | **16** | HKCM 4, HKCM GLOBAL 2, Phantom 3, More Crypto Online 7 |
+
+**The hypothesis held.** Every fetch that ran, delivered — the waste really was
+concentrated in very short videos. Effective capacity goes from ~100 summaries
+per 300 credits to ~300, without buying anything.
+
+Two things the run revealed that were previously invisible:
+
+- **The HKCM channels are mostly Shorts.** All three had *only* short videos
+  this run ("No new videos" after the gate), so their real long-form cadence is
+  well below the ~1/day assumed in §2.2.
+- **`SUPADATA_RESET_DAY` is still unset.** The usage file shows
+  `"cycle": "2026-07-01"`, i.e. the calendar-month default, so the seeded 86
+  credits were discarded at cycle rollover and the tracker now believes 290
+  remain when ~204 actually do. The per-day ceiling (budget ÷ 28 = 10) is what
+  kept the run in bounds — it spent exactly 10. Setting the variable to `17`
+  restores accurate pacing; until then the ceiling is doing the work.
+
+Also observed working as designed: one combined summarize+extract call returned
+unusable JSON and fell back to the separate calls, keeping the summary
+("Combined summary+signals call returned no JSON; using the separate calls").
 
 ### 2.4 Title filtering works
 
@@ -167,7 +203,7 @@ Sequenced so each step's evidence informs the next.
   breakdown shows the waste is *not* Shorts/caption-related, or if the
   transcript budget becomes binding again after Step 2's savings.
 
-### Step 2b — Read the first diagnostics run — ⏳ PENDING (next action)
+### Step 2b — Read the first diagnostics run — ✅ DONE (see §2.5)
 The gate and the reason-logging shipped together, so the first nightly run after
 PR #28 (2026-07-26, 22:00 UTC) is the first with data. Read its log for:
 - `Run summary: … too_short=N, title_filtered=N` — how much the gates caught.
@@ -184,7 +220,11 @@ Then act on it:
 
 **Success measure for Steps 1–2:** credits per delivered summary below 2.9
 (from `data/supadata_usage.json` count ÷ new rows in `data/signals.jsonl`),
-with no wanted video dropped.
+with no wanted video dropped. **Met: 1.0, with 10/10 fetches delivering.**
+
+Because the breakdown showed *no* failures at all, the "consider
+`SKIP_UNCAPTIONED`" branch is moot for now — there is no residual caption-less
+waste to remove. Leave it off. Re-open only if the failure line reappears.
 
 ### Step 4 — Re-evaluate the pacing layer
 - Scheduled follow-up already exists for **2026-08-17** (trigger
