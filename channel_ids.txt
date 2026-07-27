@@ -30,3 +30,10 @@ UC_niVs5ITmD-qgnxph8CohA                # @phantombyhkcm
 # majors are worth a transcript credit. Aliases are listed explicitly because
 # matching is whole-word ("sol" alone does not match "solana").
 UCngIhBkikUe6e7tZTjpKK7Q digest only=btc,bitcoin,eth,ethereum,sol,solana
+
+# --- New / unproven: lowest priority, capped until volume is known ----------
+# Handles (not IDs) so they resolve at run time; each costs 1 API quota unit.
+@realfinvid max=3
+# TheStreet publishes many short market clips a day — digest so they arrive as
+# one TL;DR, and cap the per-run count so they can't drain the credit budget.
+@thestreet digest max=3
