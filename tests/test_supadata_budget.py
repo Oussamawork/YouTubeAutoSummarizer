@@ -211,6 +211,121 @@ def test_all_keys_limit_exceeded_defers_instead_of_writing_off(monkeypatch):
     assert tr._load_usage()["count"] == 0
 
 
+def _key_sequence(monkeypatch, responses):
+    """Drive one response class per key, recording which keys were tried."""
+    seen = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        key = headers["x-api-key"]
+        seen.append(key)
+        return responses[key]()
+
+    monkeypatch.setattr(tr.requests, "get", fake_get)
+    monkeypatch.setattr(tr.time, "sleep", lambda *_: None)
+    return seen
+
+
+def test_rotates_past_any_failing_key_not_just_out_of_credits(monkeypatch):
+    # A key that cannot deliver is worth no more than a key with no credits,
+    # so every failure mode must fall through to the next key.
+    monkeypatch.setenv("SUPADATA_API_KEYS", "broken,unreachable,fresh")
+    monkeypatch.delenv("SUPADATA_API_KEY", raising=False)
+    monkeypatch.delenv("SUPADATA_API_KEY_2", raising=False)
+    monkeypatch.delenv("SUPADATA_API_KEY_3", raising=False)
+
+    class ServerError:
+        status_code = 500
+        text = "boom"
+
+        def json(self):
+            return {}
+
+    class Unreachable:
+        def __init__(self):
+            raise tr.requests.RequestException("connection reset")
+
+    class Fresh:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"content": "third key transcript"}
+
+    seen = _key_sequence(monkeypatch, {"broken": ServerError,
+                                       "unreachable": Unreachable,
+                                       "fresh": Fresh})
+    text, exhausted, reason = tr._fetch_supadata("vid00000001")
+    assert text == "third key transcript" and exhausted is False and reason == "ok"
+    # Both failing keys exhaust their retries, then the third key delivers.
+    assert seen[-1] == "fresh"
+    assert set(seen) == {"broken", "unreachable", "fresh"}
+
+
+def test_no_captions_answer_does_not_spend_the_other_keys(monkeypatch):
+    # A 200 with no content is the key working and saying the video has no
+    # captions. Rotating would spend a credit per key to be told the same.
+    monkeypatch.setenv("SUPADATA_API_KEYS", "first,second")
+    monkeypatch.delenv("SUPADATA_API_KEY", raising=False)
+    monkeypatch.delenv("SUPADATA_API_KEY_2", raising=False)
+    monkeypatch.delenv("SUPADATA_API_KEY_3", raising=False)
+
+    class Empty:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"content": ""}
+
+    seen = _key_sequence(monkeypatch, {"first": Empty, "second": Empty})
+    text, exhausted, reason = tr._fetch_supadata("vid00000001")
+    assert text == "" and exhausted is False and reason == "empty_content"
+    assert seen == ["first"]
+
+
+def test_mixed_failures_including_credits_still_defer(monkeypatch):
+    # One key spent and one merely broken must not look like a video without
+    # captions, or the video is eventually written off.
+    monkeypatch.setenv("SUPADATA_API_KEYS", "broken,spent")
+    monkeypatch.delenv("SUPADATA_API_KEY", raising=False)
+    monkeypatch.delenv("SUPADATA_API_KEY_2", raising=False)
+    monkeypatch.delenv("SUPADATA_API_KEY_3", raising=False)
+
+    class ServerError:
+        status_code = 500
+        text = "boom"
+
+        def json(self):
+            return {}
+
+    class Spent:
+        status_code = 429
+        text = "Limit Exceeded"
+
+        def json(self):
+            return {"error": "limit-exceeded"}
+
+    _key_sequence(monkeypatch, {"broken": ServerError, "spent": Spent})
+    assert tr._fetch_supadata("vid00000001") == ("", True, "no_credits")
+
+
+def test_all_keys_failing_without_credit_errors_reports_last_reason(monkeypatch):
+    monkeypatch.setenv("SUPADATA_API_KEYS", "a,b")
+    monkeypatch.delenv("SUPADATA_API_KEY", raising=False)
+    monkeypatch.delenv("SUPADATA_API_KEY_2", raising=False)
+    monkeypatch.delenv("SUPADATA_API_KEY_3", raising=False)
+
+    class Teapot:
+        status_code = 418
+        text = "nope"
+
+        def json(self):
+            return {}
+
+    _key_sequence(monkeypatch, {"a": Teapot, "b": Teapot})
+    text, exhausted, reason = tr._fetch_supadata("vid00000001")
+    assert text == "" and exhausted is False and reason == "http_418"
+
+
 def test_get_transcript_reports_budget_exhaustion(monkeypatch):
     monkeypatch.setattr(tr, "_fetch_supadata", lambda vid: ("", True, "no_credits"))
     monkeypatch.setattr(tr, "_fetch_youtube_transcript_api", lambda vid: "")
