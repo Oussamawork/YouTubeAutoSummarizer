@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
 
 import requests
-from helpers import env_int
+from helpers import env_flag, env_int
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
@@ -56,6 +56,21 @@ SUPADATA_RESET_DAY = min(max(env_int("SUPADATA_RESET_DAY", 1), 1), 28)
 # Safety net against a misconfigured reset day: never spend more than this
 # fraction of the budget in a single day, whatever the cycle math says.
 SUPADATA_MIN_CYCLE_DAYS = 28
+
+
+def _daily_pacing_enabled():
+    """
+    Whether to ration the cycle's credits across its remaining days.
+
+    Off by default: a run spends whatever the cycle has left, so every video
+    published today is summarised today instead of trickling out over later
+    runs. The cost is that a busy stretch can exhaust the pool before the reset
+    date — when it does, videos defer via `budget_exhausted` rather than being
+    written off, so nothing is lost, but there will be a quiet gap until credits
+    return. Set SUPADATA_DAILY_PACING=true to restore rationing. Read at call
+    time so tests and reloads see the current environment.
+    """
+    return env_flag("SUPADATA_DAILY_PACING", default=False)
 
 
 def _shift_month(day, months):
@@ -146,13 +161,15 @@ def _record_call(usage):
 
 def daily_allowance(usage=None, today=None):
     """
-    How many fetches today may use: the credits left in this billing cycle
-    spread over the days remaining in it (today included), so they last until
-    the reset date. Returns 0 when the cycle's budget is spent.
+    How many fetches today may use. Returns 0 when the cycle's budget is spent.
 
-    Also capped at budget/SUPADATA_MIN_CYCLE_DAYS per day, so a wrong reset day
-    (which would make "days remaining" tiny) can't authorise draining the pool
-    in a single run.
+    Unpaced (the default), that is everything the cycle has left, so a day's
+    videos are all processed on the day they are published. With
+    SUPADATA_DAILY_PACING enabled it is instead the credits left in this billing
+    cycle spread over the days remaining in it (today included), so they last
+    until the reset date — and capped at budget/SUPADATA_MIN_CYCLE_DAYS per day,
+    so a wrong reset day (which would make "days remaining" tiny) can't
+    authorise draining the pool in a single run.
     """
     today = today or datetime.now(timezone.utc).date()
     usage = usage if usage is not None else _load_usage(today)
@@ -160,6 +177,8 @@ def daily_allowance(usage=None, today=None):
     remaining = budget - usage.get("count", 0)
     if remaining <= 0:
         return 0
+    if not _daily_pacing_enabled():
+        return remaining
     days_left = max(1, (cycle_bounds(today)[1] - today).days)
     paced = remaining // days_left
     ceiling = max(1, budget // SUPADATA_MIN_CYCLE_DAYS)

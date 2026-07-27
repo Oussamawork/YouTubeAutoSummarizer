@@ -31,7 +31,8 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 ## Dedup state model
 `seen_videos.json`: `channels` maps channel-id → watermark (`last_video_id`,
 `last_published`); videos published after the watermark are candidates, oldest
-first, capped at `MAX_VIDEOS_PER_RUN`. `pending` maps video-id → retry record for
+first, capped at `MAX_VIDEOS_PER_RUN` (0 = no cap, the default). `pending` maps
+video-id → retry record for
 deferred videos (captions not up yet → up to `NO_TRANSCRIPT_MAX_ATTEMPTS` runs;
 LLM quota exhausted). Deciding a video advances the watermark; deferring does not.
 

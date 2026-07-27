@@ -178,6 +178,14 @@ def test_select_candidates_caps_at_limit_keeping_oldest():
     assert [v["video_id"] for v in out] == ["v2", "v3"]
 
 
+def test_select_candidates_uncapped_takes_every_due_video():
+    # limit=0 means no cap: the whole backlog goes out in this run instead of
+    # the newest videos waiting for the next one.
+    state = {"last_video_id": "v1", "last_published": "2026-06-01T00:00:00+00:00"}
+    out = scraper._select_candidates(FEED, state, {}, limit=0)
+    assert [v["video_id"] for v in out] == ["v2", "v3", "v4", "v5"]
+
+
 def test_select_candidates_v1_state_uses_feed_position():
     # Migrated v1 state has an id but no timestamp: take everything newer.
     out = scraper._select_candidates(FEED, {"last_video_id": "v4"}, {})

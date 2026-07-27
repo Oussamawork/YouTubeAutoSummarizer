@@ -55,9 +55,11 @@ STATE_FILE = "seen_videos.json"
 # (committed back by the daily workflow when MARKET_SIGNALS is enabled).
 SIGNALS_FILE = "data/signals.jsonl"
 
-# Cap on videos processed per channel per run, so a backlog (or a channel that
-# uploads a lot) can't flood Telegram in one run. The rest wait for the next run.
-MAX_VIDEOS_PER_RUN = env_int("MAX_VIDEOS_PER_RUN", 3)
+# Cap on videos processed per channel per run; the rest wait for the next run.
+# 0 (the default) means no cap, so everything a channel published is processed
+# in the run that finds it rather than trickling out over later runs. Set a
+# positive value to bound how much a prolific channel can post in one run.
+MAX_VIDEOS_PER_RUN = env_int("MAX_VIDEOS_PER_RUN", 0)
 # Captions (especially auto-generated ones) often appear hours after upload, so
 # a video with no transcript is retried this many runs before giving up.
 NO_TRANSCRIPT_MAX_ATTEMPTS = env_int("NO_TRANSCRIPT_MAX_ATTEMPTS", 3)
@@ -320,7 +322,8 @@ def _select_candidates(videos, channel_state, pending, limit=None):
       stored id's position in the feed.
     Deferred videos (in `pending`) are re-included while still in the feed.
     Returns candidates oldest first, capped at `limit`; the newest ones beyond
-    the cap wait for the next run so delivery stays chronological.
+    the cap wait for the next run so delivery stays chronological. A `limit` of
+    0 (or less) means no cap — every due video is processed this run.
     """
     if limit is None:
         limit = MAX_VIDEOS_PER_RUN
@@ -354,7 +357,7 @@ def _select_candidates(videos, channel_state, pending, limit=None):
             chosen.add(video["video_id"])
 
     ordered = [video for video in reversed(videos) if video["video_id"] in chosen]
-    if len(ordered) > limit:
+    if limit > 0 and len(ordered) > limit:
         log_warn(
             f"{len(ordered)} videos due for this channel; processing the oldest "
             f"{limit} this run, the rest on the next run."

@@ -74,7 +74,7 @@ pip install -r requirements.txt
    | Option | Effect |
    | --- | --- |
    | `digest` | For prolific channels: instead of one full-summary message per video, bundle the channel's new videos into **one compact TL;DR digest message per run** (short TL;DR + up to 3 bullets each), so the chat isn't flooded. |
-   | `max=N` | Per-run video cap for this channel (overrides `MAX_VIDEOS_PER_RUN`). |
+   | `max=N` | Per-run video cap for this channel (overrides `MAX_VIDEOS_PER_RUN`); `0` means no cap. |
    | `only=a,b,c` | Process a video only when its **title** mentions one of these keywords. Matching is case-insensitive and **whole-word**, so `eth` does not match "wh*eth*er" and `sol` does not match "*sol*ve" — which also means `sol` does not match "solana", so list each alias you want (e.g. `only=sol,solana`). Filtering happens before the transcript fetch, so skipped videos cost no transcript credits and no LLM calls. |
 
 ## Usage
@@ -99,7 +99,7 @@ This skips the channel scan and dedup state entirely — useful for any video, s
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MAX_VIDEOS_PER_RUN` | `3` | Max videos processed per channel per run; older ones go first, the rest wait for the next run. |
+| `MAX_VIDEOS_PER_RUN` | `0` (no cap) | Max videos processed per channel per run; older ones go first, the rest wait for the next run. `0` processes everything the channel has due. |
 | `NO_TRANSCRIPT_MAX_ATTEMPTS` | `3` | Runs to retry a video whose captions aren't up yet before notifying and giving up. |
 | `DAILY_DIGEST` | off | `true` bundles all of a run's summaries into one combined Telegram message. |
 | `MIN_VIDEO_SECONDS` | `90` | Skip videos shorter than this before fetching a transcript — Shorts and clips rarely carry usable captions and aren't worth a transcript credit. Checked with one `videos.list` call per 50 videos (1 quota unit of 10,000/day). Videos whose metadata can't be read are kept. `0` disables the check. |
@@ -121,27 +121,33 @@ keep the original single-channel behavior.
 
 Supadata's free tier gives a fixed number of transcript fetches per key per
 month (100 by default), and a spent pool means no transcripts at all — the
-`youtube-transcript-api` fallback is blocked from CI IPs. So usage is metered
-and **paced automatically**: each configured key adds `SUPADATA_CREDITS_PER_KEY`
-to a monthly budget, and each day may use `remaining ÷ days left in the month`.
-Videos beyond the day's allowance are deferred silently (no "manual review"
-message, no retry attempt consumed) and picked up on a later run, so credits
-last the whole month instead of being spent in the first week.
+`youtube-transcript-api` fallback is blocked from CI IPs. So usage is metered:
+each configured key adds `SUPADATA_CREDITS_PER_KEY` to a monthly budget, and
+keys are used in order, rotating to the next one whenever a key fails to
+deliver. Counters live in `data/supadata_usage.json`, committed back by the
+daily workflow, and every run logs `Transcript budget: used/allowed today, N
+left this month`.
+
+**By default a run spends whatever the cycle has left**, so every video
+published today is summarized today. The trade-off is that a busy stretch can
+exhaust the pool before the reset date; when it does, videos defer via the
+budget flag (no "manual review" message, no retry attempt consumed) and are
+picked up once credits return, so nothing is written off — there is just a
+quiet gap. Set `SUPADATA_DAILY_PACING=true` to ration instead: each day may
+then use `remaining ÷ days left in the cycle`, capped at `budget ÷ 28`, so the
+credits last to the reset date.
 
 **Channel order is priority order**: channels are processed top to bottom in
-`channel_ids.txt` and the day's allowance is spent in that order, so list the
-channels you least want to miss first — the ones at the bottom absorb whatever
-is left. A channel also needs `max=` at or above its publishing rate, or its
-backlog grows every day and never drains. Counters live in
-`data/supadata_usage.json`, committed back by the daily workflow, and every run
-logs `Transcript budget: used/allowed today, N left this month`.
+`channel_ids.txt` and credits are spent in that order, so list the channels you
+least want to miss first — the ones at the bottom absorb whatever is left.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SUPADATA_API_KEY`, `SUPADATA_API_KEY_2`, `SUPADATA_API_KEY_3` (secrets) | — | Free-tier keys; used in order, rotating when one reports no credits. `SUPADATA_API_KEYS` also accepts a comma-separated list. |
 | `SUPADATA_CREDITS_PER_KEY` | `100` | Monthly credits each key contributes to the budget. |
 | `SUPADATA_MONTHLY_BUDGET` | keys × credits | Explicit override for the whole cycle's budget. |
-| `SUPADATA_RESET_DAY` | `1` | Day of the month the plan's credits reset. Supadata resets on the plan's anniversary, not the 1st — the dashboard shows it ("Credits reset on 08/17" → set `17`). Getting this wrong makes the pacing think the cycle ends sooner than it does; a per-day ceiling of budget ÷ 28 limits the damage, but set it correctly. |
+| `SUPADATA_DAILY_PACING` | `false` | Ration the cycle's credits across its remaining days instead of spending what's needed each run. Off means a day's videos are all processed that day. |
+| `SUPADATA_RESET_DAY` | `1` | Day of the month the plan's credits reset. Supadata resets on the plan's anniversary, not the 1st — the dashboard shows it ("Credits reset on 08/17" → set `17`). Only consulted when pacing is enabled: it makes the pacing think the cycle ends sooner than it does; a per-day ceiling of budget ÷ 28 limits the damage, but set it correctly. |
 
 ### Market signals (on by default):
 

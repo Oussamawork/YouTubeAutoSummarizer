@@ -3,37 +3,37 @@
 # Options:
 #   digest — bundle this channel's new videos into ONE compact TL;DR message
 #            per run (for prolific channels, so the chat isn't flooded)
-#   max=N  — per-run video cap for this channel (default: MAX_VIDEOS_PER_RUN)
+#   max=N  — per-run video cap for this channel (default: MAX_VIDEOS_PER_RUN,
+#            which itself defaults to 0 = no cap). 0 means no cap.
 #   only=a,b,c — only process videos whose TITLE mentions one of these keywords
 #            (whole-word, case-insensitive; filtered out before any transcript
 #            is fetched, so skipped videos cost nothing)
 #
-# ORDER MATTERS: channels are processed top to bottom, and the daily transcript
-# budget (see README, "Transcript budget") is spent in that order. Put the
-# channels you least want to miss first; the ones at the bottom absorb whatever
-# credits are left over.
+# No per-run caps are set: every video a channel publishes is processed in the
+# run that finds it, rather than trickling out over later runs. Channel order
+# still decides who gets served first if the transcript pool runs dry mid-run
+# (see README, "Transcript budget"), so the channels you least want to miss
+# stay at the top.
 
 # --- Priority: never miss these -------------------------------------------
-# Parkev publishes ~4 videos/day (observed 3-5), so the cap has to exceed that
-# or the backlog grows every day and never drains.
-UCwKB_00dPL3x5XmHF9IJCrg max=6          # @ParkevTatevosian, CFA
+UCwKB_00dPL3x5XmHF9IJCrg                # @ParkevTatevosian, CFA (~4-5/day)
 
 # --- Steady, ~1 video/day each --------------------------------------------
 UCrGLm-Drgv0vbbemwwHeXJw                # Couch Investor
 UCfCT7SSFEWyG4th9ZmaGYqQ                # Joseph Carlson After Hours
-UC3AdN1bEmEonuSwXNS8LixQ digest max=5   # @hkcm
+UC3AdN1bEmEonuSwXNS8LixQ digest         # @hkcm
 UCvLnTGJQthqju38QPtaD64Q digest         # @HKCM_GLOBAL
 UC_niVs5ITmD-qgnxph8CohA                # @phantombyhkcm
 
-# --- Highest volume: takes whatever budget is left -------------------------
+# --- Highest volume --------------------------------------------------------
 # More Crypto Online posts a per-coin analysis for many altcoins; only the
 # majors are worth a transcript credit. Aliases are listed explicitly because
 # matching is whole-word ("sol" alone does not match "solana").
 UCngIhBkikUe6e7tZTjpKK7Q digest only=btc,bitcoin,eth,ethereum,sol,solana
 
-# --- New / unproven: lowest priority, capped until volume is known ----------
+# --- New / unproven --------------------------------------------------------
 # Handles (not IDs) so they resolve at run time; each costs 1 API quota unit.
-@realfinvid max=3
+@realfinvid
 # TheStreet publishes many short market clips a day — digest so they arrive as
-# one TL;DR, and cap the per-run count so they can't drain the credit budget.
-@thestreet digest max=3
+# one TL;DR rather than a burst of separate messages.
+@thestreet digest
