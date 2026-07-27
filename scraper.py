@@ -8,7 +8,7 @@ from defusedxml import ElementTree as SafeET
 from transcript import get_transcript_from_video, budget_status
 from helpers import (
     read_channels, save_to_json, clean_summary, load_state, save_state, env_int,
-    append_jsonl, title_matches,
+    env_float, append_jsonl, title_matches,
 )
 from signals import extract_signals, summarize_with_signals
 from summarizer import (
@@ -62,7 +62,18 @@ SIGNALS_FILE = "data/signals.jsonl"
 MAX_VIDEOS_PER_RUN = env_int("MAX_VIDEOS_PER_RUN", 0)
 # Captions (especially auto-generated ones) often appear hours after upload, so
 # a video with no transcript is retried this many runs before giving up.
-NO_TRANSCRIPT_MAX_ATTEMPTS = env_int("NO_TRANSCRIPT_MAX_ATTEMPTS", 3)
+NO_TRANSCRIPT_MAX_ATTEMPTS = env_int("NO_TRANSCRIPT_MAX_ATTEMPTS", 8)
+# Giving up is time-gated as well as count-gated: a video is never written off
+# until it has been chased for this long, however many runs that took. A count
+# alone is the wrong unit once the polling rate can change — at one run every
+# two hours, three attempts is six hours, and auto-captions routinely take
+# longer than that to appear. The transcript is the whole product, so the
+# default errs heavily toward keeping the video.
+NO_TRANSCRIPT_MIN_HOURS = env_float("NO_TRANSCRIPT_MIN_HOURS", 36.0)
+# Minimum gap between retries of one deferred video. Supadata answering "no
+# captions" costs a credit, so without this, frequent polling would spend one
+# per run on every pending video. 0 disables the throttle.
+PENDING_RETRY_MIN_HOURS = env_float("PENDING_RETRY_MIN_HOURS", 3.0)
 # Videos shorter than this are skipped before any transcript is fetched:
 # Shorts and clips rarely carry usable captions and aren't worth summarizing.
 # 0 disables the check.
@@ -76,6 +87,31 @@ def _env_flag(name, default=False):
     if not value:
         return default
     return value in {"1", "true", "yes", "on"}
+
+
+def _hours_since(timestamp, now=None):
+    """Hours elapsed since an ISO timestamp, or None if missing/unparsable."""
+    moment = _parse_timestamp(timestamp)
+    if moment is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    return (now - moment).total_seconds() / 3600.0
+
+
+def _retry_wait_remaining(record, now=None):
+    """
+    Hours still to wait before re-fetching a deferred video, so a fast polling
+    schedule doesn't spend a transcript credit per run on the same video (a
+    "no captions" answer costs one). Records written before retry timestamps
+    existed, and videos deferred for reasons that cost nothing (budget), carry
+    no `last_attempt` and are retried immediately.
+    """
+    if not record or PENDING_RETRY_MIN_HOURS <= 0:
+        return 0.0
+    elapsed = _hours_since(record.get("last_attempt"), now)
+    if elapsed is None:
+        return 0.0
+    return max(0.0, PENDING_RETRY_MIN_HOURS - elapsed)
 
 
 def _parse_timestamp(value):
@@ -471,10 +507,15 @@ def get_latest_video(YOUTUBE_api_key, channel_id):
         return None
 
 
-def _summarize_video(video_details, no_transcript_attempts=0, compact=False, want_signals=False):
+def _summarize_video(video_details, no_transcript_attempts=0, compact=False, want_signals=False,
+                     hours_since_first=None):
     """
     Fetch and summarize one video's transcript. `compact` requests a short
     TL;DR-style summary (for digest-mode channels) instead of a full one.
+    `hours_since_first` is how long this video has already been chased; a
+    missing transcript is only written off once both that and the attempt count
+    are past their limits. None means count-only (the on-demand path, which has
+    no next run).
     `want_signals` asks for the market signals in the same LLM call (one
     request instead of two), falling back to a plain summary call if the
     combined response isn't usable.
@@ -510,9 +551,17 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
             log_info("Transcript budget spent; deferring this video to a later run.")
             return None, "budget_deferred", False, None
         attempt = no_transcript_attempts + 1
-        if attempt < NO_TRANSCRIPT_MAX_ATTEMPTS:
+        # Both gates must be satisfied to write a video off: enough attempts AND
+        # enough elapsed time. Either one alone gives up too early under some
+        # polling schedule, and a lost transcript is a lost product.
+        too_soon = (
+            hours_since_first is not None
+            and hours_since_first < NO_TRANSCRIPT_MIN_HOURS
+        )
+        if attempt < NO_TRANSCRIPT_MAX_ATTEMPTS or too_soon:
+            waited = "" if hours_since_first is None else f", waited {hours_since_first:.1f}h"
             log_warn(
-                f"No transcript yet (attempt {attempt}/{NO_TRANSCRIPT_MAX_ATTEMPTS}); "
+                f"No transcript yet (attempt {attempt}/{NO_TRANSCRIPT_MAX_ATTEMPTS}{waited}); "
                 "captions may still be processing — deferring to the next run."
             )
             return None, "no_transcript_deferred", False, None
@@ -677,7 +726,7 @@ def main():
             outcomes = {
                 "sent": 0, "unchanged": 0, "no_transcript": 0, "no_transcript_deferred": 0,
                 "insufficient": 0, "summary_failed": 0, "quota_deferred": 0,
-                "budget_deferred": 0, "no_video": 0, "error": 0,
+                "budget_deferred": 0, "retry_backoff": 0, "no_video": 0, "error": 0,
             }
 
             # Counts reported in the run summary: retry records dropped because
@@ -785,7 +834,16 @@ def main():
 
                     for video_details in candidates:
                         video_id = video_details["video_id"]
-                        attempts = pending.get(video_id, {}).get("attempts", 0)
+                        record = pending.get(video_id) or {}
+                        attempts = record.get("attempts", 0)
+                        wait = _retry_wait_remaining(record)
+                        if wait > 0:
+                            log_info(
+                                f"Retried {video_id} recently; waiting {wait:.1f}h more "
+                                "before spending another transcript credit on it."
+                            )
+                            outcomes["retry_backoff"] += 1
+                            continue
                         log_info(
                             f"Processing video: {video_details['video_title']} "
                             f"(published: {video_details['published_at']})"
@@ -794,6 +852,7 @@ def main():
                         telegram_body, outcome, decided, signals = _summarize_video(
                             video_details, attempts, compact=channel["digest"],
                             want_signals=market_signals,
+                            hours_since_first=_hours_since(record.get("first_attempt")),
                         )
                         outcomes[outcome] += 1
                         reason = video_details.get("transcript_reason")
@@ -850,7 +909,13 @@ def main():
                             # remember the video so the next run picks it up.
                             entry = pending.setdefault(video_id, {"channel_id": channel_id, "attempts": 0})
                             if outcome == "no_transcript_deferred":
+                                # Stamped only for deferrals that cost a credit,
+                                # so a budget-deferred video retries as soon as
+                                # credits return rather than serving out a wait.
+                                now = datetime.now(timezone.utc).isoformat()
                                 entry["attempts"] = attempts + 1
+                                entry.setdefault("first_attempt", now)
+                                entry["last_attempt"] = now
 
                         # Persist immediately, so a later crash doesn't cause
                         # already-sent videos to be re-sent.
