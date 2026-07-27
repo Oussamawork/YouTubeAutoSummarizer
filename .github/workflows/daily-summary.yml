@@ -2,7 +2,11 @@ name: Daily YouTube Summary
 
 on:
   schedule:
-    - cron: '0 22 * * *'  # Runs daily at 22:00 UTC
+    # In investing the value of a summary decays fast, so the feed is polled
+    # through the hours these channels actually publish (roughly 12:00-22:00
+    # UTC) rather than once a day. Overnight gets two catch-all runs.
+    - cron: '0 12-22/2 * * *'   # every 2h, 12:00-22:00 UTC
+    - cron: '0 2,7 * * *'       # overnight catch-up
   workflow_dispatch:      # Allows manual triggering from GitHub UI
     inputs:
       video_url:
@@ -83,6 +87,14 @@ jobs:
           # MAX_VIDEOS_PER_RUN caps videos processed per channel per run.
           DAILY_DIGEST: ${{ vars.DAILY_DIGEST }}
           MAX_VIDEOS_PER_RUN: ${{ vars.MAX_VIDEOS_PER_RUN }}
+          # How hard to chase a transcript before writing a video off. Both
+          # gates must pass, so a fast schedule can't burn through the attempt
+          # count before captions have had time to appear.
+          NO_TRANSCRIPT_MAX_ATTEMPTS: ${{ vars.NO_TRANSCRIPT_MAX_ATTEMPTS }}
+          NO_TRANSCRIPT_MIN_HOURS: ${{ vars.NO_TRANSCRIPT_MIN_HOURS }}
+          # Minimum gap between retries of one deferred video, so polling often
+          # doesn't spend a transcript credit per run on the same video.
+          PENDING_RETRY_MIN_HOURS: ${{ vars.PENDING_RETRY_MIN_HOURS }}
           # Optional free/premium split: teasers (TL;DR + link) go to the free
           # public channel, full summaries stay in the main (premium) channel.
           TELEGRAM_FREE_CHANNEL_ID: ${{ secrets.TELEGRAM_FREE_CHANNEL_ID }}

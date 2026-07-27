@@ -245,6 +245,64 @@ def test_summarize_video_gives_up_after_max_attempts(monkeypatch):
     assert decided is True
 
 
+def test_summarize_video_keeps_trying_while_inside_the_time_window(monkeypatch):
+    # Attempts alone is the wrong unit: a fast polling schedule burns through
+    # the count in hours, while auto-captions can take most of a day to appear.
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": ""})
+    body, outcome, decided, _sig = scraper._summarize_video(
+        _vid("v1", ""),
+        no_transcript_attempts=scraper.NO_TRANSCRIPT_MAX_ATTEMPTS + 5,
+        hours_since_first=scraper.NO_TRANSCRIPT_MIN_HOURS - 1,
+    )
+    assert body is None and outcome == "no_transcript_deferred" and decided is False
+
+
+def test_summarize_video_gives_up_once_both_gates_pass(monkeypatch):
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": ""})
+    body, outcome, decided, _sig = scraper._summarize_video(
+        _vid("v1", ""),
+        no_transcript_attempts=scraper.NO_TRANSCRIPT_MAX_ATTEMPTS - 1,
+        hours_since_first=scraper.NO_TRANSCRIPT_MIN_HOURS,
+    )
+    assert body is not None and outcome == "no_transcript" and decided is True
+
+
+def test_summarize_video_time_window_alone_does_not_give_up(monkeypatch):
+    # Long-waited but barely retried (e.g. runs were failing): keep trying.
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": ""})
+    body, outcome, decided, _sig = scraper._summarize_video(
+        _vid("v1", ""), no_transcript_attempts=0,
+        hours_since_first=scraper.NO_TRANSCRIPT_MIN_HOURS * 10,
+    )
+    assert body is None and outcome == "no_transcript_deferred" and decided is False
+
+
+def test_retry_backoff_holds_a_recently_tried_video(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(scraper, "PENDING_RETRY_MIN_HOURS", 3.0)
+    recent = {"last_attempt": (now - timedelta(hours=1)).isoformat()}
+    assert scraper._retry_wait_remaining(recent, now=now) == 2.0
+    old = {"last_attempt": (now - timedelta(hours=5)).isoformat()}
+    assert scraper._retry_wait_remaining(old, now=now) == 0.0
+
+
+def test_retry_backoff_lets_untimestamped_and_budget_deferrals_through(monkeypatch):
+    # Records written before timestamps existed, and budget deferrals (which
+    # cost no credit and so are never stamped), must retry immediately.
+    monkeypatch.setattr(scraper, "PENDING_RETRY_MIN_HOURS", 3.0)
+    assert scraper._retry_wait_remaining({"attempts": 2}) == 0.0
+    assert scraper._retry_wait_remaining({}) == 0.0
+    assert scraper._retry_wait_remaining(None) == 0.0
+
+
+def test_retry_backoff_disabled_by_zero(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    monkeypatch.setattr(scraper, "PENDING_RETRY_MIN_HOURS", 0)
+    just_now = {"last_attempt": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()}
+    assert scraper._retry_wait_remaining(just_now) == 0.0
+
+
 def test_summarize_video_quota_deferral_not_decided(monkeypatch):
     monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "words"})
     monkeypatch.setattr(scraper, "summarize_transcript", lambda t, title, **kw: scraper.QUOTA_EXHAUSTED_SENTINEL)
@@ -315,7 +373,7 @@ def _run_main(monkeypatch, free_channel=None, premium_url=None, outcome="sent",
     monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: [video])
     monkeypatch.setattr(
         scraper, "_summarize_video",
-        lambda details, attempts, compact=False, want_signals=False: (body, outcome, True, None),
+        lambda details, attempts, compact=False, want_signals=False, hours_since_first=None: (body, outcome, True, None),
     )
 
     calls = {"message": [], "teaser": []}
@@ -517,7 +575,7 @@ def test_main_resolves_handle_and_keys_state_by_id(monkeypatch):
     monkeypatch.setattr(scraper, "resolve_channel_handle",
                         lambda key, handle: calls.append(handle) or "UCresolved")
     monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: [video] if cid == "UCresolved" else [])
-    monkeypatch.setattr(scraper, "_summarize_video", lambda d, a, compact=False, want_signals=False: ("S", "sent", True, None))
+    monkeypatch.setattr(scraper, "_summarize_video", lambda d, a, compact=False, want_signals=False, hours_since_first=None: ("S", "sent", True, None))
     monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
     scraper.main()
 
@@ -676,7 +734,7 @@ def _filter_run(monkeypatch, only, titles):
     monkeypatch.setattr(scraper, "get_recent_videos", lambda k, c: feed)
     monkeypatch.setattr(
         scraper, "_summarize_video",
-        lambda d, a, compact=False, want_signals=False: summarized.append(d["video_title"]) or ("S", "sent", True, None),
+        lambda d, a, compact=False, want_signals=False, hours_since_first=None: summarized.append(d["video_title"]) or ("S", "sent", True, None),
     )
     monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
     scraper.main()
@@ -805,7 +863,7 @@ def test_main_duration_gate_skips_before_transcript(monkeypatch):
     })
     monkeypatch.setattr(
         scraper, "_summarize_video",
-        lambda d, a, compact=False, want_signals=False: summarized.append(d["video_id"]) or ("S", "sent", True, None),
+        lambda d, a, compact=False, want_signals=False, hours_since_first=None: summarized.append(d["video_id"]) or ("S", "sent", True, None),
     )
     monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
     scraper.main()

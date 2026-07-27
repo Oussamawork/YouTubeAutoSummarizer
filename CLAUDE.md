@@ -33,8 +33,10 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 `last_published`); videos published after the watermark are candidates, oldest
 first, capped at `MAX_VIDEOS_PER_RUN` (0 = no cap, the default). `pending` maps
 video-id → retry record for
-deferred videos (captions not up yet → up to `NO_TRANSCRIPT_MAX_ATTEMPTS` runs;
-LLM quota exhausted). Deciding a video advances the watermark; deferring does not.
+deferred videos (captions not up yet → retried until `NO_TRANSCRIPT_MAX_ATTEMPTS`
+*and* `NO_TRANSCRIPT_MIN_HOURS` are both exceeded, and no more often than
+`PENDING_RETRY_MIN_HOURS`; LLM quota exhausted). Deciding a video advances the
+watermark; deferring does not.
 
 ## Design docs
 - `docs/tdd-transcript-budget.md` — measured findings on transcript-credit
