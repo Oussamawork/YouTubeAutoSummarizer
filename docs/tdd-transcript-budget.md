@@ -1,6 +1,8 @@
 # TDD — Transcript budget and summarization efficiency
 
-**Status:** Steps 1–2 implemented (PR #28); Step 3 deferred as nice-to-have
+**Status:** Steps 1–2 implemented (PR #28). Next action: read the first
+diagnostics run (§6, Step 2b). Step 3 deferred as nice-to-have. 17 open review
+findings tracked in §9.
 **Date:** 2026-07-26
 **Scope:** how transcripts are obtained and paid for, and what limits how many
 videos the pipeline can summarize per day.
@@ -86,8 +88,10 @@ Matching is whole-word: a substring test would match "eth" inside "whether" and
 | #24 | Per-channel `only=` title filter, applied **before** any transcript fetch |
 | #25 | Parkev first in the channel list with `max=6`; documented that file order = priority under the budget |
 | #26 | Billing-cycle-aware pacing (`SUPADATA_RESET_DAY`), per-day ceiling of budget ÷ 28, usage seeded with the 86 credits already spent |
+| #27 | This document |
+| #28 | Per-outcome transcript failure reasons in the run summary; duration gate via a batched `videos.list` call (opt-in caption skipping); `tests/conftest.py` stubs the metadata lookup so tests stop reaching the network |
 
-191 tests pass (`./scripts/check.sh`).
+202 tests pass (`./scripts/check.sh`).
 
 ---
 
@@ -163,6 +167,25 @@ Sequenced so each step's evidence informs the next.
   breakdown shows the waste is *not* Shorts/caption-related, or if the
   transcript budget becomes binding again after Step 2's savings.
 
+### Step 2b — Read the first diagnostics run — ⏳ PENDING (next action)
+The gate and the reason-logging shipped together, so the first nightly run after
+PR #28 (2026-07-26, 22:00 UTC) is the first with data. Read its log for:
+- `Run summary: … too_short=N, title_filtered=N` — how much the gates caught.
+- `Transcript failures by reason: …` — the breakdown that decides what comes next.
+
+Then act on it:
+
+| If the breakdown is dominated by | Conclusion | Action |
+| --- | --- | --- |
+| `empty_content` on **short** videos | Shorts really are the waste | Raise `MIN_VIDEO_SECONDS` (e.g. 90 → 180) and re-measure |
+| `empty_content` on **long** videos | Captions genuinely absent, not a length issue | Consider `SKIP_UNCAPTIONED=true` — but only after confirming the API's caption flag agrees with reality on a sample, since it reads `false` for auto-captioned videos |
+| `http_4xx` / `job_incomplete` / `unreachable` | Not a caption problem at all | Step 2 was the wrong fix; promote **Step 3** (Gemini direct URL) or investigate the API integration |
+| `budget_paced` / `no_credits` | The gates worked and the budget is simply binding | Add a key, trim caps, or accept the ceiling |
+
+**Success measure for Steps 1–2:** credits per delivered summary below 2.9
+(from `data/supadata_usage.json` count ÷ new rows in `data/signals.jsonl`),
+with no wanted video dropped.
+
 ### Step 4 — Re-evaluate the pacing layer
 - Scheduled follow-up already exists for **2026-08-17** (trigger
   `trig_01GjK5iFCRnv6tfvyFE3wvuh`), when key 1 refills and the single-cycle
@@ -197,12 +220,43 @@ Sequenced so each step's evidence informs the next.
 
 Tracked here so they are not lost; independent of the transcript budget.
 
-| Severity | Finding |
+Findings from three parallel reviews (correctness, robustness/ops, quality).
+Each was demonstrated by its reviewer unless marked *suspected*. None is fixed
+yet; the transcript-budget work took priority.
+
+**Data-loss / product risk — fix first**
+
+| # | Finding | Why it matters |
+| --- | --- | --- |
+| 1 | `data/signals.jsonl` stores full summary text and is committed to a **public** repo (`scraper.py`) | Publishes the premium product permanently into git history, undercutting the free/premium split. Fix: persist signals + `video_id` only, or move the corpus off the public repo |
+| 2 | Telegram send failures are ignored — `send_telegram_message`'s return value is discarded and the watermark advances anyway; `_post` has no 429 handling | A rate-limit during a burst silently loses a summary while the run reports success. Fix: retry/backoff on 429, treat a failed send as `decided=False` |
+| 3 | The state commit can be silently discarded — `git pull --rebase … \|\| true` swallows a conflict, then `git push` prints "Everything up-to-date" and exits 0 (`daily-summary.yml`) | Dedup state is lost → the next run re-sends every summary already delivered. Fix: drop `\|\| true`, abort on conflict, assert HEAD actually moved |
+
+**Correctness of the weekly reports**
+
+| # | Finding | Why it matters |
+| --- | --- | --- |
+| 4 | `market_pulse._asset_key` splits one asset in two when the ticker is sometimes null (`Tesla` vs `TSLA`) | Halves mention counts, suppresses consensus flips, and skews the scorecard-derived channel weights |
+| 5 | Sub-dollar price targets render as `0` (`f"{avg:,.0f}"`) — real case: HBAR target 0.109 → "avg target 0 (-100 % implied)" | Visibly wrong output in the weekly pulse |
+| 6 | `channel_scorecard.fetch_prices` retries only `RequestException`, not transient 5xx, and has **no test coverage** | A Stooq blip silently yields an empty scorecard that is indistinguishable from "no data yet", and quietly unweights the pulse |
+| 7 | `channel_scorecard` `total_calls` sums across both horizons (reports 38 for 19 real calls) — *suspected* | Overstates sample size in the report header |
+
+**Reliability / ops**
+
+| # | Finding | Why it matters |
+| --- | --- | --- |
+| 8 | Missing secrets exit 0 — `main()` returns normally when required env vars are unset | A rotated or deleted secret produces a green run forever; `if: failure()` alerting never fires |
+| 9 | No global run deadline: 3 providers × 3 attempts × 60 s ≈ 9 min per LLM call, and the combined call may be followed by the fallback | One pathological video can approach the workflow's 20-minute timeout |
+| 10 | `channel_scorecard`/`market_pulse` fetch Stooq once per symbol with no shared cache, growing with the dataset | Unreachable Stooq × 15 symbols ≈ 765 s against a 600 s weekly job timeout |
+| 11 | A partial multi-chunk Telegram send falls back to re-sending the whole message as plain text | Readers can see chunk 1 twice; the function still returns `True` |
+| 12 | Deferred videos are selected oldest-first within the per-run cap | A stale backlog can crowd out current uploads. Partly mitigated by orphan eviction (#23); revisit if backlogs persist |
+
+**Code quality (no user-visible impact today)**
+
+| # | Finding |
 | --- | --- |
-| High | Telegram send failures are ignored — the watermark advances even when delivery fails, so a 429 during a burst silently loses a summary while the run reports success |
-| High | The state commit can be silently discarded (`git pull --rebase … \|\| true` swallows a conflict, then `push` exits 0) → dedup state lost → mass re-sends |
-| High | `data/signals.jsonl` stores full summary text and is committed to a **public** repo, publishing the premium product |
-| Medium | `market_pulse` splits one asset into two entries when a ticker is sometimes null (`Tesla` vs `TSLA`), skewing counts, flips and channel weights |
-| Medium | Sub-dollar price targets render as `0` (`f"{avg:,.0f}"`), e.g. HBAR 0.109 → "avg target 0 (-100 % implied)" |
-| Medium | `channel_scorecard.fetch_prices` does not retry non-200 transient statuses and has no test coverage |
-| Low | Missing secrets exit 0 (a green run forever); partial multi-chunk Telegram sends can duplicate content |
+| 13 | `signals.summarize_with_signals` accepts `channel_name` and never uses it — the combined path silently lost the channel grounding that `extract_signals` still applies. Either thread it into the prompt or drop the parameter and its call-site argument |
+| 14 | The lenient JSON parse exists twice in `signals.py` (`_parse_signals` and the combined path); only one is covered by the preamble-tolerance test, so a fix to one won't reach the other |
+| 15 | `summarizer.complete()` duplicates `summarize_transcript`'s provider-chain loop and has only happy-path tests, though all signal extraction flows through it — add quota-exhaustion and skip-exhausted-provider tests |
+| 16 | `channel_scorecard` imports `_parse_date`/`_iter_assets` (private) from `market_pulse`, which lazily imports `channel_scorecard` inside two functions to dodge the cycle, both inside blanket `except Exception` — a rename would silently degrade the weekly report. Move the shared helpers into one module |
+| 17 | Dead code: unreachable `return {}` in `fetch_prices`; the `end` date computed into `ranges` is never used; `helpers.save_to_json` uses bare `print`/`except Exception` where siblings use `log_error` |
