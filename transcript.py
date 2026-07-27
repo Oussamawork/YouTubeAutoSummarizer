@@ -31,6 +31,11 @@ SUPADATA_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 # Supadata answers "you're out of credits" with these; the request itself did
 # not deliver a transcript, so we rotate to the next key rather than retrying.
 SUPADATA_CREDIT_STATUS = {402, 403}
+# It also answers with 429 — the same status as ordinary rate limiting — and
+# only the body's error code tells the two apart. Retrying a spent key just
+# burns the run's time and, worse, never rotates to a key that still has
+# credits, so the code has to be matched explicitly.
+SUPADATA_CREDIT_ERRORS = {"limit-exceeded"}
 
 # --- Free-tier budget -------------------------------------------------------
 #
@@ -244,6 +249,26 @@ def _supadata_text_from_payload(data):
     return ""
 
 
+def _is_credit_exhausted(resp):
+    """
+    True when a response means "this key's credit pool is spent" (rotate to the
+    next key) rather than "slow down" (retry the same key). 402/403 say it by
+    status alone; a 429 only counts when the body names a credit error, since
+    Supadata reuses 429 for genuine rate limiting. A body we can't parse is
+    treated as a rate limit, which errs toward retrying rather than writing a
+    working key off.
+    """
+    if resp.status_code in SUPADATA_CREDIT_STATUS:
+        return True
+    if resp.status_code != 429:
+        return False
+    try:
+        error = (resp.json() or {}).get("error")
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(error, str) and error.strip().lower() in SUPADATA_CREDIT_ERRORS
+
+
 def _fetch_supadata(vid):
     """
     Primary source: Supadata hosted API (free tier). Server-side fetch, so it
@@ -269,27 +294,43 @@ def _fetch_supadata(vid):
         )
         return "", True, "budget_paced"
 
+    # Any failure rotates to the next key, not just an out-of-credits one: the
+    # failure modes are not reliably distinguishable by status code (a spent
+    # pool and a rate limit share 429), and a key that cannot deliver is worth
+    # no more than a key that has no credits. The one case that does not rotate
+    # is a key answering "this video has no captions" — it worked, its answer is
+    # authoritative, and asking the other keys would just spend their credits to
+    # be told the same thing.
+    saw_credit_failure = False
     reason = "no_credits"
     for index, key in enumerate(keys):
-        text, reason = _fetch_supadata_with_key(vid, key, usage)
-        if text is not None:
+        served, text, reason = _fetch_supadata_with_key(vid, key, usage)
+        if served:
             return text, False, reason
+        saw_credit_failure = saw_credit_failure or reason == "no_credits"
         if index + 1 < len(keys):
-            log_warn(f"Supadata key {index + 1} is out of credits; trying the next key.")
+            log_warn(f"Supadata key {index + 1} failed ({reason}); trying key {index + 2}.")
 
-    # Every key reported no credits. That is exhaustion, not a video without
-    # captions: report it as such so the caller defers instead of eventually
-    # writing the video off as untranscribable.
-    log_warn("All Supadata keys are out of credits; deferring this video.")
-    return "", True, "no_credits"
+    # Out of credits is exhaustion, not a video without captions: report it as
+    # such so the caller defers instead of eventually writing the video off as
+    # untranscribable.
+    if saw_credit_failure:
+        log_warn(
+            f"All {len(keys)} Supadata key(s) failed and at least one is out of "
+            f"credits; deferring this video."
+        )
+        return "", True, "no_credits"
+    log_warn(f"All {len(keys)} Supadata key(s) failed (last: {reason}).")
+    return "", False, reason
 
 
 def _fetch_supadata_with_key(vid, api_key, usage):
     """
-    One key's attempt at a transcript. Returns (text, reason): text is "" when
-    the key worked but there is no transcript, or None when the key is out of
-    credits so the caller should rotate to the next one. `reason` names the
-    outcome for run diagnostics. Every request sent is metered.
+    One key's attempt at a transcript. Returns (served, text, reason): `served`
+    is True when this key gave an answer worth accepting — a transcript, or an
+    authoritative "this video has no captions" — and False for every failure,
+    which tells the caller to rotate to the next key. `reason` names the outcome
+    for run diagnostics. Only requests that consume a credit are metered.
     """
     headers = {"x-api-key": api_key}
     params = {
@@ -308,13 +349,13 @@ def _fetch_supadata_with_key(vid, api_key, usage):
                 time.sleep(SUPADATA_RETRY_BACKOFF * attempt)
                 continue
             log_error("Supadata unreachable after retries.")
-            return "", "unreachable"
+            return False, "", "unreachable"
 
         # Out of credits on this key: rotate rather than retry. Nothing was
         # delivered, so this must not be metered.
-        if resp.status_code in SUPADATA_CREDIT_STATUS:
+        if _is_credit_exhausted(resp):
             log_warn(f"Supadata key rejected ({resp.status_code}): {resp.text[:120]}")
-            return None, "no_credits"
+            return False, "", "no_credits"
 
         # Meter only answers that consume a credit — a served transcript (200)
         # or an accepted async job (202). Counting rejections and transient
@@ -330,24 +371,26 @@ def _fetch_supadata_with_key(vid, api_key, usage):
                 job_id = None
             if not job_id:
                 log_warn("Supadata returned 202 without a jobId.")
-                return "", "job_no_id"
+                return False, "", "job_no_id"
             job_text = _poll_supadata_job(job_id, headers)
-            return job_text, ("ok" if job_text else "job_incomplete")
+            if job_text:
+                return True, job_text, "ok"
+            return False, "", "job_incomplete"
 
         if resp.status_code == 200:
             try:
                 text = _supadata_text_from_payload(resp.json())
             except ValueError as e:
                 log_error(f"Supadata returned invalid JSON: {e}")
-                return "", "invalid_json"
+                return False, "", "invalid_json"
             if not text:
                 # 200 with no content is Supadata saying "this video has no
                 # captions I can serve" — the single most useful thing to
                 # distinguish, since it is a wasted credit by definition.
                 log_warn(f"Supadata returned 200 but no transcript content for {vid}.")
-                return "", "empty_content"
+                return True, "", "empty_content"
             log_info(f"Supadata returned {len(text)} chars")
-            return text, "ok"
+            return True, text, "ok"
 
         # Retry transient server/rate-limit errors; give up on anything else.
         if resp.status_code in SUPADATA_TRANSIENT_STATUS and attempt < SUPADATA_MAX_RETRIES:
@@ -359,9 +402,9 @@ def _fetch_supadata_with_key(vid, api_key, usage):
             continue
 
         log_warn(f"Supadata returned {resp.status_code}: {resp.text[:200]}")
-        return "", f"http_{resp.status_code}"
+        return False, "", f"http_{resp.status_code}"
 
-    return "", "retries_exhausted"
+    return False, "", "retries_exhausted"
 
 
 def _poll_supadata_job(job_id, headers):
