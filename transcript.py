@@ -31,6 +31,11 @@ SUPADATA_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 # Supadata answers "you're out of credits" with these; the request itself did
 # not deliver a transcript, so we rotate to the next key rather than retrying.
 SUPADATA_CREDIT_STATUS = {402, 403}
+# It also answers with 429 — the same status as ordinary rate limiting — and
+# only the body's error code tells the two apart. Retrying a spent key just
+# burns the run's time and, worse, never rotates to a key that still has
+# credits, so the code has to be matched explicitly.
+SUPADATA_CREDIT_ERRORS = {"limit-exceeded"}
 
 # --- Free-tier budget -------------------------------------------------------
 #
@@ -244,6 +249,26 @@ def _supadata_text_from_payload(data):
     return ""
 
 
+def _is_credit_exhausted(resp):
+    """
+    True when a response means "this key's credit pool is spent" (rotate to the
+    next key) rather than "slow down" (retry the same key). 402/403 say it by
+    status alone; a 429 only counts when the body names a credit error, since
+    Supadata reuses 429 for genuine rate limiting. A body we can't parse is
+    treated as a rate limit, which errs toward retrying rather than writing a
+    working key off.
+    """
+    if resp.status_code in SUPADATA_CREDIT_STATUS:
+        return True
+    if resp.status_code != 429:
+        return False
+    try:
+        error = (resp.json() or {}).get("error")
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(error, str) and error.strip().lower() in SUPADATA_CREDIT_ERRORS
+
+
 def _fetch_supadata(vid):
     """
     Primary source: Supadata hosted API (free tier). Server-side fetch, so it
@@ -312,7 +337,7 @@ def _fetch_supadata_with_key(vid, api_key, usage):
 
         # Out of credits on this key: rotate rather than retry. Nothing was
         # delivered, so this must not be metered.
-        if resp.status_code in SUPADATA_CREDIT_STATUS:
+        if _is_credit_exhausted(resp):
             log_warn(f"Supadata key rejected ({resp.status_code}): {resp.text[:120]}")
             return None, "no_credits"
 

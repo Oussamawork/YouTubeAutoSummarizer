@@ -107,6 +107,110 @@ def test_rotates_to_second_key_when_first_is_out_of_credits(monkeypatch):
     assert tr._load_usage()["count"] == 1
 
 
+def test_rotates_when_first_key_reports_limit_exceeded_as_429(monkeypatch):
+    # Supadata signals a spent pool with 429 + "limit-exceeded", not 402/403.
+    # Treating that as a plain rate limit retries the dead key and never
+    # reaches the keys that still have credits.
+    monkeypatch.setenv("SUPADATA_API_KEY", "spent")
+    monkeypatch.setenv("SUPADATA_API_KEY_2", "fresh")
+    seen = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        seen.append(headers["x-api-key"])
+        spent = headers["x-api-key"] == "spent"
+
+        class R:
+            status_code = 429 if spent else 200
+            text = "Limit Exceeded"
+
+            def json(self):
+                if spent:
+                    return {"error": "limit-exceeded", "message": "Limit Exceeded",
+                            "details": "Plan usage limit was exceeded."}
+                return {"content": "second key transcript"}
+        return R()
+
+    monkeypatch.setattr(tr.requests, "get", fake_get)
+    text, exhausted, reason = tr._fetch_supadata("vid00000001")
+    assert text == "second key transcript" and exhausted is False and reason == "ok"
+    # One attempt on the spent key, not SUPADATA_MAX_RETRIES of them.
+    assert seen == ["spent", "fresh"]
+    assert tr._load_usage()["count"] == 1
+
+
+def test_plain_429_still_retries_the_same_key(monkeypatch):
+    # A rate limit without a credit error code must keep its retry behavior;
+    # writing the key off would throw away credits that are still there.
+    monkeypatch.setenv("SUPADATA_API_KEY", "busy")
+    monkeypatch.delenv("SUPADATA_API_KEY_2", raising=False)
+    monkeypatch.delenv("SUPADATA_API_KEY_3", raising=False)
+    calls = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        calls.append(1)
+        throttled = len(calls) < 3
+
+        class R:
+            status_code = 429 if throttled else 200
+            text = "slow down"
+
+            def json(self):
+                if throttled:
+                    return {"error": "rate-limit", "message": "Too Many Requests"}
+                return {"content": "eventually served"}
+        return R()
+
+    monkeypatch.setattr(tr.requests, "get", fake_get)
+    monkeypatch.setattr(tr.time, "sleep", lambda *_: None)
+    text, exhausted, reason = tr._fetch_supadata("vid00000001")
+    assert text == "eventually served" and exhausted is False and reason == "ok"
+    assert len(calls) == 3
+
+
+def test_429_with_unparsable_body_is_treated_as_a_rate_limit(monkeypatch):
+    # An HTML error page or truncated body must not condemn a working key.
+    monkeypatch.setenv("SUPADATA_API_KEY", "busy")
+    monkeypatch.delenv("SUPADATA_API_KEY_2", raising=False)
+    monkeypatch.delenv("SUPADATA_API_KEY_3", raising=False)
+    calls = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        calls.append(1)
+
+        class R:
+            status_code = 429
+            text = "<html>429</html>"
+
+            def json(self):
+                raise ValueError("not json")
+        return R()
+
+    monkeypatch.setattr(tr.requests, "get", fake_get)
+    monkeypatch.setattr(tr.time, "sleep", lambda *_: None)
+    text, exhausted, reason = tr._fetch_supadata("vid00000001")
+    assert text == "" and reason == "http_429"
+    assert len(calls) == tr.SUPADATA_MAX_RETRIES
+
+
+def test_all_keys_limit_exceeded_defers_instead_of_writing_off(monkeypatch):
+    # With every key spent, the video must defer (budget_exhausted) rather than
+    # burn a no-transcript attempt and eventually be given up on.
+    monkeypatch.setenv("SUPADATA_API_KEY", "spent1")
+    monkeypatch.setenv("SUPADATA_API_KEY_2", "spent2")
+    monkeypatch.setenv("SUPADATA_API_KEY_3", "spent3")
+
+    class R:
+        status_code = 429
+        text = "Limit Exceeded"
+
+        def json(self):
+            return {"error": "limit-exceeded"}
+
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: R())
+    assert tr._fetch_supadata("vid00000001") == ("", True, "no_credits")
+    assert tr._load_usage()["count"] == 0
+
+
 def test_get_transcript_reports_budget_exhaustion(monkeypatch):
     monkeypatch.setattr(tr, "_fetch_supadata", lambda vid: ("", True, "no_credits"))
     monkeypatch.setattr(tr, "_fetch_youtube_transcript_api", lambda vid: "")
