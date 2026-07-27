@@ -63,6 +63,10 @@ jobs:
           # Day of month the plan's credits reset (Supadata dashboard shows it,
           # e.g. "Credits reset on 08/17" -> 17). Default 1 = calendar month.
           SUPADATA_RESET_DAY: ${{ vars.SUPADATA_RESET_DAY }}
+          # Ration the cycle's credits across its remaining days. Off by
+          # default, so a run processes everything published that day; set to
+          # true to make the pool last until the reset date instead.
+          SUPADATA_DAILY_PACING: ${{ vars.SUPADATA_DAILY_PACING }}
           # LLM summarizer (provider-agnostic). Set whichever you use; the
           # summarizer tries the generic LLM_* provider first, then Gemini, then Groq.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

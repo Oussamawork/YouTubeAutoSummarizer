@@ -8,7 +8,8 @@ import transcript as tr
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(tr, "SUPADATA_USAGE_FILE", str(tmp_path / "usage.json"))
     for name in ("SUPADATA_API_KEYS", "SUPADATA_API_KEY", "SUPADATA_API_KEY_2",
-                 "SUPADATA_API_KEY_3", "SUPADATA_MONTHLY_BUDGET", "SUPADATA_CREDITS_PER_KEY"):
+                 "SUPADATA_API_KEY_3", "SUPADATA_MONTHLY_BUDGET", "SUPADATA_CREDITS_PER_KEY",
+                 "SUPADATA_DAILY_PACING"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -32,7 +33,40 @@ def test_monthly_budget_scales_with_keys(monkeypatch):
     assert tr.monthly_budget() == 50           # explicit override wins
 
 
+def test_unpaced_by_default_allows_the_whole_remaining_cycle(monkeypatch):
+    # The default is no daily cap, so a day's videos are all processed the day
+    # they are published rather than trickling out over later runs.
+    monkeypatch.setenv("SUPADATA_API_KEY", "a")
+    monkeypatch.setenv("SUPADATA_API_KEY_2", "b")   # 200/cycle
+    assert tr.daily_allowance({"count": 0}, today=date(2026, 7, 1)) == 200
+    assert tr.daily_allowance({"count": 190}, today=date(2026, 7, 31)) == 10
+    # A spent cycle still allows nothing — the pool is the real limit.
+    assert tr.daily_allowance({"count": 200}, today=date(2026, 7, 26)) == 0
+
+
+def test_unpaced_run_is_not_blocked_after_a_busy_day(monkeypatch):
+    # The old ceiling stopped a run once day_count hit budget/28, which left
+    # the day's later videos deferred. Unpaced, only a spent cycle stops it.
+    monkeypatch.setenv("SUPADATA_API_KEY", "a")
+    monkeypatch.setenv("SUPADATA_MONTHLY_BUDGET", "300")
+    current = tr._load_usage()
+    tr._save_usage({"cycle": current["cycle"], "count": 40,
+                    "day": current["day"], "day_count": 40})
+
+    class R:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"content": "still serving"}
+
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: R())
+    text, exhausted, reason = tr._fetch_supadata("vid00000001")
+    assert text == "still serving" and exhausted is False and reason == "ok"
+
+
 def test_daily_allowance_paces_over_the_month(monkeypatch):
+    monkeypatch.setenv("SUPADATA_DAILY_PACING", "true")
     monkeypatch.setenv("SUPADATA_API_KEY", "a")
     monkeypatch.setenv("SUPADATA_API_KEY_2", "b")   # 200/month
     # 1st of a 31-day month, nothing used: 200 // 31 = 6 per day.
@@ -408,6 +442,7 @@ def test_cycle_bounds_default_is_calendar_month(monkeypatch):
 
 
 def test_allowance_paces_over_the_billing_cycle_not_the_month(monkeypatch):
+    monkeypatch.setenv("SUPADATA_DAILY_PACING", "true")
     monkeypatch.setattr(tr, "SUPADATA_RESET_DAY", 17)
     monkeypatch.setenv("SUPADATA_MONTHLY_BUDGET", "300")
     # Jul 26 with 86 spent: 214 left over 22 days to the Aug 17 reset -> 9/day.
@@ -418,6 +453,7 @@ def test_allowance_paces_over_the_billing_cycle_not_the_month(monkeypatch):
 def test_allowance_ceiling_survives_a_wrong_reset_day(monkeypatch):
     # Even with the default reset day (wrong for this plan), the per-day
     # ceiling of budget/28 stops the pool being drained in one run.
+    monkeypatch.setenv("SUPADATA_DAILY_PACING", "true")
     monkeypatch.setattr(tr, "SUPADATA_RESET_DAY", 1)
     monkeypatch.setenv("SUPADATA_MONTHLY_BUDGET", "300")
     assert tr.daily_allowance({"count": 86}, today=date(2026, 7, 31)) == 300 // 28

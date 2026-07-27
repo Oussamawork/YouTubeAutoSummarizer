@@ -21,6 +21,17 @@ def env_int(name, default):
         return default
 
 
+def env_flag(name, default=False):
+    """
+    Boolean twin of env_int. Unset or empty (an unconfigured GitHub Actions repo
+    variable arrives as "", not absent) falls back to `default`.
+    """
+    value = (os.getenv(name) or "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
 def env_float(name, default):
     """Float twin of env_int: unset/empty/malformed values fall back to default."""
     value = (os.getenv(name) or "").strip()
@@ -47,6 +58,7 @@ def read_channels(file_path):
                message per run instead of one full summary per video (for
                prolific channels that would otherwise flood the chat).
       max=N  — per-run video cap for this channel (overrides the global default).
+               0 means no cap: process everything this channel has due.
       only=a,b,c — process a video only when its title mentions one of these
                keywords (whole words, case-insensitive). Filtering happens
                before the transcript fetch, so skipped videos cost nothing.
@@ -74,7 +86,7 @@ def read_channels(file_path):
                         entry["digest"] = True
                     elif option.startswith("max="):
                         try:
-                            entry["max_per_run"] = max(1, int(option[4:]))
+                            entry["max_per_run"] = max(0, int(option[4:]))
                         except ValueError:
                             log_error(f"Ignoring malformed channel option '{token}' for {tokens[0]}")
                     elif option.startswith("only="):
