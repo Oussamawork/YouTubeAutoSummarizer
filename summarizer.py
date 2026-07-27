@@ -19,11 +19,19 @@ from log import log_info, log_warn, log_error
 #   Groq   (free tier):         GROQ_API_KEY              [+ GROQ_MODEL]
 
 LLM_TIMEOUT = env_int("LLM_TIMEOUT", 60)
-LLM_MAX_TOKENS = env_int("LLM_MAX_TOKENS", 1500)
+LLM_MAX_TOKENS = env_int("LLM_MAX_TOKENS", 2000)
+# A response cut off at max_tokens is retried with a bigger budget, doubling up
+# to this ceiling. Shipping a half-written summary is worse than spending a
+# second request: the reader can't tell it was cut, and the video is marked
+# decided so it never comes back.
+LLM_MAX_TOKENS_CEILING = env_int("LLM_MAX_TOKENS_CEILING", 8000)
 LLM_TEMPERATURE = env_float("LLM_TEMPERATURE", 0.3)
 # Cap the transcript length sent to the model, to avoid blowing past context
-# windows and to keep token cost predictable. Overridable via env.
-LLM_MAX_TRANSCRIPT_CHARS = env_int("LLM_MAX_TRANSCRIPT_CHARS", 48000)
+# windows and to keep token cost predictable. Overridable via env. Generous
+# because the models in use have very large context windows and the cut falls
+# at the END of the video — exactly where a market video puts its price targets
+# and conclusions. 200k chars is roughly a 4-hour video.
+LLM_MAX_TRANSCRIPT_CHARS = env_int("LLM_MAX_TRANSCRIPT_CHARS", 200000)
 LLM_MAX_RETRIES = 3
 LLM_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
 # Honor a server's Retry-After on 429, but cap it so a huge value can't stall
@@ -54,30 +62,45 @@ QUOTA_EXHAUSTED_SENTINEL = "QUOTA_EXHAUSTED"
 # as a plain-text Telegram message (the sender HTML-escapes it, so markdown like
 # **bold** or "#" headers will not render). Hence: plain text, "• " bullets only.
 SUMMARY_SYSTEM_PROMPT = (
-    "You are an expert summarizer of YouTube video transcripts. Your summary is "
-    "read by someone who has NOT watched the video, so it must stand on its own.\n"
+    "You are an expert analyst summarizing market and investing videos for a "
+    "reader who has NOT watched them and may act on what you write. Specificity "
+    "is the entire value: a summary that omits the numbers is worse than none.\n"
     "\n"
     "Output format (plain text only — no markdown, no headers, no bold):\n"
-    "1. First line: a single-sentence TL;DR that captures what the video is "
-    "about and its main point.\n"
+    "1. First line: a single-sentence TL;DR giving the speaker's actual "
+    "conclusion or call, not the topic. Write \"Speaker is buying Nvidia below "
+    "$130, expecting the AI capex cycle to run through 2027\" — not \"The video "
+    "discusses Nvidia's outlook\".\n"
     "2. A blank line, then key takeaways as bullets, each starting with \"• \". "
     "Use as many bullets as the content warrants (typically 3-7) — more for "
     "dense, information-rich videos, fewer for simple ones. Keep each bullet to "
     "one or two sentences.\n"
     "\n"
+    "Capture these whenever the speaker states them — they are the point:\n"
+    "- Each asset discussed by name and ticker, with the speaker's stance "
+    "(bullish / bearish / neutral) and how strongly they hold it.\n"
+    "- Concrete numbers: price levels, targets, support and resistance, stop or "
+    "invalidation levels, valuations, growth and margin figures.\n"
+    "- The timeframe over which the speaker expects it to play out.\n"
+    "- The reasoning behind the call, and any condition that would invalidate it.\n"
+    "- Positions the speaker discloses or changes (bought, sold, trimmed, added).\n"
+    "\n"
     "Content rules:\n"
     "- Always write in English, even if the transcript is in another language.\n"
     "- Be strictly faithful to the transcript. Never invent or guess facts, "
-    "names, numbers, dates, or conclusions that are not present.\n"
-    "- Prefer concrete specifics — key arguments, conclusions, steps, named "
-    "people/products/places, and notable data — over vague generalities.\n"
+    "names, numbers, dates, or conclusions that are not present. If the speaker "
+    "gives no numbers, give none — do not fill the gap with plausible ones.\n"
+    "- Attribute views to the speaker rather than stating them as fact.\n"
+    "- Leave out sponsor reads, subscription pitches, and channel housekeeping.\n"
     "- Auto-generated captions are often messy, informal, or missing "
     "punctuation; that is normal — do your best to summarize them anyway.\n"
     "- Only if the transcript is so garbled, fragmentary, or empty that NO "
     "meaningful summary is possible, output exactly the single token "
     "INSUFFICIENT_TRANSCRIPT and nothing else.\n"
-    "- Keep the entire summary under roughly 3500 characters so it fits in one "
+    "- Keep the entire summary under roughly 3000 characters so it fits in one "
     "Telegram message alongside the video's title and link.\n"
+    "- Finish every sentence. If you are running long, write fewer bullets — "
+    "never an unfinished one.\n"
     "\n"
     "Output only the summary itself — no preamble, no sign-off, and no phrases "
     "like \"Here is the summary\"."
@@ -92,21 +115,29 @@ COMPACT_SUMMARY_SYSTEM_PROMPT = (
     "several of these entries in one message, so be brief.\n"
     "\n"
     "Output format (plain text only — no markdown, no headers, no bold):\n"
-    "1. First line: a one-to-two-sentence TL;DR capturing what the video is "
-    "about and its main point or conclusion.\n"
+    "1. First line: a one-to-two-sentence TL;DR giving the speaker's actual "
+    "call or conclusion, not the topic.\n"
     "2. Optionally, up to 3 short bullets starting with \"• \" for genuinely "
     "important specifics. Skip the bullets entirely for thin content.\n"
+    "\n"
+    "Even when brief, keep the numbers: tickers, price levels, targets, "
+    "support/resistance, invalidation levels, and the speaker's stance on each "
+    "asset. Cut the narration, not the specifics.\n"
     "\n"
     "Content rules:\n"
     "- Always write in English, even if the transcript is in another language.\n"
     "- Be strictly faithful to the transcript. Never invent or guess facts, "
     "names, numbers, dates, or conclusions that are not present.\n"
+    "- Attribute views to the speaker rather than stating them as fact.\n"
+    "- Leave out sponsor reads, subscription pitches, and channel housekeeping.\n"
     "- Auto-generated captions are often messy, informal, or missing "
     "punctuation; that is normal — do your best to summarize them anyway.\n"
     "- Only if the transcript is so garbled, fragmentary, or empty that NO "
     "meaningful summary is possible, output exactly the single token "
     "INSUFFICIENT_TRANSCRIPT and nothing else.\n"
-    "- Keep the whole entry under roughly 600 characters.\n"
+    "- Keep the whole entry under roughly 800 characters.\n"
+    "- Finish every sentence. If you are running long, write fewer bullets — "
+    "never an unfinished one.\n"
     "\n"
     "Output only the summary itself — no preamble, no sign-off, and no phrases "
     "like \"Here is the summary\"."
@@ -174,6 +205,20 @@ def _extract_summary(data):
         return (data["choices"][0]["message"]["content"] or "").strip()
     except (KeyError, IndexError, TypeError):
         return ""
+
+
+def _was_truncated(data):
+    """
+    True when the model stopped because it hit the token cap rather than
+    because it finished. The content that comes back is a real string ending
+    mid-sentence, so without this check it reads as a complete summary and is
+    delivered as one.
+    """
+    try:
+        reason = data["choices"][0].get("finish_reason") or ""
+    except (KeyError, IndexError, TypeError):
+        return False
+    return reason.lower() in {"length", "max_tokens"}
 
 
 def _truncate_transcript(transcript):
@@ -258,10 +303,26 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
 
         if resp.status_code == 200:
             try:
-                summary = _extract_summary(resp.json())
+                data = resp.json()
             except ValueError as e:
                 log_error(f"{provider['name']} returned invalid JSON: {e}")
                 return ""
+            if _was_truncated(data):
+                # Cut off at the token cap: the text ends mid-sentence and, in
+                # JSON mode, isn't even parseable. Retry with room rather than
+                # deliver half a summary.
+                cap = payload["max_tokens"]
+                log_warn(f"{provider['name']} response hit the {cap}-token cap and was truncated.")
+                if attempt < LLM_MAX_RETRIES and cap < LLM_MAX_TOKENS_CEILING:
+                    payload["max_tokens"] = min(cap * 2, LLM_MAX_TOKENS_CEILING)
+                    log_warn(f"Retrying with max_tokens={payload['max_tokens']}.")
+                    continue
+                log_error(
+                    f"{provider['name']} still truncated at {cap} tokens; discarding "
+                    "the partial response rather than delivering it."
+                )
+                return ""
+            summary = _extract_summary(data)
             if not summary:
                 log_warn(f"{provider['name']} returned an empty summary.")
             return summary

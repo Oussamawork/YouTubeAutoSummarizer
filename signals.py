@@ -172,7 +172,11 @@ def _parse_signals(text):
 # the structured signals, halving per-video LLM requests (which is what the
 # per-minute rate limit actually counts). Needs a bigger output budget than a
 # summary alone, since the JSON carries both.
-COMBINED_MAX_TOKENS = env_int("LLM_COMBINED_MAX_TOKENS", 3000)
+# The combined call has to fit BOTH the summary and the full signals object,
+# and JSON-escaping the summary inflates it further. Budgeting it like a plain
+# summary call left the summary competing with the signals for room, which is
+# how summaries ended up cut mid-sentence.
+COMBINED_MAX_TOKENS = env_int("LLM_COMBINED_MAX_TOKENS", 6000)
 
 COMBINED_SUFFIX = (
     "\n\n"

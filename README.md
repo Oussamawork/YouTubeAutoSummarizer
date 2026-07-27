@@ -99,6 +99,9 @@ This skips the channel scan and dedup state entirely — useful for any video, s
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `LLM_MAX_TOKENS` | `2000` | Response budget per summary call. A response cut off at the cap is retried with double the budget (up to `LLM_MAX_TOKENS_CEILING`, `8000`) and discarded if it still truncates — a half-written summary is never delivered. |
+| `LLM_MAX_TRANSCRIPT_CHARS` | `200000` | Transcript chars sent to the model. The cut falls at the END of the video, where market videos put their targets and conclusions, so this is deliberately generous. |
+| `LLM_COMBINED_MAX_TOKENS` | `6000` | Budget for the combined summary+signals call, which must fit both plus JSON escaping. |
 | `MAX_VIDEOS_PER_RUN` | `0` (no cap) | Max videos processed per channel per run; older ones go first, the rest wait for the next run. `0` processes everything the channel has due. |
 | `NO_TRANSCRIPT_MAX_ATTEMPTS` | `8` | Runs to retry a video whose captions aren't up yet. Giving up needs **this and** `NO_TRANSCRIPT_MIN_HOURS` to be satisfied. |
 | `NO_TRANSCRIPT_MIN_HOURS` | `36` | Never write a video off before it has been chased this long, whatever the polling rate. An attempt count alone is the wrong unit: at one run every two hours, three attempts is six hours, and auto-captions routinely take longer to appear. |

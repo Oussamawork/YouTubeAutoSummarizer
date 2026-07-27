@@ -53,6 +53,78 @@ def test_extract_summary_bad_shapes():
     assert summarizer._extract_summary(None) == ""
 
 
+def test_was_truncated_detects_length_stop():
+    assert summarizer._was_truncated({"choices": [{"finish_reason": "length"}]}) is True
+    assert summarizer._was_truncated({"choices": [{"finish_reason": "MAX_TOKENS"}]}) is True
+    assert summarizer._was_truncated({"choices": [{"finish_reason": "stop"}]}) is False
+    # A missing/odd shape must not be read as truncation, or good summaries die.
+    assert summarizer._was_truncated({"choices": [{}]}) is False
+    assert summarizer._was_truncated({}) is False
+    assert summarizer._was_truncated(None) is False
+
+
+def _provider():
+    return {"name": "p", "base_url": "http://x", "api_key": "k", "model": "m"}
+
+
+def test_truncated_response_retries_with_a_bigger_budget(monkeypatch):
+    # A response cut at the token cap ends mid-sentence but is a perfectly
+    # ordinary 200, so without the finish_reason check it ships as a summary.
+    caps = []
+
+    class R:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._n = len(caps)
+
+        def json(self):
+            return {
+                "choices": [{
+                    "message": {"content": "half a summary that stops mid" if len(caps) == 1 else "complete."},
+                    "finish_reason": "length" if len(caps) == 1 else "stop",
+                }]
+            }
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        caps.append(json["max_tokens"])
+        return R(json)
+
+    monkeypatch.setattr(summarizer.requests, "post", fake_post)
+    monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
+    out = summarizer._call_provider(_provider(), "transcript text")
+    assert out == "complete."
+    assert caps[1] == caps[0] * 2      # budget doubled on the retry
+    assert len(caps) == 2
+
+
+def test_truncated_response_is_discarded_not_delivered(monkeypatch):
+    # Still cut after escalating: drop it. Half a summary reads as a whole one
+    # to the reader, and the video would be marked decided and never revisited.
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "cut off here and"},
+                                 "finish_reason": "length"}]}
+
+    monkeypatch.setattr(summarizer.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
+    assert summarizer._call_provider(_provider(), "transcript text") == ""
+
+
+def test_untruncated_response_passes_through(monkeypatch):
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "a whole summary."},
+                                 "finish_reason": "stop"}]}
+
+    monkeypatch.setattr(summarizer.requests, "post", lambda *a, **k: R())
+    assert summarizer._call_provider(_provider(), "transcript text") == "a whole summary."
+
+
 def test_summarize_empty_transcript():
     assert summarizer.summarize_transcript("   ") == ""
 
