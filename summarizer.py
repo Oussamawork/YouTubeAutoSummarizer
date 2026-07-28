@@ -20,7 +20,7 @@ from log import log_info, log_warn, log_error
 
 # Generous because the prompt can now carry a very long transcript and the
 # response budget can escalate; 60s was sized for a 48k-char input.
-LLM_TIMEOUT = env_int("LLM_TIMEOUT", 180)
+LLM_TIMEOUT = env_int("LLM_TIMEOUT", 120)
 LLM_MAX_TOKENS = env_int("LLM_MAX_TOKENS", 2000)
 # A response cut off at max_tokens is retried with a bigger budget, doubling up
 # to this ceiling. Shipping a half-written summary is worse than spending a
@@ -30,31 +30,37 @@ LLM_MAX_TOKENS_CEILING = env_int("LLM_MAX_TOKENS_CEILING", 8000)
 # How many times one call may double its budget. Separate from LLM_MAX_RETRIES
 # so a transient 5xx can't consume the escalation allowance.
 LLM_MAX_ESCALATIONS = env_int("LLM_MAX_ESCALATIONS", 2)
+# Gemini 3 is a thinking model and counts thinking tokens against max_tokens
+# (unlike OpenAI's reasoning models, which meter them separately). A budget
+# mostly consumed by thinking leaves a few hundred tokens of visible text and
+# finish_reason=length — exactly the shape of the truncated summaries we
+# shipped: 241, 332 and 860 chars against a 3000-token budget. Capping the
+# thinking budget addresses the cause; escalating max_tokens only the symptom.
+# Empty disables the parameter.
+LLM_REASONING_EFFORT = (os.getenv("LLM_REASONING_EFFORT") or "low").strip()
 LLM_TEMPERATURE = env_float("LLM_TEMPERATURE", 0.3)
-# Cap the transcript length sent to the model, to avoid blowing past context
-# windows and to keep token cost predictable. Overridable via env. Generous
-# because the models in use have very large context windows and the cut falls
-# at the END of the video — exactly where a market video puts its price targets
-# and conclusions. 200k chars is roughly a 4-hour video.
-# ~4 chars/token. 300k chars is roughly 75k tokens — about a 5-hour video, so
-# in practice nothing these channels publish gets cut. The context window is
-# not the binding constraint here: the free tier meters tokens PER MINUTE, and
-# a single request near the model's million-token window would spend a whole
-# minute's allowance (and be rejected) rather than buying better summaries.
-LLM_MAX_TRANSCRIPT_CHARS = env_int("LLM_MAX_TRANSCRIPT_CHARS", 300000)
+# ~4 chars/token, so 120k chars is ~30k tokens — over 6x the longest video
+# these channels publish, i.e. in practice nothing gets cut. The context window
+# is not the binding constraint: the free tier meters tokens PER MINUTE, and
+# because an escalation re-sends the whole input, a near-window request would
+# blow the minute's allowance and be rejected rather than buy a better summary.
+LLM_MAX_TRANSCRIPT_CHARS = env_int("LLM_MAX_TRANSCRIPT_CHARS", 120000)
 # Per-provider input ceilings. Sending more than a provider accepts fails
 # outright instead of degrading, and on free tiers the per-minute token budget
 # bites long before the context window does — so each provider declares what it
 # can actually take and the prompt is trimmed to fit at call time.
-GEMINI_MAX_INPUT_CHARS = env_int("GEMINI_MAX_INPUT_CHARS", 300000)  # 1M window, TPM-bound
-# Groq's free tier meters far more tightly than its context window suggests, so
-# the fallback gets a much smaller prompt — a trimmed summary beats none.
-GROQ_MAX_INPUT_CHARS = env_int("GROQ_MAX_INPUT_CHARS", 40000)
+GEMINI_MAX_INPUT_CHARS = env_int("GEMINI_MAX_INPUT_CHARS", 120000)  # 1M window, TPM-bound
+# Groq reserves max_tokens against TPM at admission, so input AND requested
+# output must both fit the per-minute budget or the call is rejected before
+# inference. ~3k input tokens leaves room for the reserved output.
+GROQ_MAX_INPUT_CHARS = env_int("GROQ_MAX_INPUT_CHARS", 12000)
 LLM_MAX_RETRIES = 3
 LLM_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
 # Honor a server's Retry-After on 429, but cap it so a huge value can't stall
 # the daily run past its workflow timeout.
-LLM_RETRY_AFTER_CAP = 30
+# Must be able to outlast a per-minute token window, or a TPM 429 is retried
+# while still inside the same window and the provider gets written off.
+LLM_RETRY_AFTER_CAP = env_int("LLM_RETRY_AFTER_CAP", 75)
 TRANSIENT_STATUS = {500, 502, 503, 504}  # 429 is handled separately (quota/rate limit)
 
 # Providers found to be quota/rate-limited during this run. Once a provider 429s
@@ -92,20 +98,26 @@ SUMMARY_SYSTEM_PROMPT = (
     "\n"
     "Output format (plain text only — no markdown, no headers, no bold):\n"
     "1. First line: a single-sentence TL;DR giving the speaker's actual "
-    "conclusion or call, not the topic. Write \"Speaker is buying Nvidia below "
-    "$130, expecting the AI capex cycle to run through 2027\" — not \"The video "
-    "discusses Nvidia's outlook\".\n"
-    "2. A blank line, then key takeaways as bullets, each starting with \"• \". "
-    "Use as many bullets as the content warrants (typically 3-7) — more for "
-    "dense, information-rich videos, fewer for simple ones. Keep each bullet to "
-    "one or two sentences.\n"
+    "conclusion or call, not the topic. Shape it like \"Speaker is buying "
+    "<company> below <the level they name>, expecting <their stated thesis> "
+    "through <their timeframe>\" — not \"The video discusses <company>'s "
+    "outlook\". Fill the placeholders only from the transcript.\n"
+    "2. A blank line, then 3-5 bullets starting with \"• \" covering the "
+    "speaker's reasoning, thesis and market view. One or two sentences each.\n"
+    "3. A blank line, then ONE LINE PER ASSET the speaker discussed:\n"
+    "     TICKER (Name) — stance, conviction | levels/targets | timeframe\n"
+    "   Write a line for every asset, including ones mentioned only in "
+    "passing, and omit any field the speaker didn't give. This roster is where "
+    "completeness lives — a bullet is not the only place an asset can appear, "
+    "so running short on bullets must never cost you an asset.\n"
     "\n"
     "Capture these whenever the speaker states them — they are the point:\n"
-    "- EVERY asset the speaker discusses, by name and ticker symbol, with their "
-    "stance (bullish / bearish / neutral) and how strongly they hold it. Do not "
-    "drop an asset for brevity: if the speaker covers eight tickers, all eight "
-    "must appear. Use the ticker the speaker gives; when they name only the "
-    "company, give the company name.\n"
+    "- EVERY asset the speaker discusses, with their stance (bullish / bearish "
+    "/ neutral) and how strongly they hold it. Do not drop an asset for "
+    "brevity: if the speaker covers eight assets, all eight must appear. Give "
+    "the ticker only when the speaker says it or it is on screen in the title; "
+    "otherwise use the company name alone. Never supply a ticker you happen to "
+    "know but did not hear.\n"
     "- Concrete numbers: price levels, targets, support and resistance, stop or "
     "invalidation levels, valuations, growth and margin figures.\n"
     "- The timeframe over which the speaker expects it to play out.\n"
@@ -124,10 +136,12 @@ SUMMARY_SYSTEM_PROMPT = (
     "- Only if the transcript is so garbled, fragmentary, or empty that NO "
     "meaningful summary is possible, output exactly the single token "
     "INSUFFICIENT_TRANSCRIPT and nothing else.\n"
-    "- Keep the entire summary under roughly 3000 characters so it fits in one "
-    "Telegram message alongside the video's title and link.\n"
-    "- Finish every sentence. If you are running long, write fewer bullets — "
-    "never an unfinished one.\n"
+    "- Aim for under 3000 characters so it fits in one Telegram message "
+    "alongside the video's title and link. If the asset roster alone needs more "
+    "room, keep the roster and cut the bullets to two.\n"
+    "- If you are running long, shorten the bullets, then drop bullets "
+    "entirely. Never drop an asset line, and never leave a sentence "
+    "unfinished — the roster is the last thing to go, not the first.\n"
     "\n"
     "Output only the summary itself — no preamble, no sign-off, and no phrases "
     "like \"Here is the summary\"."
@@ -144,13 +158,13 @@ COMPACT_SUMMARY_SYSTEM_PROMPT = (
     "Output format (plain text only — no markdown, no headers, no bold):\n"
     "1. First line: a one-to-two-sentence TL;DR giving the speaker's actual "
     "call or conclusion, not the topic.\n"
-    "2. Optionally, up to 3 short bullets starting with \"• \" for genuinely "
-    "important specifics. Skip the bullets entirely for thin content.\n"
+    "2. A blank line, then one line per asset the speaker covered:\n"
+    "     TICKER — stance | key level(s) | target | invalidation\n"
+    "   Omit fields the speaker didn't give. This roster replaces prose "
+    "bullets; don't write both.\n"
     "\n"
-    "Even when brief, keep every ticker and the numbers attached to it: price "
-    "levels, targets, support/resistance, invalidation levels, and the "
-    "speaker's stance on each asset. Cut the narration, never the specifics — "
-    "an asset the speaker covered must not be missing from the entry.\n"
+    "Cut the narration, never the specifics — an asset the speaker covered "
+    "must not be missing from the entry.\n"
     "\n"
     "Content rules:\n"
     "- Always write in English, even if the transcript is in another language.\n"
@@ -163,9 +177,9 @@ COMPACT_SUMMARY_SYSTEM_PROMPT = (
     "- Only if the transcript is so garbled, fragmentary, or empty that NO "
     "meaningful summary is possible, output exactly the single token "
     "INSUFFICIENT_TRANSCRIPT and nothing else.\n"
-    "- Keep the whole entry under roughly 800 characters.\n"
-    "- Finish every sentence. If you are running long, write fewer bullets — "
-    "never an unfinished one.\n"
+    "- Budget roughly 300 characters for the TL;DR plus 90 per asset, up to "
+    "1200 total. Never omit an asset to stay short — shorten its line instead.\n"
+    "- Finish every sentence; never leave one unfinished.\n"
     "\n"
     "Output only the summary itself — no preamble, no sign-off, and no phrases "
     "like \"Here is the summary\"."
@@ -252,7 +266,7 @@ def _fit_to_provider(message, provider):
         f"Prompt is {len(message)} chars, over {provider['name']}'s "
         f"{limit}-char input budget; trimming to fit."
     )
-    return message[:limit] + TRANSCRIPT_TRUNCATION_MARKER
+    return _head_and_tail(message, limit)
 
 
 def _was_truncated(data):
@@ -282,7 +296,25 @@ def _truncate_transcript(transcript):
         f"Transcript is {len(transcript)} chars, exceeding the "
         f"{LLM_MAX_TRANSCRIPT_CHARS}-char cap; truncating before summarization."
     )
-    return transcript[:LLM_MAX_TRANSCRIPT_CHARS] + TRANSCRIPT_TRUNCATION_MARKER
+    return _head_and_tail(transcript, LLM_MAX_TRANSCRIPT_CHARS)
+
+
+def _head_and_tail(text, limit):
+    """
+    Cut the MIDDLE out of an over-long text, keeping both ends.
+
+    Keeping only the head is wrong for this content: a market video opens with
+    the setup and closes with the price targets, invalidation levels and "what
+    I am doing" — so a head-only cut discards exactly what the summary exists
+    to capture. Roughly 60% head / 40% tail keeps thesis and conclusion both.
+    """
+    marker = TRANSCRIPT_TRUNCATION_MARKER
+    budget = max(0, limit - len(marker))
+    head = int(budget * 0.6)
+    tail = budget - head
+    if tail <= 0:
+        return text[:budget] + marker
+    return text[:head] + marker + text[-tail:]
 
 
 def _build_user_message(transcript, title=None):
@@ -338,6 +370,8 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    if LLM_REASONING_EFFORT:
+        payload["reasoning_effort"] = LLM_REASONING_EFFORT
 
     # Budget escalation is not a failure retry: a response cut off at the cap
     # means the request worked and the room was too small. Counting it against
@@ -415,6 +449,15 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
                 f"(attempt {attempt}/{LLM_MAX_RETRIES}); retrying."
             )
             time.sleep(LLM_RETRY_BACKOFF * attempt)
+            continue
+
+        # Some providers reject reasoning_effort outright. Drop it and retry
+        # rather than lose the summary over an optional parameter.
+        if (resp.status_code == 400 and "reasoning_effort" in payload
+                and "reasoning_effort" in (resp.text or "").lower()):
+            log_warn(f"{provider['name']} rejected reasoning_effort; retrying without it.")
+            payload.pop("reasoning_effort")
+            attempt -= 1
             continue
 
         log_warn(f"{provider['name']} returned {resp.status_code}: {resp.text[:200]}")

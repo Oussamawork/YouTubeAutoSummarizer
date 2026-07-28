@@ -21,13 +21,17 @@ def test_truncate_short_unchanged():
     assert summarizer._truncate_transcript("short") == "short"
 
 
-def test_truncate_long_appends_marker():
-    long = "x" * (summarizer.LLM_MAX_TRANSCRIPT_CHARS + 100)
+def test_truncate_long_keeps_both_ends():
+    # The END carries the price targets and conclusions, so a head-only cut
+    # would discard exactly what the summary exists to capture.
+    limit = summarizer.LLM_MAX_TRANSCRIPT_CHARS
+    long = "H" * (limit) + "M" * 500 + "T" * limit
     out = summarizer._truncate_transcript(long)
-    assert out.endswith(summarizer.TRANSCRIPT_TRUNCATION_MARKER)
-    assert len(out) == summarizer.LLM_MAX_TRANSCRIPT_CHARS + len(
-        summarizer.TRANSCRIPT_TRUNCATION_MARKER
-    )
+    assert len(out) == limit                       # honors the budget exactly
+    assert summarizer.TRANSCRIPT_TRUNCATION_MARKER in out
+    assert out.startswith("H")                     # opening thesis kept
+    assert out.endswith("T")                       # closing targets kept
+    assert "M" not in out                          # the middle is what goes
 
 
 def test_build_user_message_with_title():
@@ -194,7 +198,8 @@ def test_prompt_trimmed_to_provider_input_budget(monkeypatch):
     monkeypatch.setattr(summarizer.requests, "post", fake_post)
     provider = dict(_provider(), max_input_chars=500)
     summarizer._call_provider(provider, "x" * 5000)
-    assert sent["len"] == 500 + len(summarizer.TRANSCRIPT_TRUNCATION_MARKER)
+    # Exactly the budget — the marker must fit inside it, not extend past it.
+    assert sent["len"] == 500
 
 
 def test_untruncated_response_passes_through(monkeypatch):

@@ -204,3 +204,38 @@ def test_summarize_with_signals_empty_transcript_skips_call(monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call")),
     )
     assert signals.summarize_with_signals("   ") is None
+
+
+def test_combined_prompt_has_one_output_contract():
+    # The base prompts end with "output only the summary itself". Appending a
+    # JSON envelope after that leaves the model two contradictory answers to
+    # "what is the response?" — and a malformed response costs a whole extra
+    # provider chain on the fallback path.
+    import summarizer
+    combined = signals._build_combined_prompt()
+    assert signals.TRAILING_OUTPUT_RULE not in combined
+    assert "ONE JSON object" in combined
+    # The rule must still exist in the standalone prompt, and must still match
+    # it exactly — a reworded prompt would silently stop being stripped.
+    assert summarizer.SUMMARY_SYSTEM_PROMPT.endswith(signals.TRAILING_OUTPUT_RULE)
+    assert summarizer.COMPACT_SUMMARY_SYSTEM_PROMPT.endswith(signals.TRAILING_OUTPUT_RULE)
+    assert signals._build_combined_prompt(compact=True).count("OUTPUT ENVELOPE") == 1
+
+
+def test_combined_prompt_routes_the_insufficient_sentinel_into_json():
+    # In json_mode "output the single token and nothing else" is not valid
+    # JSON, so the sentinel could never come back in a parseable form.
+    combined = signals._build_combined_prompt()
+    assert '"summary": "INSUFFICIENT_TRANSCRIPT"' in combined
+
+
+def test_signals_are_scoped_to_the_transcript_not_the_summary():
+    # Scoping them to the summary made the structured record a strict subset of
+    # the prose, so any asset the prose had no room for vanished from the data
+    # that market_pulse and channel_scorecard read.
+    assert "market content of the TRANSCRIPT" in signals.COMBINED_SUFFIX
+
+
+def test_ticker_rule_forbids_supplying_one_from_model_knowledge():
+    assert "or unambiguous" not in signals.SIGNALS_SCHEMA
+    assert "Never supply one from your own knowledge" in signals.SIGNALS_SCHEMA
