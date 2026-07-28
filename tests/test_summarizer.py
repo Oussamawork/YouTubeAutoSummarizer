@@ -21,13 +21,17 @@ def test_truncate_short_unchanged():
     assert summarizer._truncate_transcript("short") == "short"
 
 
-def test_truncate_long_appends_marker():
-    long = "x" * (summarizer.LLM_MAX_TRANSCRIPT_CHARS + 100)
+def test_truncate_long_keeps_both_ends():
+    # The END carries the price targets and conclusions, so a head-only cut
+    # would discard exactly what the summary exists to capture.
+    limit = summarizer.LLM_MAX_TRANSCRIPT_CHARS
+    long = "H" * (limit) + "M" * 500 + "T" * limit
     out = summarizer._truncate_transcript(long)
-    assert out.endswith(summarizer.TRANSCRIPT_TRUNCATION_MARKER)
-    assert len(out) == summarizer.LLM_MAX_TRANSCRIPT_CHARS + len(
-        summarizer.TRANSCRIPT_TRUNCATION_MARKER
-    )
+    assert len(out) == limit                       # honors the budget exactly
+    assert summarizer.TRANSCRIPT_TRUNCATION_MARKER in out
+    assert out.startswith("H")                     # opening thesis kept
+    assert out.endswith("T")                       # closing targets kept
+    assert "M" not in out                          # the middle is what goes
 
 
 def test_build_user_message_with_title():
@@ -51,6 +55,163 @@ def test_extract_summary_bad_shapes():
     assert summarizer._extract_summary({}) == ""
     assert summarizer._extract_summary({"choices": []}) == ""
     assert summarizer._extract_summary(None) == ""
+
+
+def test_was_truncated_detects_length_stop():
+    assert summarizer._was_truncated({"choices": [{"finish_reason": "length"}]}) is True
+    assert summarizer._was_truncated({"choices": [{"finish_reason": "MAX_TOKENS"}]}) is True
+    assert summarizer._was_truncated({"choices": [{"finish_reason": "stop"}]}) is False
+    # A missing/odd shape must not be read as truncation, or good summaries die.
+    assert summarizer._was_truncated({"choices": [{}]}) is False
+    assert summarizer._was_truncated({}) is False
+    assert summarizer._was_truncated(None) is False
+
+
+def _provider():
+    return {"name": "p", "base_url": "http://x", "api_key": "k", "model": "m"}
+
+
+def test_truncated_response_retries_with_a_bigger_budget(monkeypatch):
+    # A response cut at the token cap ends mid-sentence but is a perfectly
+    # ordinary 200, so without the finish_reason check it ships as a summary.
+    caps = []
+
+    class R:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._n = len(caps)
+
+        def json(self):
+            return {
+                "choices": [{
+                    "message": {"content": "half a summary that stops mid" if len(caps) == 1 else "complete."},
+                    "finish_reason": "length" if len(caps) == 1 else "stop",
+                }]
+            }
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        caps.append(json["max_tokens"])
+        return R(json)
+
+    monkeypatch.setattr(summarizer.requests, "post", fake_post)
+    monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
+    out = summarizer._call_provider(_provider(), "transcript text")
+    assert out == "complete."
+    assert caps[1] == caps[0] * 2      # budget doubled on the retry
+    assert len(caps) == 2
+
+
+def test_truncated_response_is_discarded_not_delivered(monkeypatch):
+    # Still cut after escalating: drop it. Half a summary reads as a whole one
+    # to the reader, and the video would be marked decided and never revisited.
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "cut off here and"},
+                                 "finish_reason": "length"}]}
+
+    monkeypatch.setattr(summarizer.requests, "post", lambda *a, **k: R())
+    monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
+    # Not "": an empty summary is permanent (watermark advances, video lost),
+    # while truncation varies run to run and must stay retryable.
+    assert summarizer._call_provider(_provider(), "transcript text") == summarizer.TRUNCATED_SENTINEL
+
+
+def test_escalation_is_not_consumed_by_transient_failures(monkeypatch):
+    # A 5xx and a truncation are different problems. Sharing one counter let an
+    # unrelated blip eat the escalation budget, so the ceiling was never reached.
+    caps, codes = [], []
+
+    class R:
+        def __init__(self):
+            self.status_code = 503 if len(codes) == 0 else 200
+            codes.append(self.status_code)
+
+        def json(self):
+            truncating = len(caps) <= 3
+            return {"choices": [{
+                "message": {"content": "cut" if truncating else "done."},
+                "finish_reason": "length" if truncating else "stop",
+            }]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        caps.append(json["max_tokens"])
+        return R()
+
+    monkeypatch.setattr(summarizer.requests, "post", fake_post)
+    monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
+    summarizer._call_provider(_provider(), "transcript text")
+    # One 503, then escalation still climbs the full 2000 -> 4000 -> 8000 path.
+    assert caps[-1] == summarizer.LLM_MAX_TOKENS_CEILING
+
+
+def test_budget_at_or_above_ceiling_still_escalates(monkeypatch):
+    # Configuring a budget above the ceiling used to skip escalation AND
+    # discard the response — raising the budget made things strictly worse.
+    caps = []
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{
+                "message": {"content": "cut" if len(caps) == 1 else "done."},
+                "finish_reason": "length" if len(caps) == 1 else "stop",
+            }]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        caps.append(json["max_tokens"])
+        return R()
+
+    monkeypatch.setattr(summarizer.requests, "post", fake_post)
+    monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
+    big = summarizer.LLM_MAX_TOKENS_CEILING * 2
+    assert summarizer._call_provider(_provider(), "t", max_tokens=big) == "done."
+    assert caps[1] == big * 2
+
+
+def test_was_truncated_survives_hostile_shapes():
+    # Must never raise: it runs inside the per-channel handler, so an exception
+    # would kill that channel's whole batch.
+    for data in ({"choices": [None]}, {"choices": ["str"]}, {"choices": "x"},
+                 {"choices": [{"finish_reason": None}]}, []):
+        assert summarizer._was_truncated(data) is False
+
+
+def test_prompt_trimmed_to_provider_input_budget(monkeypatch):
+    # The global cap is sized for the widest context in the chain; a smaller
+    # fallback would otherwise get a prompt it must reject outright.
+    sent = {}
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok."}, "finish_reason": "stop"}]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent["len"] = len(json["messages"][1]["content"])
+        return R()
+
+    monkeypatch.setattr(summarizer.requests, "post", fake_post)
+    provider = dict(_provider(), max_input_chars=500)
+    summarizer._call_provider(provider, "x" * 5000)
+    # Exactly the budget — the marker must fit inside it, not extend past it.
+    assert sent["len"] == 500
+
+
+def test_untruncated_response_passes_through(monkeypatch):
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "a whole summary."},
+                                 "finish_reason": "stop"}]}
+
+    monkeypatch.setattr(summarizer.requests, "post", lambda *a, **k: R())
+    assert summarizer._call_provider(_provider(), "transcript text") == "a whole summary."
 
 
 def test_summarize_empty_transcript():

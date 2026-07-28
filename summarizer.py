@@ -18,17 +18,49 @@ from log import log_info, log_warn, log_error
 #   Gemini (free tier):         GEMINI_API_KEY            [+ GEMINI_MODEL]
 #   Groq   (free tier):         GROQ_API_KEY              [+ GROQ_MODEL]
 
-LLM_TIMEOUT = env_int("LLM_TIMEOUT", 60)
-LLM_MAX_TOKENS = env_int("LLM_MAX_TOKENS", 1500)
+# Generous because the prompt can now carry a very long transcript and the
+# response budget can escalate; 60s was sized for a 48k-char input.
+LLM_TIMEOUT = env_int("LLM_TIMEOUT", 120)
+LLM_MAX_TOKENS = env_int("LLM_MAX_TOKENS", 2000)
+# A response cut off at max_tokens is retried with a bigger budget, doubling up
+# to this ceiling. Shipping a half-written summary is worse than spending a
+# second request: the reader can't tell it was cut, and the video is marked
+# decided so it never comes back.
+LLM_MAX_TOKENS_CEILING = env_int("LLM_MAX_TOKENS_CEILING", 8000)
+# How many times one call may double its budget. Separate from LLM_MAX_RETRIES
+# so a transient 5xx can't consume the escalation allowance.
+LLM_MAX_ESCALATIONS = env_int("LLM_MAX_ESCALATIONS", 2)
+# Gemini 3 is a thinking model and counts thinking tokens against max_tokens
+# (unlike OpenAI's reasoning models, which meter them separately). A budget
+# mostly consumed by thinking leaves a few hundred tokens of visible text and
+# finish_reason=length — exactly the shape of the truncated summaries we
+# shipped: 241, 332 and 860 chars against a 3000-token budget. Capping the
+# thinking budget addresses the cause; escalating max_tokens only the symptom.
+# Empty disables the parameter.
+LLM_REASONING_EFFORT = (os.getenv("LLM_REASONING_EFFORT") or "low").strip()
 LLM_TEMPERATURE = env_float("LLM_TEMPERATURE", 0.3)
-# Cap the transcript length sent to the model, to avoid blowing past context
-# windows and to keep token cost predictable. Overridable via env.
-LLM_MAX_TRANSCRIPT_CHARS = env_int("LLM_MAX_TRANSCRIPT_CHARS", 48000)
+# ~4 chars/token, so 120k chars is ~30k tokens — over 6x the longest video
+# these channels publish, i.e. in practice nothing gets cut. The context window
+# is not the binding constraint: the free tier meters tokens PER MINUTE, and
+# because an escalation re-sends the whole input, a near-window request would
+# blow the minute's allowance and be rejected rather than buy a better summary.
+LLM_MAX_TRANSCRIPT_CHARS = env_int("LLM_MAX_TRANSCRIPT_CHARS", 120000)
+# Per-provider input ceilings. Sending more than a provider accepts fails
+# outright instead of degrading, and on free tiers the per-minute token budget
+# bites long before the context window does — so each provider declares what it
+# can actually take and the prompt is trimmed to fit at call time.
+GEMINI_MAX_INPUT_CHARS = env_int("GEMINI_MAX_INPUT_CHARS", 120000)  # 1M window, TPM-bound
+# Groq reserves max_tokens against TPM at admission, so input AND requested
+# output must both fit the per-minute budget or the call is rejected before
+# inference. ~3k input tokens leaves room for the reserved output.
+GROQ_MAX_INPUT_CHARS = env_int("GROQ_MAX_INPUT_CHARS", 12000)
 LLM_MAX_RETRIES = 3
 LLM_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
 # Honor a server's Retry-After on 429, but cap it so a huge value can't stall
 # the daily run past its workflow timeout.
-LLM_RETRY_AFTER_CAP = 30
+# Must be able to outlast a per-minute token window, or a TPM 429 is retried
+# while still inside the same window and the provider gets written off.
+LLM_RETRY_AFTER_CAP = env_int("LLM_RETRY_AFTER_CAP", 75)
 TRANSIENT_STATUS = {500, 502, 503, 504}  # 429 is handled separately (quota/rate limit)
 
 # Providers found to be quota/rate-limited during this run. Once a provider 429s
@@ -50,34 +82,79 @@ INSUFFICIENT_TRANSCRIPT_SENTINEL = "INSUFFICIENT_TRANSCRIPT"
 # seen) rather than a permanent failure, so it's retried on the next run.
 QUOTA_EXHAUSTED_SENTINEL = "QUOTA_EXHAUSTED"
 
+# Sentinel returned when a response was cut off at the token cap and could not
+# be recovered by escalating. Retryable, not permanent: whether a response fits
+# varies with the video, so the caller defers instead of writing the video off
+# (and never delivers the half-written text).
+TRUNCATED_SENTINEL = "SUMMARY_TRUNCATED"
+
 # The summary is read by someone who has NOT watched the video and is delivered
 # as a plain-text Telegram message (the sender HTML-escapes it, so markdown like
 # **bold** or "#" headers will not render). Hence: plain text, "• " bullets only.
 SUMMARY_SYSTEM_PROMPT = (
-    "You are an expert summarizer of YouTube video transcripts. Your summary is "
-    "read by someone who has NOT watched the video, so it must stand on its own.\n"
+    "You are an expert analyst summarizing market and investing videos for a "
+    "reader who has NOT watched them and may act on what you write. Specificity "
+    "is the entire value: a summary that omits the numbers is worse than none.\n"
     "\n"
     "Output format (plain text only — no markdown, no headers, no bold):\n"
-    "1. First line: a single-sentence TL;DR that captures what the video is "
-    "about and its main point.\n"
-    "2. A blank line, then key takeaways as bullets, each starting with \"• \". "
-    "Use as many bullets as the content warrants (typically 3-7) — more for "
-    "dense, information-rich videos, fewer for simple ones. Keep each bullet to "
-    "one or two sentences.\n"
+    "1. First line: a single-sentence TL;DR giving the speaker's actual "
+    "conclusion or call, not the topic. Shape it like \"Speaker is buying "
+    "<company> below <the level they name>, expecting <their stated thesis> "
+    "through <their timeframe>\" — not \"The video discusses <company>'s "
+    "outlook\". Fill the placeholders only from the transcript.\n"
+    "2. A blank line, then 3-5 bullets starting with \"• \" covering the "
+    "speaker's reasoning, thesis and market view. One or two sentences each.\n"
+    "3. A blank line, then ONE LINE PER ASSET the speaker discussed:\n"
+    "     TICKER (Name) — stance, conviction | levels/targets | timeframe\n"
+    "   Write a line for every asset, including ones mentioned only in "
+    "passing, and omit any field the speaker didn't give. This roster is where "
+    "completeness lives — a bullet is not the only place an asset can appear, "
+    "so running short on bullets must never cost you an asset.\n"
+    "\n"
+    "Roster rules:\n"
+    "- First column: the ticker when the speaker says one, otherwise the "
+    "company or asset name in normal case. Never uppercase a name into a "
+    "ticker-looking string for something that has no ticker — private "
+    "companies get their name, not a fake symbol.\n"
+    "- The level / target / invalidation fields are for NUMBERS the speaker "
+    "gave: prices, percentages, valuations. If they gave none, leave the field "
+    "out entirely. Never paraphrase a view into a numeric field — "
+    "\"target: outperform\" and \"level: a 2-year cycle\" are wrong; omitting "
+    "them is right.\n"
+    "- Don't repeat a label the format already supplies (write \"bearish\", "
+    "not \"stance: sell\").\n"
+    "\n"
+    "Capture these whenever the speaker states them — they are the point:\n"
+    "- EVERY asset the speaker discusses, with their stance (bullish / bearish "
+    "/ neutral) and how strongly they hold it. Do not drop an asset for "
+    "brevity: if the speaker covers eight assets, all eight must appear. Give "
+    "the ticker only when the speaker says it or it is on screen in the title; "
+    "otherwise use the company name alone. Never supply a ticker you happen to "
+    "know but did not hear.\n"
+    "- Concrete numbers: price levels, targets, support and resistance, stop or "
+    "invalidation levels, valuations, growth and margin figures.\n"
+    "- The timeframe over which the speaker expects it to play out.\n"
+    "- The reasoning behind the call, and any condition that would invalidate it.\n"
+    "- Positions the speaker discloses or changes (bought, sold, trimmed, added).\n"
     "\n"
     "Content rules:\n"
     "- Always write in English, even if the transcript is in another language.\n"
     "- Be strictly faithful to the transcript. Never invent or guess facts, "
-    "names, numbers, dates, or conclusions that are not present.\n"
-    "- Prefer concrete specifics — key arguments, conclusions, steps, named "
-    "people/products/places, and notable data — over vague generalities.\n"
+    "names, numbers, dates, or conclusions that are not present. If the speaker "
+    "gives no numbers, give none — do not fill the gap with plausible ones.\n"
+    "- Attribute views to the speaker rather than stating them as fact.\n"
+    "- Leave out sponsor reads, subscription pitches, and channel housekeeping.\n"
     "- Auto-generated captions are often messy, informal, or missing "
     "punctuation; that is normal — do your best to summarize them anyway.\n"
     "- Only if the transcript is so garbled, fragmentary, or empty that NO "
     "meaningful summary is possible, output exactly the single token "
     "INSUFFICIENT_TRANSCRIPT and nothing else.\n"
-    "- Keep the entire summary under roughly 3500 characters so it fits in one "
-    "Telegram message alongside the video's title and link.\n"
+    "- Aim for under 3000 characters so it fits in one Telegram message "
+    "alongside the video's title and link. If the asset roster alone needs more "
+    "room, keep the roster and cut the bullets to two.\n"
+    "- If you are running long, shorten the bullets, then drop bullets "
+    "entirely. Never drop an asset line, and never leave a sentence "
+    "unfinished — the roster is the last thing to go, not the first.\n"
     "\n"
     "Output only the summary itself — no preamble, no sign-off, and no phrases "
     "like \"Here is the summary\"."
@@ -92,21 +169,42 @@ COMPACT_SUMMARY_SYSTEM_PROMPT = (
     "several of these entries in one message, so be brief.\n"
     "\n"
     "Output format (plain text only — no markdown, no headers, no bold):\n"
-    "1. First line: a one-to-two-sentence TL;DR capturing what the video is "
-    "about and its main point or conclusion.\n"
-    "2. Optionally, up to 3 short bullets starting with \"• \" for genuinely "
-    "important specifics. Skip the bullets entirely for thin content.\n"
+    "1. First line: a one-to-two-sentence TL;DR giving the speaker's actual "
+    "call or conclusion, not the topic.\n"
+    "2. A blank line, then 1-2 short bullets starting with \"• \" giving the "
+    "speaker's reasoning — why they hold this view. A roster of tickers "
+    "without the thinking behind them is not worth reading.\n"
+    "3. A blank line, then one line per asset the speaker covered:\n"
+    "     TICKER — stance | level/target | invalidation\n"
+    "\n"
+    "Cut the narration, never the specifics — an asset the speaker covered "
+    "must not be missing from the entry.\n"
+    "\n"
+    "Roster rules:\n"
+    "- First column: the ticker when the speaker says one, otherwise the "
+    "company or asset name in normal case. Never uppercase a name into a "
+    "ticker-looking string for something that has no ticker.\n"
+    "- The level / target / invalidation fields are for NUMBERS the speaker "
+    "gave. If they gave none, leave the field out entirely — never paraphrase "
+    "a view into a numeric field.\n"
+    "- Don't repeat a label the format already supplies (write \"bearish\", "
+    "not \"stance: sell\").\n"
     "\n"
     "Content rules:\n"
     "- Always write in English, even if the transcript is in another language.\n"
     "- Be strictly faithful to the transcript. Never invent or guess facts, "
     "names, numbers, dates, or conclusions that are not present.\n"
+    "- Attribute views to the speaker rather than stating them as fact.\n"
+    "- Leave out sponsor reads, subscription pitches, and channel housekeeping.\n"
     "- Auto-generated captions are often messy, informal, or missing "
     "punctuation; that is normal — do your best to summarize them anyway.\n"
     "- Only if the transcript is so garbled, fragmentary, or empty that NO "
     "meaningful summary is possible, output exactly the single token "
     "INSUFFICIENT_TRANSCRIPT and nothing else.\n"
-    "- Keep the whole entry under roughly 600 characters.\n"
+    "- Budget roughly 300 characters for the TL;DR, 200 for the bullets, and "
+    "70 per asset line, up to 1500 total. Never omit an asset to stay short — "
+    "shorten its line instead.\n"
+    "- Finish every sentence; never leave one unfinished.\n"
     "\n"
     "Output only the summary itself — no preamble, no sign-off, and no phrases "
     "like \"Here is the summary\"."
@@ -133,6 +231,7 @@ def _provider_configs():
             "base_url": os.getenv("LLM_BASE_URL").rstrip("/"),
             "api_key": os.getenv("LLM_API_KEY"),
             "model": os.getenv("LLM_MODEL") or "gpt-4o-mini",
+            "max_input_chars": env_int("LLM_MAX_INPUT_CHARS", LLM_MAX_TRANSCRIPT_CHARS),
         })
 
     if os.getenv("GEMINI_API_KEY"):
@@ -148,6 +247,7 @@ def _provider_configs():
             "base_url": gemini_base,
             "api_key": os.getenv("GEMINI_API_KEY"),
             "model": preferred,
+            "max_input_chars": GEMINI_MAX_INPUT_CHARS,
         })
         if preferred != "gemini-2.5-flash":
             providers.append({
@@ -155,6 +255,7 @@ def _provider_configs():
                 "base_url": gemini_base,
                 "api_key": os.getenv("GEMINI_API_KEY"),
                 "model": "gemini-2.5-flash",
+                "max_input_chars": GEMINI_MAX_INPUT_CHARS,
             })
 
     if os.getenv("GROQ_API_KEY"):
@@ -163,6 +264,7 @@ def _provider_configs():
             "base_url": "https://api.groq.com/openai/v1",
             "api_key": os.getenv("GROQ_API_KEY"),
             "model": os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile",
+            "max_input_chars": GROQ_MAX_INPUT_CHARS,
         })
 
     return providers
@@ -174,6 +276,36 @@ def _extract_summary(data):
         return (data["choices"][0]["message"]["content"] or "").strip()
     except (KeyError, IndexError, TypeError):
         return ""
+
+
+def _fit_to_provider(message, provider):
+    """
+    Trim a prompt to what this provider can actually accept. The global
+    transcript cap is sized for the widest context in the chain, so a fallback
+    with a smaller window would otherwise get a prompt it must reject outright.
+    """
+    limit = provider.get("max_input_chars") or 0
+    if limit <= 0 or len(message) <= limit:
+        return message
+    log_warn(
+        f"Prompt is {len(message)} chars, over {provider['name']}'s "
+        f"{limit}-char input budget; trimming to fit."
+    )
+    return _head_and_tail(message, limit)
+
+
+def _was_truncated(data):
+    """
+    True when the model stopped because it hit the token cap rather than
+    because it finished. The content that comes back is a real string ending
+    mid-sentence, so without this check it reads as a complete summary and is
+    delivered as one.
+    """
+    try:
+        reason = data["choices"][0].get("finish_reason") or ""
+    except (AttributeError, KeyError, IndexError, TypeError):
+        return False
+    return str(reason).lower() in {"length", "max_tokens"}
 
 
 def _truncate_transcript(transcript):
@@ -189,7 +321,25 @@ def _truncate_transcript(transcript):
         f"Transcript is {len(transcript)} chars, exceeding the "
         f"{LLM_MAX_TRANSCRIPT_CHARS}-char cap; truncating before summarization."
     )
-    return transcript[:LLM_MAX_TRANSCRIPT_CHARS] + TRANSCRIPT_TRUNCATION_MARKER
+    return _head_and_tail(transcript, LLM_MAX_TRANSCRIPT_CHARS)
+
+
+def _head_and_tail(text, limit):
+    """
+    Cut the MIDDLE out of an over-long text, keeping both ends.
+
+    Keeping only the head is wrong for this content: a market video opens with
+    the setup and closes with the price targets, invalidation levels and "what
+    I am doing" — so a head-only cut discards exactly what the summary exists
+    to capture. Roughly 60% head / 40% tail keeps thesis and conclusion both.
+    """
+    marker = TRANSCRIPT_TRUNCATION_MARKER
+    budget = max(0, limit - len(marker))
+    head = int(budget * 0.6)
+    tail = budget - head
+    if tail <= 0:
+        return text[:budget] + marker
+    return text[:head] + marker + text[-tail:]
 
 
 def _build_user_message(transcript, title=None):
@@ -233,19 +383,34 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
         "Authorization": f"Bearer {provider['api_key']}",
         "Content-Type": "application/json",
     }
+    content = user_message if user_message is not None else _build_user_message(transcript, title)
     payload = {
         "model": provider["model"],
         "messages": [
             {"role": "system", "content": system_prompt or SUMMARY_SYSTEM_PROMPT},
-            {"role": "user", "content": user_message if user_message is not None else _build_user_message(transcript, title)},
+            {"role": "user", "content": _fit_to_provider(content, provider)},
         ],
         "temperature": LLM_TEMPERATURE,
         "max_tokens": max_tokens or LLM_MAX_TOKENS,
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    if LLM_REASONING_EFFORT:
+        payload["reasoning_effort"] = LLM_REASONING_EFFORT
 
-    for attempt in range(1, LLM_MAX_RETRIES + 1):
+    # Budget escalation is not a failure retry: a response cut off at the cap
+    # means the request worked and the room was too small. Counting it against
+    # LLM_MAX_RETRIES let one unrelated 5xx eat the escalation budget, so the
+    # ceiling was never actually reached. The two are tracked separately.
+    # The ceiling must always leave room to escalate from wherever this call
+    # starts. Clamping it to the configured budget would mean that raising the
+    # budget past LLM_MAX_TOKENS_CEILING silently disables escalation and turns
+    # every truncation into a discard — worse behavior for a bigger setting.
+    start_cap = payload["max_tokens"]
+    ceiling = max(LLM_MAX_TOKENS_CEILING, start_cap * (2 ** max(1, LLM_MAX_ESCALATIONS)))
+    attempt, escalations = 0, 0
+    while attempt < LLM_MAX_RETRIES:
+        attempt += 1
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=LLM_TIMEOUT)
         except requests.RequestException as e:
@@ -258,10 +423,31 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
 
         if resp.status_code == 200:
             try:
-                summary = _extract_summary(resp.json())
+                data = resp.json()
             except ValueError as e:
                 log_error(f"{provider['name']} returned invalid JSON: {e}")
                 return ""
+            if _was_truncated(data):
+                # Cut off at the token cap: the text ends mid-sentence and, in
+                # JSON mode, isn't even parseable. Retry with room rather than
+                # deliver half a summary.
+                cap = payload["max_tokens"]
+                log_warn(f"{provider['name']} response hit the {cap}-token cap and was truncated.")
+                if escalations < LLM_MAX_ESCALATIONS and cap < ceiling:
+                    payload["max_tokens"] = min(cap * 2, ceiling)
+                    escalations += 1
+                    attempt -= 1  # an escalation is not one of the failure retries
+                    log_warn(f"Retrying with max_tokens={payload['max_tokens']}.")
+                    continue
+                log_error(
+                    f"{provider['name']} still truncated at {cap} tokens; discarding "
+                    "the partial response rather than delivering it."
+                )
+                # Not "": an empty summary is a permanent failure that advances
+                # the watermark, and truncation varies run to run. Say what
+                # happened so the caller can retry the video instead.
+                return TRUNCATED_SENTINEL
+            summary = _extract_summary(data)
             if not summary:
                 log_warn(f"{provider['name']} returned an empty summary.")
             return summary
@@ -288,6 +474,15 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
                 f"(attempt {attempt}/{LLM_MAX_RETRIES}); retrying."
             )
             time.sleep(LLM_RETRY_BACKOFF * attempt)
+            continue
+
+        # Some providers reject reasoning_effort outright. Drop it and retry
+        # rather than lose the summary over an optional parameter.
+        if (resp.status_code == 400 and "reasoning_effort" in payload
+                and "reasoning_effort" in (resp.text or "").lower()):
+            log_warn(f"{provider['name']} rejected reasoning_effort; retrying without it.")
+            payload.pop("reasoning_effort")
+            attempt -= 1
             continue
 
         log_warn(f"{provider['name']} returned {resp.status_code}: {resp.text[:200]}")
@@ -328,6 +523,9 @@ def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
             provider, "", system_prompt=system_prompt, user_message=user_message,
             json_mode=json_mode, max_tokens=max_tokens,
         )
+        if text == TRUNCATED_SENTINEL:
+            log_warn(f"{provider['name']} response was truncated; trying next provider.")
+            continue
         if text == QUOTA_EXHAUSTED_SENTINEL:
             log_warn(f"{provider['name']} quota/rate limit hit; skipping it for the rest of the run.")
             _EXHAUSTED_PROVIDERS.add(provider["name"])
@@ -373,6 +571,7 @@ def summarize_transcript(transcript, title=None, compact=False):
         return ""
 
     quota_hit = False
+    truncated_hit = False
     for provider in providers:
         # Skip providers already known to be quota-exhausted earlier this run.
         if provider["name"] in _EXHAUSTED_PROVIDERS:
@@ -388,6 +587,13 @@ def summarize_transcript(transcript, title=None, compact=False):
             log_warn(f"{provider['name']} quota/rate limit hit; skipping it for the rest of the run.")
             _EXHAUSTED_PROVIDERS.add(provider["name"])
             quota_hit = True
+            continue
+
+        if summary == TRUNCATED_SENTINEL:
+            # This provider couldn't fit the answer even after escalating.
+            # Another may have a different budget, so try it before giving up.
+            log_warn(f"{provider['name']} could not produce a complete summary; trying the next provider.")
+            truncated_hit = True
             continue
 
         if summary:
@@ -411,6 +617,12 @@ def summarize_transcript(transcript, title=None, compact=False):
     if quota_hit:
         log_warn("All available LLM providers are quota/rate-limited; deferring summary.")
         return QUOTA_EXHAUSTED_SENTINEL
+
+    if truncated_hit:
+        # Every provider ran out of room. Retryable, not permanent — returning
+        # "" here would mark the video decided and lose it for good.
+        log_warn("No provider produced a complete summary; deferring for retry.")
+        return TRUNCATED_SENTINEL
 
     log_warn("All configured LLM providers failed to produce a summary.")
     return ""

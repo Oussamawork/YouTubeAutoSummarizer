@@ -15,6 +15,7 @@ from summarizer import (
     summarize_transcript,
     INSUFFICIENT_TRANSCRIPT_SENTINEL,
     QUOTA_EXHAUSTED_SENTINEL,
+    TRUNCATED_SENTINEL,
 )
 from log import log_info, log_error, log_warn, log_debug
 from sendToTelegram import send_telegram_message, send_telegram_digest, send_telegram_teaser, build_teaser
@@ -601,6 +602,37 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
             None,
         )
 
+    if raw_summary == TRUNCATED_SENTINEL:
+        # The model ran out of room even after escalating. Retryable — never
+        # deliver the half-written text — but bounded: an identical transcript
+        # produces an identical escalation ladder, so a video that overflows
+        # once tends to overflow every run. Without a cap this would re-fetch
+        # the transcript (a credit) and re-post the notice on every run until
+        # the video aged out of the feed, and never be delivered.
+        video_details['summary'] = "Summary not available."
+        attempt = no_transcript_attempts + 1
+        if attempt < NO_TRANSCRIPT_MAX_ATTEMPTS:
+            log_warn(
+                f"Summary came back truncated (attempt {attempt}/"
+                f"{NO_TRANSCRIPT_MAX_ATTEMPTS}); deferring for retry."
+            )
+            return (
+                "⏳ Summary deferred — the model's response was cut short. "
+                "This video will be retried on the next run.",
+                "truncated_deferred",
+                False,
+                None,
+            )
+        log_warn("Summary still truncated after retries. Notifying Telegram.")
+        return (
+            f"⚠️ The summary kept coming back cut short (checked "
+            f"{NO_TRANSCRIPT_MAX_ATTEMPTS} runs), so no complete summary could "
+            "be produced. Manual review needed.",
+            "truncated",
+            True,
+            None,
+        )
+
     if raw_summary == QUOTA_EXHAUSTED_SENTINEL:
         # All LLM providers are rate-limited/out of quota — retryable.
         video_details['summary'] = "Summary not available."
@@ -726,7 +758,8 @@ def main():
             outcomes = {
                 "sent": 0, "unchanged": 0, "no_transcript": 0, "no_transcript_deferred": 0,
                 "insufficient": 0, "summary_failed": 0, "quota_deferred": 0,
-                "budget_deferred": 0, "retry_backoff": 0, "no_video": 0, "error": 0,
+                "budget_deferred": 0, "retry_backoff": 0, "truncated_deferred": 0,
+                "truncated": 0, "no_video": 0, "error": 0,
             }
 
             # Counts reported in the run summary: retry records dropped because
@@ -859,8 +892,10 @@ def main():
                         if reason and reason not in ("ok", "fallback_ok"):
                             transcript_reasons[reason] = transcript_reasons.get(reason, 0) + 1
 
-                        # One quota notice per run is enough; later deferrals are logged only.
-                        if outcome == "quota_deferred" and outcomes["quota_deferred"] > 1:
+                        # One notice per run per deferral kind is enough; later
+                        # ones are logged only. Without this a run that defers
+                        # ten videos posts ten identical messages.
+                        if outcome in ("quota_deferred", "truncated_deferred") and outcomes[outcome] > 1:
                             telegram_body = None
 
                         if telegram_body is not None:
@@ -908,10 +943,13 @@ def main():
                             # Retryable outcome: leave the watermark alone and
                             # remember the video so the next run picks it up.
                             entry = pending.setdefault(video_id, {"channel_id": channel_id, "attempts": 0})
-                            if outcome == "no_transcript_deferred":
+                            if outcome in ("no_transcript_deferred", "truncated_deferred"):
                                 # Stamped only for deferrals that cost a credit,
                                 # so a budget-deferred video retries as soon as
                                 # credits return rather than serving out a wait.
+                                # Truncation costs one too — the transcript was
+                                # fetched and summarized — so it backs off and
+                                # counts toward the give-up cap the same way.
                                 now = datetime.now(timezone.utc).isoformat()
                                 entry["attempts"] = attempts + 1
                                 entry.setdefault("first_attempt", now)
@@ -1043,12 +1081,21 @@ def summarize_on_demand(video_url):
     telegram_body, outcome, _, _ = _summarize_video(
         video_details, no_transcript_attempts=NO_TRANSCRIPT_MAX_ATTEMPTS - 1
     )
+    # There is no next run for an on-demand request, so a "deferred" outcome is
+    # simply a failure: say so rather than promising a retry that never comes,
+    # and report it as a failure so the manual run doesn't look green.
+    deferred = outcome in ("quota_deferred", "truncated_deferred", "budget_deferred")
+    if deferred:
+        telegram_body = (
+            "⚠️ No summary could be produced for this video right now "
+            f"({outcome.replace('_', ' ')}). Try again later."
+        )
     sent = send_telegram_message(
         TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, channel_name, video_title,
         video_url, video_details["published_at"], telegram_body,
     )
     log_info(f"On-demand summary finished (outcome: {outcome}).")
-    return sent
+    return sent and not deferred
 
 
 def cli():

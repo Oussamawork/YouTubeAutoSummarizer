@@ -99,6 +99,12 @@ This skips the channel scan and dedup state entirely — useful for any video, s
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `LLM_MAX_TOKENS` | `2000` | Response budget per summary call. A response cut off at the cap is retried with double the budget and deferred (never delivered half-written) if it still truncates. |
+| `LLM_MAX_TOKENS_CEILING` / `LLM_MAX_ESCALATIONS` | `8000` / `2` | Escalation bound. The effective ceiling is at least `start budget x 2^escalations`, so a call configured above `8000` can still escalate rather than silently losing the feature. |
+| `LLM_REASONING_EFFORT` | `low` | Thinking budget for reasoning models. Gemini 3 counts thinking tokens against `max_tokens`, so an uncapped budget spends the response allowance on thinking and returns a few hundred characters cut mid-sentence. Set empty to omit the parameter. |
+| `LLM_MAX_TRANSCRIPT_CHARS` | `120000` | Transcript chars sent to the model (~30k tokens, several times the longest realistic video). Over-long transcripts are cut in the MIDDLE, keeping the opening thesis and the closing price targets. Free tiers meter tokens per minute and an escalation re-sends the whole input, so a near-context-window request gets rejected rather than producing a better summary. |
+| `GEMINI_MAX_INPUT_CHARS` / `GROQ_MAX_INPUT_CHARS` | `120000` / `12000` | Per-provider input budgets, trimmed to fit at call time. Groq reserves `max_tokens` against its per-minute budget at admission, so its prompt has to be far smaller than its context window suggests. |
+| `LLM_COMBINED_MAX_TOKENS` | `3000` | Budget for the combined summary+signals call, which must fit both plus JSON escaping. |
 | `MAX_VIDEOS_PER_RUN` | `0` (no cap) | Max videos processed per channel per run; older ones go first, the rest wait for the next run. `0` processes everything the channel has due. |
 | `NO_TRANSCRIPT_MAX_ATTEMPTS` | `8` | Runs to retry a video whose captions aren't up yet. Giving up needs **this and** `NO_TRANSCRIPT_MIN_HOURS` to be satisfied. |
 | `NO_TRANSCRIPT_MIN_HOURS` | `36` | Never write a video off before it has been chased this long, whatever the polling rate. An attempt count alone is the wrong unit: at one run every two hours, three attempts is six hours, and auto-captions routinely take longer to appear. |

@@ -36,7 +36,7 @@ SIGNALS_SCHEMA = (
     '  "assets": [\n'
     "    {\n"
     '      "name": "<company/asset name as stated>",\n'
-    '      "ticker": "<ticker symbol if stated or unambiguous, else null>",\n'
+    '      "ticker": "<the ticker ONLY if the speaker says it aloud or it appears in the video title; otherwise null. Never supply one from your own knowledge of the company>",\n'
     '      "type": "stock" | "crypto" | "etf" | "index" | "commodity" | "macro",\n'
     '      "stance": "bullish" | "bearish" | "neutral",\n'
     '      "conviction": "low" | "medium" | "high",\n'
@@ -170,26 +170,49 @@ def _parse_signals(text):
 
 # Combined summarize+extract: one call returns both the Telegram summary and
 # the structured signals, halving per-video LLM requests (which is what the
-# per-minute rate limit actually counts). Needs a bigger output budget than a
-# summary alone, since the JSON carries both.
+# per-minute rate limit actually counts). It carries the summary AND the signals
+# object AND the JSON escaping of both, so it needs more room than a plain
+# summary call — but not much more: observed summaries run well under 2.5k chars
+# and the signals object adds ~1k tokens. The truncations this budget was once
+# blamed for came from thinking tokens (see LLM_REASONING_EFFORT), not from the
+# summary competing with the signals for space.
 COMBINED_MAX_TOKENS = env_int("LLM_COMBINED_MAX_TOKENS", 3000)
 
 COMBINED_SUFFIX = (
     "\n\n"
     "=== OUTPUT ENVELOPE ===\n"
-    "Return ONE JSON object and nothing else (no markdown fences, no prose):\n"
+    "Everything above describes the TEXT that belongs in the \"summary\" field: "
+    "still plain text with \"• \" bullets and the asset roster, no markdown, no "
+    "preamble. The RESPONSE as a whole is ONE JSON object and nothing else (no "
+    "fences, no prose outside it):\n"
     '{"summary": "<the summary described above, as a single JSON string using '
     '\\n for line breaks>", "signals": <the object described below>}\n'
     "\n"
-    "The \"signals\" value captures the market content of the summary you just "
-    "wrote, with exactly this shape:\n" + SIGNALS_SCHEMA
+    "If the transcript is unsummarizable, the single-token rule above applies "
+    "to the \"summary\" FIELD, not to the response. Return exactly: "
+    '{"summary": "INSUFFICIENT_TRANSCRIPT", "signals": {"assets": [], '
+    '"market_sentiment": "neutral", "topics": []}}\n'
+    "\n"
+    "The \"signals\" value captures the market content of the TRANSCRIPT — "
+    "including assets the summary text had no room to spell out in prose. It "
+    "is the complete record; the summary is the readable one. Exactly this "
+    "shape:\n" + SIGNALS_SCHEMA
+)
+
+
+# The base prompts close by saying "output only the summary itself". Appending a
+# JSON envelope after that leaves two contradictory answers to "what is the
+# response?", so the trailing rule is removed rather than argued with.
+TRAILING_OUTPUT_RULE = (
+    "\n\nOutput only the summary itself — no preamble, no sign-off, and no "
+    "phrases like \"Here is the summary\"."
 )
 
 
 def _build_combined_prompt(compact=False):
     """Summary rules + the JSON envelope that also carries the signals."""
     base = COMPACT_SUMMARY_SYSTEM_PROMPT if compact else SUMMARY_SYSTEM_PROMPT
-    return base + COMBINED_SUFFIX
+    return base.replace(TRAILING_OUTPUT_RULE, "") + COMBINED_SUFFIX
 
 
 def summarize_with_signals(transcript, title=None, compact=False, channel_name=None):
