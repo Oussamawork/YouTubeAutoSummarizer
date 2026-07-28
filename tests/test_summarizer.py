@@ -110,7 +110,91 @@ def test_truncated_response_is_discarded_not_delivered(monkeypatch):
 
     monkeypatch.setattr(summarizer.requests, "post", lambda *a, **k: R())
     monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
-    assert summarizer._call_provider(_provider(), "transcript text") == ""
+    # Not "": an empty summary is permanent (watermark advances, video lost),
+    # while truncation varies run to run and must stay retryable.
+    assert summarizer._call_provider(_provider(), "transcript text") == summarizer.TRUNCATED_SENTINEL
+
+
+def test_escalation_is_not_consumed_by_transient_failures(monkeypatch):
+    # A 5xx and a truncation are different problems. Sharing one counter let an
+    # unrelated blip eat the escalation budget, so the ceiling was never reached.
+    caps, codes = [], []
+
+    class R:
+        def __init__(self):
+            self.status_code = 503 if len(codes) == 0 else 200
+            codes.append(self.status_code)
+
+        def json(self):
+            truncating = len(caps) <= 3
+            return {"choices": [{
+                "message": {"content": "cut" if truncating else "done."},
+                "finish_reason": "length" if truncating else "stop",
+            }]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        caps.append(json["max_tokens"])
+        return R()
+
+    monkeypatch.setattr(summarizer.requests, "post", fake_post)
+    monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
+    summarizer._call_provider(_provider(), "transcript text")
+    # One 503, then escalation still climbs the full 2000 -> 4000 -> 8000 path.
+    assert caps[-1] == summarizer.LLM_MAX_TOKENS_CEILING
+
+
+def test_budget_at_or_above_ceiling_still_escalates(monkeypatch):
+    # Configuring a budget above the ceiling used to skip escalation AND
+    # discard the response — raising the budget made things strictly worse.
+    caps = []
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{
+                "message": {"content": "cut" if len(caps) == 1 else "done."},
+                "finish_reason": "length" if len(caps) == 1 else "stop",
+            }]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        caps.append(json["max_tokens"])
+        return R()
+
+    monkeypatch.setattr(summarizer.requests, "post", fake_post)
+    monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
+    big = summarizer.LLM_MAX_TOKENS_CEILING * 2
+    assert summarizer._call_provider(_provider(), "t", max_tokens=big) == "done."
+    assert caps[1] == big * 2
+
+
+def test_was_truncated_survives_hostile_shapes():
+    # Must never raise: it runs inside the per-channel handler, so an exception
+    # would kill that channel's whole batch.
+    for data in ({"choices": [None]}, {"choices": ["str"]}, {"choices": "x"},
+                 {"choices": [{"finish_reason": None}]}, []):
+        assert summarizer._was_truncated(data) is False
+
+
+def test_prompt_trimmed_to_provider_input_budget(monkeypatch):
+    # The global cap is sized for the widest context in the chain; a smaller
+    # fallback would otherwise get a prompt it must reject outright.
+    sent = {}
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok."}, "finish_reason": "stop"}]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent["len"] = len(json["messages"][1]["content"])
+        return R()
+
+    monkeypatch.setattr(summarizer.requests, "post", fake_post)
+    provider = dict(_provider(), max_input_chars=500)
+    summarizer._call_provider(provider, "x" * 5000)
+    assert sent["len"] == 500 + len(summarizer.TRANSCRIPT_TRUNCATION_MARKER)
 
 
 def test_untruncated_response_passes_through(monkeypatch):

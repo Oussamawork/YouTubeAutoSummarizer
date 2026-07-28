@@ -18,20 +18,38 @@ from log import log_info, log_warn, log_error
 #   Gemini (free tier):         GEMINI_API_KEY            [+ GEMINI_MODEL]
 #   Groq   (free tier):         GROQ_API_KEY              [+ GROQ_MODEL]
 
-LLM_TIMEOUT = env_int("LLM_TIMEOUT", 60)
+# Generous because the prompt can now carry a very long transcript and the
+# response budget can escalate; 60s was sized for a 48k-char input.
+LLM_TIMEOUT = env_int("LLM_TIMEOUT", 180)
 LLM_MAX_TOKENS = env_int("LLM_MAX_TOKENS", 2000)
 # A response cut off at max_tokens is retried with a bigger budget, doubling up
 # to this ceiling. Shipping a half-written summary is worse than spending a
 # second request: the reader can't tell it was cut, and the video is marked
 # decided so it never comes back.
 LLM_MAX_TOKENS_CEILING = env_int("LLM_MAX_TOKENS_CEILING", 8000)
+# How many times one call may double its budget. Separate from LLM_MAX_RETRIES
+# so a transient 5xx can't consume the escalation allowance.
+LLM_MAX_ESCALATIONS = env_int("LLM_MAX_ESCALATIONS", 2)
 LLM_TEMPERATURE = env_float("LLM_TEMPERATURE", 0.3)
 # Cap the transcript length sent to the model, to avoid blowing past context
 # windows and to keep token cost predictable. Overridable via env. Generous
 # because the models in use have very large context windows and the cut falls
 # at the END of the video — exactly where a market video puts its price targets
 # and conclusions. 200k chars is roughly a 4-hour video.
-LLM_MAX_TRANSCRIPT_CHARS = env_int("LLM_MAX_TRANSCRIPT_CHARS", 200000)
+# ~4 chars/token. 300k chars is roughly 75k tokens — about a 5-hour video, so
+# in practice nothing these channels publish gets cut. The context window is
+# not the binding constraint here: the free tier meters tokens PER MINUTE, and
+# a single request near the model's million-token window would spend a whole
+# minute's allowance (and be rejected) rather than buying better summaries.
+LLM_MAX_TRANSCRIPT_CHARS = env_int("LLM_MAX_TRANSCRIPT_CHARS", 300000)
+# Per-provider input ceilings. Sending more than a provider accepts fails
+# outright instead of degrading, and on free tiers the per-minute token budget
+# bites long before the context window does — so each provider declares what it
+# can actually take and the prompt is trimmed to fit at call time.
+GEMINI_MAX_INPUT_CHARS = env_int("GEMINI_MAX_INPUT_CHARS", 300000)  # 1M window, TPM-bound
+# Groq's free tier meters far more tightly than its context window suggests, so
+# the fallback gets a much smaller prompt — a trimmed summary beats none.
+GROQ_MAX_INPUT_CHARS = env_int("GROQ_MAX_INPUT_CHARS", 40000)
 LLM_MAX_RETRIES = 3
 LLM_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
 # Honor a server's Retry-After on 429, but cap it so a huge value can't stall
@@ -58,6 +76,12 @@ INSUFFICIENT_TRANSCRIPT_SENTINEL = "INSUFFICIENT_TRANSCRIPT"
 # seen) rather than a permanent failure, so it's retried on the next run.
 QUOTA_EXHAUSTED_SENTINEL = "QUOTA_EXHAUSTED"
 
+# Sentinel returned when a response was cut off at the token cap and could not
+# be recovered by escalating. Retryable, not permanent: whether a response fits
+# varies with the video, so the caller defers instead of writing the video off
+# (and never delivers the half-written text).
+TRUNCATED_SENTINEL = "SUMMARY_TRUNCATED"
+
 # The summary is read by someone who has NOT watched the video and is delivered
 # as a plain-text Telegram message (the sender HTML-escapes it, so markdown like
 # **bold** or "#" headers will not render). Hence: plain text, "• " bullets only.
@@ -77,8 +101,11 @@ SUMMARY_SYSTEM_PROMPT = (
     "one or two sentences.\n"
     "\n"
     "Capture these whenever the speaker states them — they are the point:\n"
-    "- Each asset discussed by name and ticker, with the speaker's stance "
-    "(bullish / bearish / neutral) and how strongly they hold it.\n"
+    "- EVERY asset the speaker discusses, by name and ticker symbol, with their "
+    "stance (bullish / bearish / neutral) and how strongly they hold it. Do not "
+    "drop an asset for brevity: if the speaker covers eight tickers, all eight "
+    "must appear. Use the ticker the speaker gives; when they name only the "
+    "company, give the company name.\n"
     "- Concrete numbers: price levels, targets, support and resistance, stop or "
     "invalidation levels, valuations, growth and margin figures.\n"
     "- The timeframe over which the speaker expects it to play out.\n"
@@ -120,9 +147,10 @@ COMPACT_SUMMARY_SYSTEM_PROMPT = (
     "2. Optionally, up to 3 short bullets starting with \"• \" for genuinely "
     "important specifics. Skip the bullets entirely for thin content.\n"
     "\n"
-    "Even when brief, keep the numbers: tickers, price levels, targets, "
-    "support/resistance, invalidation levels, and the speaker's stance on each "
-    "asset. Cut the narration, not the specifics.\n"
+    "Even when brief, keep every ticker and the numbers attached to it: price "
+    "levels, targets, support/resistance, invalidation levels, and the "
+    "speaker's stance on each asset. Cut the narration, never the specifics — "
+    "an asset the speaker covered must not be missing from the entry.\n"
     "\n"
     "Content rules:\n"
     "- Always write in English, even if the transcript is in another language.\n"
@@ -164,6 +192,7 @@ def _provider_configs():
             "base_url": os.getenv("LLM_BASE_URL").rstrip("/"),
             "api_key": os.getenv("LLM_API_KEY"),
             "model": os.getenv("LLM_MODEL") or "gpt-4o-mini",
+            "max_input_chars": env_int("LLM_MAX_INPUT_CHARS", LLM_MAX_TRANSCRIPT_CHARS),
         })
 
     if os.getenv("GEMINI_API_KEY"):
@@ -179,6 +208,7 @@ def _provider_configs():
             "base_url": gemini_base,
             "api_key": os.getenv("GEMINI_API_KEY"),
             "model": preferred,
+            "max_input_chars": GEMINI_MAX_INPUT_CHARS,
         })
         if preferred != "gemini-2.5-flash":
             providers.append({
@@ -186,6 +216,7 @@ def _provider_configs():
                 "base_url": gemini_base,
                 "api_key": os.getenv("GEMINI_API_KEY"),
                 "model": "gemini-2.5-flash",
+                "max_input_chars": GEMINI_MAX_INPUT_CHARS,
             })
 
     if os.getenv("GROQ_API_KEY"):
@@ -194,6 +225,7 @@ def _provider_configs():
             "base_url": "https://api.groq.com/openai/v1",
             "api_key": os.getenv("GROQ_API_KEY"),
             "model": os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile",
+            "max_input_chars": GROQ_MAX_INPUT_CHARS,
         })
 
     return providers
@@ -207,6 +239,22 @@ def _extract_summary(data):
         return ""
 
 
+def _fit_to_provider(message, provider):
+    """
+    Trim a prompt to what this provider can actually accept. The global
+    transcript cap is sized for the widest context in the chain, so a fallback
+    with a smaller window would otherwise get a prompt it must reject outright.
+    """
+    limit = provider.get("max_input_chars") or 0
+    if limit <= 0 or len(message) <= limit:
+        return message
+    log_warn(
+        f"Prompt is {len(message)} chars, over {provider['name']}'s "
+        f"{limit}-char input budget; trimming to fit."
+    )
+    return message[:limit] + TRANSCRIPT_TRUNCATION_MARKER
+
+
 def _was_truncated(data):
     """
     True when the model stopped because it hit the token cap rather than
@@ -216,9 +264,9 @@ def _was_truncated(data):
     """
     try:
         reason = data["choices"][0].get("finish_reason") or ""
-    except (KeyError, IndexError, TypeError):
+    except (AttributeError, KeyError, IndexError, TypeError):
         return False
-    return reason.lower() in {"length", "max_tokens"}
+    return str(reason).lower() in {"length", "max_tokens"}
 
 
 def _truncate_transcript(transcript):
@@ -278,11 +326,12 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
         "Authorization": f"Bearer {provider['api_key']}",
         "Content-Type": "application/json",
     }
+    content = user_message if user_message is not None else _build_user_message(transcript, title)
     payload = {
         "model": provider["model"],
         "messages": [
             {"role": "system", "content": system_prompt or SUMMARY_SYSTEM_PROMPT},
-            {"role": "user", "content": user_message if user_message is not None else _build_user_message(transcript, title)},
+            {"role": "user", "content": _fit_to_provider(content, provider)},
         ],
         "temperature": LLM_TEMPERATURE,
         "max_tokens": max_tokens or LLM_MAX_TOKENS,
@@ -290,7 +339,19 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
-    for attempt in range(1, LLM_MAX_RETRIES + 1):
+    # Budget escalation is not a failure retry: a response cut off at the cap
+    # means the request worked and the room was too small. Counting it against
+    # LLM_MAX_RETRIES let one unrelated 5xx eat the escalation budget, so the
+    # ceiling was never actually reached. The two are tracked separately.
+    # The ceiling must always leave room to escalate from wherever this call
+    # starts. Clamping it to the configured budget would mean that raising the
+    # budget past LLM_MAX_TOKENS_CEILING silently disables escalation and turns
+    # every truncation into a discard — worse behavior for a bigger setting.
+    start_cap = payload["max_tokens"]
+    ceiling = max(LLM_MAX_TOKENS_CEILING, start_cap * (2 ** max(1, LLM_MAX_ESCALATIONS)))
+    attempt, escalations = 0, 0
+    while attempt < LLM_MAX_RETRIES:
+        attempt += 1
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=LLM_TIMEOUT)
         except requests.RequestException as e:
@@ -313,15 +374,20 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
                 # deliver half a summary.
                 cap = payload["max_tokens"]
                 log_warn(f"{provider['name']} response hit the {cap}-token cap and was truncated.")
-                if attempt < LLM_MAX_RETRIES and cap < LLM_MAX_TOKENS_CEILING:
-                    payload["max_tokens"] = min(cap * 2, LLM_MAX_TOKENS_CEILING)
+                if escalations < LLM_MAX_ESCALATIONS and cap < ceiling:
+                    payload["max_tokens"] = min(cap * 2, ceiling)
+                    escalations += 1
+                    attempt -= 1  # an escalation is not one of the failure retries
                     log_warn(f"Retrying with max_tokens={payload['max_tokens']}.")
                     continue
                 log_error(
                     f"{provider['name']} still truncated at {cap} tokens; discarding "
                     "the partial response rather than delivering it."
                 )
-                return ""
+                # Not "": an empty summary is a permanent failure that advances
+                # the watermark, and truncation varies run to run. Say what
+                # happened so the caller can retry the video instead.
+                return TRUNCATED_SENTINEL
             summary = _extract_summary(data)
             if not summary:
                 log_warn(f"{provider['name']} returned an empty summary.")
@@ -389,6 +455,9 @@ def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
             provider, "", system_prompt=system_prompt, user_message=user_message,
             json_mode=json_mode, max_tokens=max_tokens,
         )
+        if text == TRUNCATED_SENTINEL:
+            log_warn(f"{provider['name']} response was truncated; trying next provider.")
+            continue
         if text == QUOTA_EXHAUSTED_SENTINEL:
             log_warn(f"{provider['name']} quota/rate limit hit; skipping it for the rest of the run.")
             _EXHAUSTED_PROVIDERS.add(provider["name"])
@@ -434,6 +503,7 @@ def summarize_transcript(transcript, title=None, compact=False):
         return ""
 
     quota_hit = False
+    truncated_hit = False
     for provider in providers:
         # Skip providers already known to be quota-exhausted earlier this run.
         if provider["name"] in _EXHAUSTED_PROVIDERS:
@@ -449,6 +519,13 @@ def summarize_transcript(transcript, title=None, compact=False):
             log_warn(f"{provider['name']} quota/rate limit hit; skipping it for the rest of the run.")
             _EXHAUSTED_PROVIDERS.add(provider["name"])
             quota_hit = True
+            continue
+
+        if summary == TRUNCATED_SENTINEL:
+            # This provider couldn't fit the answer even after escalating.
+            # Another may have a different budget, so try it before giving up.
+            log_warn(f"{provider['name']} could not produce a complete summary; trying the next provider.")
+            truncated_hit = True
             continue
 
         if summary:
@@ -472,6 +549,12 @@ def summarize_transcript(transcript, title=None, compact=False):
     if quota_hit:
         log_warn("All available LLM providers are quota/rate-limited; deferring summary.")
         return QUOTA_EXHAUSTED_SENTINEL
+
+    if truncated_hit:
+        # Every provider ran out of room. Retryable, not permanent — returning
+        # "" here would mark the video decided and lose it for good.
+        log_warn("No provider produced a complete summary; deferring for retry.")
+        return TRUNCATED_SENTINEL
 
     log_warn("All configured LLM providers failed to produce a summary.")
     return ""

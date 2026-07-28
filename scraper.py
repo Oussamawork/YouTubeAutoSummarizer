@@ -15,6 +15,7 @@ from summarizer import (
     summarize_transcript,
     INSUFFICIENT_TRANSCRIPT_SENTINEL,
     QUOTA_EXHAUSTED_SENTINEL,
+    TRUNCATED_SENTINEL,
 )
 from log import log_info, log_error, log_warn, log_debug
 from sendToTelegram import send_telegram_message, send_telegram_digest, send_telegram_teaser, build_teaser
@@ -601,6 +602,20 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
             None,
         )
 
+    if raw_summary == TRUNCATED_SENTINEL:
+        # The model ran out of room even after escalating. Whether a response
+        # fits varies with the video, so this is retryable — never deliver the
+        # half-written text and never mark the video decided.
+        video_details['summary'] = "Summary not available."
+        log_warn("Summary came back truncated; deferring this video for retry next run.")
+        return (
+            "⏳ Summary deferred — the model's response was cut short. "
+            "This video will be retried on the next run.",
+            "truncated_deferred",
+            False,
+            None,
+        )
+
     if raw_summary == QUOTA_EXHAUSTED_SENTINEL:
         # All LLM providers are rate-limited/out of quota — retryable.
         video_details['summary'] = "Summary not available."
@@ -726,7 +741,8 @@ def main():
             outcomes = {
                 "sent": 0, "unchanged": 0, "no_transcript": 0, "no_transcript_deferred": 0,
                 "insufficient": 0, "summary_failed": 0, "quota_deferred": 0,
-                "budget_deferred": 0, "retry_backoff": 0, "no_video": 0, "error": 0,
+                "budget_deferred": 0, "retry_backoff": 0, "truncated_deferred": 0,
+                "no_video": 0, "error": 0,
             }
 
             # Counts reported in the run summary: retry records dropped because
