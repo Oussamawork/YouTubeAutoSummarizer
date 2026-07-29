@@ -31,35 +31,54 @@ MARKET_SENTIMENTS = {"bullish", "bearish", "neutral", "mixed"}
 
 # The signals object's shape and rules, shared by the standalone extraction
 # prompt and the combined summarize+extract prompt so they can never drift.
-SIGNALS_SCHEMA = (
-    "{\n"
-    '  "assets": [\n'
-    "    {\n"
-    '      "name": "<company/asset name as stated>",\n'
-    '      "ticker": "<the ticker ONLY if the speaker says it aloud or it appears in the video title; otherwise null. Never supply one from your own knowledge of the company>",\n'
-    '      "type": "stock" | "crypto" | "etf" | "index" | "commodity" | "macro",\n'
-    '      "stance": "bullish" | "bearish" | "neutral",\n'
-    '      "conviction": "low" | "medium" | "high",\n'
-    '      "action": "buy" | "sell" | "hold" | "watch" | "none",\n'
-    '      "catalysts": ["<short phrase per reason/catalyst the speaker gives>"],\n'
-    '      "price_target": <number or null>,\n'
-    '      "horizon": "short" | "medium" | "long" | "unspecified"\n'
-    "    }\n"
-    "  ],\n"
-    '  "market_sentiment": "bullish" | "bearish" | "neutral" | "mixed",\n'
-    '  "topics": ["<2-5 short topic tags>"]\n'
-    "}\n"
-    "\n"
-    "Rules:\n"
-    "- Report ONLY what the speaker actually says in the summary. Never infer, "
-    "extrapolate, or invent stances, tickers, price targets, or reasons.\n"
-    '- "action" is the speaker\'s own stated action or recommendation; use '
-    '"none" when they state no action.\n'
-    '- "market_sentiment" is the speaker\'s overall tone about markets in this '
-    "video, not your own view.\n"
-    "- If there is no market-relevant content, use "
-    '{"assets": [], "market_sentiment": "neutral", "topics": []}.'
-)
+# `include_catalysts=False` slims the per-asset cost for the combined call:
+# catalysts restate reasoning the summary bullets already carry, they are read
+# by no aggregator, and at ~17 assets their token cost is exactly what made the
+# model quietly stop listing assets partway through the array.
+def _signals_schema(include_catalysts=True):
+    catalysts_line = (
+        '      "catalysts": ["<short phrase per reason/catalyst the speaker gives>"],\n'
+        if include_catalysts else ""
+    )
+    return (
+        "{\n"
+        '  "assets": [\n'
+        "    {\n"
+        '      "name": "<company/asset name as stated>",\n'
+        '      "ticker": "<the ticker ONLY if the speaker says it aloud or it appears in the video title; otherwise null. Never supply one from your own knowledge of the company>",\n'
+        '      "type": "stock" | "crypto" | "etf" | "index" | "commodity" | "macro",\n'
+        '      "stance": "bullish" | "bearish" | "neutral",\n'
+        '      "conviction": "low" | "medium" | "high" | "unspecified",\n'
+        '      "action": "buy" | "sell" | "hold" | "watch" | "none",\n'
+        + catalysts_line +
+        '      "price_target": <number or null>,\n'
+        '      "horizon": "short" | "medium" | "long" | "unspecified"\n'
+        "    }\n"
+        "  ],\n"
+        '  "market_sentiment": "bullish" | "bearish" | "neutral" | "mixed",\n'
+        '  "topics": ["<2-5 short topic tags>"]\n'
+        "}\n"
+        "\n"
+        "Rules:\n"
+        "- Include EVERY asset the source discusses — one entry per asset, "
+        "including passing mentions. Never stop the list early: an incomplete "
+        "assets array corrupts the downstream analytics that read it. If an "
+        "asset gets no clear stance, include it with stance \"neutral\" rather "
+        "than leaving it out.\n"
+        "- Report ONLY what the speaker actually says. Never infer, "
+        "extrapolate, or invent stances, tickers, price targets, or reasons.\n"
+        '- "conviction" is how strongly the speaker holds the view AS STATED; '
+        'use "unspecified" when they give no strength — never guess one.\n'
+        '- "action" is the speaker\'s own stated action or recommendation; use '
+        '"none" when they state no action.\n'
+        '- "market_sentiment" is the speaker\'s overall tone about markets in '
+        "this video, not your own view.\n"
+        "- If there is no market-relevant content, use "
+        '{"assets": [], "market_sentiment": "neutral", "topics": []}.'
+    )
+
+
+SIGNALS_SCHEMA = _signals_schema()
 
 SIGNALS_SYSTEM_PROMPT = (
     "You extract structured market signals from the summary of a finance-related "
@@ -195,8 +214,11 @@ COMBINED_SUFFIX = (
     "\n"
     "The \"signals\" value captures the market content of the TRANSCRIPT — "
     "including assets the summary text had no room to spell out in prose. It "
-    "is the complete record; the summary is the readable one. Exactly this "
-    "shape:\n" + SIGNALS_SCHEMA
+    "is the complete record; the summary is the readable one. Every asset in "
+    "the summary's roster MUST have a matching entry in \"assets\" — if the "
+    "roster has 17 lines, \"assets\" has at least 17 entries. Finish the whole "
+    "array before closing the object; a shortened array is a wrong answer, "
+    "not a shorter one. Exactly this shape:\n" + _signals_schema(include_catalysts=False)
 )
 
 

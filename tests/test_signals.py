@@ -239,3 +239,27 @@ def test_signals_are_scoped_to_the_transcript_not_the_summary():
 def test_ticker_rule_forbids_supplying_one_from_model_knowledge():
     assert "or unambiguous" not in signals.SIGNALS_SCHEMA
     assert "Never supply one from your own knowledge" in signals.SIGNALS_SCHEMA
+
+
+def test_combined_envelope_uses_slim_schema_but_standalone_keeps_catalysts():
+    # Catalysts restate the summary bullets, no aggregator reads them, and at
+    # ~17 assets their token cost is what made the model stop listing assets
+    # partway through the array (observed: 17-line roster, 5 signal assets).
+    combined = signals._build_combined_prompt()
+    envelope = combined.split("OUTPUT ENVELOPE")[1]
+    assert "catalysts" not in envelope
+    assert "catalysts" in signals.SIGNALS_SYSTEM_PROMPT
+
+
+def test_signals_require_one_entry_per_roster_asset():
+    combined = signals._build_combined_prompt()
+    assert "MUST have a matching entry" in combined
+    # Passing mentions must land as neutral, not be silently omitted.
+    assert 'stance "neutral" rather' in combined
+
+
+def test_conviction_cannot_be_forced_into_a_guess():
+    # The old enum offered only low|medium|high, so 100% of stored assets had
+    # a conviction "specified" — i.e. invented whenever the speaker gave none.
+    assert '"unspecified"' in signals.SIGNALS_SCHEMA.split('"conviction"')[1].split("\n")[0]
+    assert "never guess one" in signals.SIGNALS_SCHEMA
