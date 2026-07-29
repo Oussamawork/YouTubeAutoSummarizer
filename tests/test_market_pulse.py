@@ -221,3 +221,66 @@ def test_name_and_ticker_records_aggregate_together():
     stats = mp.aggregate_assets(recs)
     assert set(stats) == {"BTC"}
     assert stats["BTC"]["mentions"] == 2 and stats["BTC"]["bear"] == 2
+
+
+def _vote(stance, conviction="unspecified", name="Nvidia", ticker="NVDA"):
+    return {"name": name, "ticker": ticker, "type": "stock",
+            "stance": stance, "conviction": conviction}
+
+
+def _vrec(assets, channel="chan", date="2026-07-28"):
+    return {"date": date, "channel_name": channel, "signals": {"assets": assets}}
+
+
+def test_neutral_mentions_are_breadth_not_dilution():
+    # 3 bullish calls + 5 neutral name-drops is a bullish consensus with wide
+    # radar coverage — not "mixed". Neutrals stay out of the denominator.
+    recs = [_vrec([_vote("bullish")], f"c{i}") for i in range(3)]
+    recs += [_vrec([_vote("neutral")], f"n{i}") for i in range(5)]
+    stats = mp.aggregate_assets(recs)
+    assert mp.net_stance(stats["NVDA"]) == 1.0
+    assert mp._direction(mp.net_stance(stats["NVDA"])) == "bullish"
+    assert stats["NVDA"]["neutral"] == 5          # breadth is still recorded
+
+
+def test_conviction_weighs_directional_votes():
+    # One table-pounding bearish call (1.5) vs two hedged bullish leans
+    # (0.75 each): dead heat -> mixed, where unweighted counting said bullish.
+    recs = [_vrec([_vote("bullish", "low")], "a"),
+            _vrec([_vote("bullish", "unspecified")], "b"),
+            _vrec([_vote("bearish", "high")], "c")]
+    stats = mp.aggregate_assets(recs)
+    assert abs(mp.net_stance(stats["NVDA"])) <= mp.NET_THRESHOLD
+    assert mp._direction(mp.net_stance(stats["NVDA"])) == "mixed"
+
+
+def test_ranking_prefers_directional_over_name_drops():
+    # A megacap name-dropped neutrally everywhere must not outrank an asset
+    # with real calls on it.
+    recs = [_vrec([_vote("neutral", name="Microsoft", ticker="MSFT")], f"n{i}")
+            for i in range(6)]
+    recs += [_vrec([_vote("bullish", "high", name="Chevron", ticker="CVX")], f"c{i}")
+             for i in range(2)]
+    text = mp.build_pulse(recs, [], [], date(2026, 7, 21), date(2026, 7, 28))
+    top = [l for l in text.splitlines() if l.startswith("• ")]
+    assert top[0].startswith("• CVX")
+    assert any(l.startswith("• MSFT") for l in top)  # still reported, as breadth
+
+
+def test_neutral_flood_cannot_fake_a_flip():
+    # Same 2-0 bullish consensus both weeks; this week adds 5 neutral
+    # name-drops. Under the old dilution math the direction collapsed to
+    # "mixed"; either way a flip alert requires a real sign change.
+    prev = [_vrec([_vote("bullish")], f"p{i}", "2026-07-15") for i in range(2)]
+    cur = [_vrec([_vote("bullish")], f"c{i}") for i in range(2)]
+    cur += [_vrec([_vote("neutral")], f"n{i}") for i in range(5)]
+    flips = mp.find_flips(mp.aggregate_assets(cur), mp.aggregate_assets(prev))
+    assert flips == []
+
+
+def test_asset_line_separates_direction_from_breadth():
+    recs = [_vrec([_vote("bullish")], "a"), _vrec([_vote("neutral")], "b")]
+    stats = mp.aggregate_assets(recs)
+    line = mp._format_asset_line(stats["NVDA"])
+    assert "net bullish (1↑/0↓, 1 neutral)" in line
+    assert "2 mentions across 2 channels" in line

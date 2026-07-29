@@ -27,6 +27,11 @@ MAX_ASSETS_IN_REPORT = 8
 # Net-stance thresholds: mean score above/below this counts as a directional
 # consensus; in between reads as mixed.
 NET_THRESHOLD = 0.15
+# A directional vote is weighted by how strongly the speaker stated the view.
+# "unspecified" is honest absence (the extractor is forbidden from guessing a
+# conviction), so it weighs the same as a stated-weak one — a bare lean should
+# not move consensus like a table-pounding call with a target does.
+CONVICTION_WEIGHTS = {"high": 1.5, "medium": 1.0, "low": 0.75, "unspecified": 0.75}
 
 DISCLAIMER = "⚠️ Aggregated creator opinions — research input, not investment advice."
 
@@ -172,8 +177,10 @@ def aggregate_assets(records, channel_weights=None):
     for record, asset in _iter_assets(records):
         key = _asset_key(asset)
         entry = stats.setdefault(key, {
-            "label": asset.get("ticker") or asset.get("name") or key,
-            "ticker": asset.get("ticker"),
+            # Canonical label/ticker, not the first-seen raw one: a record
+            # carrying GOOG must not name the GOOGL bucket.
+            "label": canonical_ticker(asset) or asset.get("name") or key,
+            "ticker": canonical_ticker(asset),
             "type": asset.get("type"),
             "mentions": 0, "channels": set(),
             "bull": 0, "bear": 0, "neutral": 0,
@@ -183,7 +190,11 @@ def aggregate_assets(records, channel_weights=None):
         entry["mentions"] += 1
         if record.get("channel_name"):
             entry["channels"].add(record["channel_name"])
+        # A vote's weight composes the channel's track record with how strongly
+        # the speaker stated the view — a proven channel's high-conviction call
+        # moves consensus most; a hedged lean from anyone moves it least.
         weight = channel_weights.get(record.get("channel_name"), 1.0)
+        weight *= CONVICTION_WEIGHTS.get(asset.get("conviction"), 0.75)
         stance = asset.get("stance")
         if stance == "bullish":
             entry["bull"] += 1
@@ -203,9 +214,23 @@ def aggregate_assets(records, channel_weights=None):
     return stats
 
 
+def _directional_mentions(entry):
+    """How many mentions actually took a side. Attention ranks by this."""
+    return entry["bull"] + entry["bear"]
+
+
 def net_stance(entry):
-    """Weighted mean stance score in [-1, 1] for one aggregated asset entry."""
-    total = entry["bull_w"] + entry["bear_w"] + entry["neutral_w"]
+    """
+    Weighted mean stance score in [-1, 1] over the DIRECTIONAL votes only.
+
+    Neutral mentions are breadth, not opinion: an asset name-dropped neutrally
+    in five videos and called bullish in three is a 3-0 bullish consensus with
+    wide radar coverage — not a "mixed" one. Counting neutrals in the
+    denominator conflated "widely mentioned" with "no consensus" (the analyst-
+    consensus convention is the same: abstentions don't dilute the rating).
+    No directional votes at all reads as 0.0 -> mixed.
+    """
+    total = entry["bull_w"] + entry["bear_w"]
     if not total:
         return 0.0
     return (entry["bull_w"] - entry["bear_w"]) / total
@@ -287,10 +312,16 @@ def _overall_tone(records):
 
 def _format_asset_line(entry, latest_price=None):
     score = net_stance(entry)
+    stance_part = f"net {_direction(score)} ({entry['bull']}↑/{entry['bear']}↓"
+    if entry["neutral"]:
+        # Breadth, separated from direction: neutral mentions say how widely
+        # the asset is on the radar, not what anyone thinks of it.
+        stance_part += f", {entry['neutral']} neutral"
+    stance_part += ")"
     parts = [
-        f"• {entry['label']} — {entry['mentions']} mention{'s' if entry['mentions'] != 1 else ''}",
-        f"{len(entry['channels'])} channel{'s' if len(entry['channels']) != 1 else ''}",
-        f"net {_direction(score)} ({entry['bull']}↑/{entry['bear']}↓)",
+        f"• {entry['label']} — {stance_part}",
+        f"{entry['mentions']} mention{'s' if entry['mentions'] != 1 else ''} "
+        f"across {len(entry['channels'])} channel{'s' if len(entry['channels']) != 1 else ''}",
     ]
     if entry["actions"]:
         actions = " ".join(f"{a}×{n}" for a, n in entry["actions"].most_common())
@@ -368,9 +399,13 @@ def build_pulse(current_records, previous_records, older_records, start, end,
     if current:
         lines.append("")
         lines.append("Top assets:")
+        # Direction leads the ranking: an asset three channels have real calls
+        # on outranks a megacap that ten videos name-dropped neutrally. Total
+        # mentions still break ties and stay visible in each line as context.
         ranked = sorted(
             current.items(),
-            key=lambda kv: (-kv[1]["mentions"], -abs(net_stance(kv[1])), kv[1]["label"]),
+            key=lambda kv: (-_directional_mentions(kv[1]), -abs(net_stance(kv[1])),
+                            -kv[1]["mentions"], kv[1]["label"]),
         )
         for key, entry in ranked[:MAX_ASSETS_IN_REPORT]:
             lines.append(_format_asset_line(entry, latest_prices.get(key)))
