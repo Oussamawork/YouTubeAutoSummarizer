@@ -76,11 +76,76 @@ def _in_window(record, start, end):
     return d is not None and start < d <= end
 
 
+# Canonical name -> ticker for assets the extractor records without one.
+# The extraction prompt deliberately forbids the model from supplying tickers
+# it wasn't given (that rule stopped ticker hallucination), so speakers who say
+# "Chevron" but never "CVX" produce ticker-less records. Without this map the
+# same asset aggregates under two keys (BTC vs BITCOIN — splitting mention
+# counts, diluting consensus, breaking flip detection) and every ticker-less
+# directional call is invisible to the scorecard. A curated table in code is
+# deterministic and auditable in a way a model guess never is.
+# Keys are the normalized (upper, single-spaced) names observed in the dataset;
+# private companies (SpaceX, OpenAI, ...) are deliberately absent — they have
+# no ticker, and aggregating them by name is the correct behavior.
+ASSET_ALIASES = {
+    # crypto
+    "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL",
+    # megacaps and frequently discussed stocks
+    "NVIDIA": "NVDA", "MICROSOFT": "MSFT", "APPLE": "AAPL", "AMAZON": "AMZN",
+    "META": "META", "META PLATFORMS": "META", "ALPHABET": "GOOGL",
+    "GOOGLE": "GOOGL", "TESLA": "TSLA", "NETFLIX": "NFLX",
+    # semis / hardware
+    "MICRON": "MU", "INTEL": "INTC", "AMD": "AMD", "ASML": "ASML",
+    "BROADCOM": "AVGO", "MARVELL": "MRVL", "TSMC": "TSM",
+    "TAIWAN SEMICONDUCTOR": "TSM", "TAIWAN SEMICONDUCTOR MANUFACTURING": "TSM",
+    "WESTERN DIGITAL": "WDC", "SEAGATE": "STX", "COHERENT": "COHR",
+    "NEBIUS": "NBIS", "NEBUS": "NBIS",  # incl. the transcript's misspelling
+    # software / fintech
+    "PALANTIR": "PLTR", "SALESFORCE": "CRM", "IBM": "IBM", "ADOBE": "ADBE",
+    "SNOWFLAKE": "SNOW", "SERVICENOW": "NOW", "ATLASSIAN": "TEAM",
+    "ZSCALER": "ZS", "THE TRADE DESK": "TTD", "TRADE DESK": "TTD",
+    "CROWDSTRIKE": "CRWD", "PALO ALTO": "PANW", "PALO ALTO NETWORKS": "PANW",
+    "SOFI": "SOFI", "PAYPAL": "PYPL", "BLOCK": "XYZ", "REDDIT": "RDDT",
+    "ZETA": "ZETA", "AXON": "AXON", "MERCADO LIBRE": "MELI",
+    "MERCADOLIBRE": "MELI", "UBER": "UBER", "NU HOLDINGS": "NU",
+    "ALIBABA": "BABA", "ORACLE": "ORCL", "SHERWIN WILLIAMS": "SHW",
+    # energy
+    "OCCIDENTAL PETROLEUM": "OXY", "CHEVRON": "CVX", "EXXON MOBIL": "XOM",
+    "EXXONMOBIL": "XOM", "TOTAL ENERGIES": "TTE", "TOTALENERGIES": "TTE",
+    # other observed
+    "WALMART": "WMT", "HOME DEPOT": "HD", "UNDER ARMOUR": "UAA",
+    "UNITED RENTALS": "URI", "BAE SYSTEMS": "BAESY", "SOFTBANK": "SFTBY",
+    "ADYEN": "ADYEY",
+    "TAIWAN SEMICONDUCTOR MANUFACTURING COMPANY": "TSM",
+}
+
+# Recorded-ticker variants folded to one canonical symbol: dual share classes
+# and renames that speakers use interchangeably would otherwise still split an
+# asset across two keys even when a ticker WAS recorded.
+TICKER_ALIASES = {
+    "GOOG": "GOOGL",   # Alphabet share classes
+    "UA": "UAA",       # Under Armour share classes
+    "SQ": "XYZ",       # Block's 2025 ticker change
+}
+
+
+def _normalized_name(asset):
+    return " ".join((asset.get("name") or "").split()).upper()
+
+
+def canonical_ticker(asset):
+    """
+    The asset's ticker, taking the recorded one first and falling back to the
+    curated alias table. None when neither knows one.
+    """
+    ticker = (asset.get("ticker") or "").strip().upper()
+    if not ticker:
+        ticker = ASSET_ALIASES.get(_normalized_name(asset))
+    return TICKER_ALIASES.get(ticker, ticker) if ticker else None
+
+
 def _asset_key(asset):
-    ticker = asset.get("ticker")
-    if ticker:
-        return ticker.upper()
-    return (asset.get("name") or "").strip().upper()
+    return canonical_ticker(asset) or _normalized_name(asset)
 
 
 def _iter_assets(records):

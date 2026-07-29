@@ -122,3 +122,12 @@ def test_generate_scorecard_end_to_end(tmp_path):
     out = cs.generate_scorecard(today=date(2026, 7, 24), path=str(path),
                                 price_fetcher=_fetcher(series))
     assert "Chan — 7d: 1/1 (100%) avg +5.0%" in out
+
+
+def test_symbol_for_scores_ticker_less_calls_via_alias():
+    # A third of directional calls arrived ticker-less (speakers say "Chevron",
+    # not "CVX") and were invisible to the scorecard.
+    assert cs.symbol_for({"ticker": None, "name": "Chevron", "type": "stock"}) == "cvx.us"
+    assert cs.symbol_for({"ticker": None, "name": "Bitcoin", "type": "crypto"}) == "btcusd"
+    # No alias and no ticker -> still honestly unpriceable.
+    assert cs.symbol_for({"ticker": None, "name": "SpaceX", "type": "stock"}) is None
