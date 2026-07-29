@@ -188,3 +188,36 @@ def test_fetch_latest_prices_only_for_targeted_tickers():
     prices = mp.fetch_latest_prices(entries, price_fetcher=fetcher, today=date(2026, 7, 24))
     assert calls == ["tsla.us"]  # NT has no price target -> not fetched
     assert prices == {"TSLA": 100.0}
+
+
+def test_canonical_ticker_prefers_recorded_then_alias_table():
+    # The extractor is forbidden from guessing tickers, so "Chevron" arrives
+    # ticker-less; canonicalization is code's job, deterministic and auditable.
+    assert mp.canonical_ticker({"ticker": "nvda", "name": "whatever"}) == "NVDA"
+    assert mp.canonical_ticker({"ticker": None, "name": "Chevron"}) == "CVX"
+    assert mp.canonical_ticker({"ticker": "", "name": "  bitcoin "}) == "BTC"
+    # Private companies stay ticker-less by design.
+    assert mp.canonical_ticker({"ticker": None, "name": "SpaceX"}) is None
+
+
+def test_ticker_variants_fold_to_one_key():
+    # Dual share classes / renames must not split one asset across two keys.
+    assert mp._asset_key({"ticker": "GOOG", "name": "Alphabet"}) == "GOOGL"
+    assert mp._asset_key({"ticker": None, "name": "Google"}) == "GOOGL"
+    assert mp._asset_key({"ticker": "SQ", "name": "Block"}) == "XYZ"
+
+
+def test_name_and_ticker_records_aggregate_together():
+    # BTC (ticker recorded) and Bitcoin (name only) are the same asset; split
+    # keys dilute consensus and make flip detection blind.
+    recs = [
+        {"date": "2026-07-28", "channel_name": "a",
+         "signals": {"assets": [{"name": "Bitcoin", "ticker": None,
+                                 "type": "crypto", "stance": "bearish"}]}},
+        {"date": "2026-07-28", "channel_name": "b",
+         "signals": {"assets": [{"name": "BTC", "ticker": "BTC",
+                                 "type": "crypto", "stance": "bearish"}]}},
+    ]
+    stats = mp.aggregate_assets(recs)
+    assert set(stats) == {"BTC"}
+    assert stats["BTC"]["mentions"] == 2 and stats["BTC"]["bear"] == 2

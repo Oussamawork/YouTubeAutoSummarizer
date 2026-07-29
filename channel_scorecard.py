@@ -9,7 +9,9 @@ import requests
 from dotenv import load_dotenv
 
 from log import log_info, log_warn, log_error
-from market_pulse import SIGNALS_FILE, load_signals, _parse_date, _iter_assets
+from market_pulse import (
+    SIGNALS_FILE, load_signals, _parse_date, _iter_assets, canonical_ticker,
+)
 from sendToTelegram import send_telegram_text
 
 # Weekly per-channel accuracy scorecard: joins the directional calls recorded
@@ -40,8 +42,13 @@ DISCLAIMER = (
 
 
 def symbol_for(asset):
-    """Map an asset entry to a Stooq symbol, or None when it isn't priceable."""
-    ticker = (asset.get("ticker") or "").strip().lower()
+    """
+    Map an asset entry to a Stooq symbol, or None when it isn't priceable.
+    Uses the canonical ticker (recorded, else the curated alias table), so a
+    call on "Chevron" scores even though the speaker never said "CVX" — a
+    third of directional calls were ticker-less and invisible before this.
+    """
+    ticker = (canonical_ticker(asset) or "").lower()
     if not ticker:
         return None
     asset_type = asset.get("type")
