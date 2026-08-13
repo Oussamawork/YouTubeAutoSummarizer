@@ -61,7 +61,12 @@ GEMINI_MAX_INPUT_CHARS = env_int("GEMINI_MAX_INPUT_CHARS", 120000)  # 1M window,
 # runs on GEMINI_TRANSCRIPT_MODELS (transcript.py) and is deliberately kept off
 # this list: a 123k-token video call must never spend the summary budget.
 GEMINI_DEFAULT_MODEL = "gemini-3.7-flash"
-GEMINI_DEFAULT_FALLBACKS = "gemini-3-flash-preview,gemini-2.5-flash"
+# Only 3.6 backs up 3.7. The summary *is* the product, and the older Flash
+# generations are a visible drop in quality, so the chain buys a second daily
+# quota of comparable output rather than a longer tail of weaker ones. When both
+# are spent the video defers and goes out on the next run, which is the right
+# trade: late and good beats prompt and worse.
+GEMINI_DEFAULT_FALLBACKS = "gemini-3.6-flash"
 # Groq reserves max_tokens against TPM at admission, so input AND requested
 # output must both fit the per-minute budget or the call is rejected before
 # inference. ~3k input tokens leaves room for the reserved output.

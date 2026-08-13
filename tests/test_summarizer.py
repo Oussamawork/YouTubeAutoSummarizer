@@ -377,9 +377,7 @@ def test_provider_model_empty_env_falls_back(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     providers = summarizer._provider_configs()
     # Strongest Flash for the summary, then models with their own daily quota.
-    assert [p["model"] for p in providers] == [
-        "gemini-3.7-flash", "gemini-3-flash-preview", "gemini-2.5-flash",
-    ]
+    assert [p["model"] for p in providers] == ["gemini-3.7-flash", "gemini-3.6-flash"]
 
 
 def test_gemini_no_duplicate_when_pinned_to_a_fallback(monkeypatch):
@@ -415,7 +413,7 @@ def test_each_gemini_model_is_its_own_quota_bucket(monkeypatch):
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     names = [p["name"] for p in summarizer._provider_configs()]
-    assert names == ["gemini-3.7-flash", "gemini-3-flash-preview", "gemini-2.5-flash"]
+    assert names == ["gemini-3.7-flash", "gemini-3.6-flash"]
     assert len(set(names)) == len(names)
 
 
