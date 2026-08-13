@@ -18,6 +18,7 @@ from summarizer import (
     TRUNCATED_SENTINEL,
 )
 from log import log_info, log_error, log_warn, log_debug
+import gemini_quota
 from sendToTelegram import (
     send_telegram_message, send_telegram_digest, send_telegram_teaser,
     send_telegram_text, build_teaser,
@@ -1056,6 +1057,12 @@ def main():
                     f"{k}={v}" for k, v in sorted(transcript_reasons.items(), key=lambda kv: -kv[1])
                 )
                 log_warn(f"Transcript failures by reason: {breakdown}")
+
+            # What is left to spend today, per model. Without this the first
+            # sign of an exhausted budget is summaries quietly not arriving.
+            gemini_budget = gemini_quota.report()
+            if gemini_budget:
+                log_info(f"Gemini daily budget: {gemini_budget}")
 
             _alert_delivery_stalled(
                 TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, outcomes, transcript_reasons

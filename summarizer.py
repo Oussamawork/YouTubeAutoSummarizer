@@ -2,6 +2,7 @@ import os
 import time
 
 import requests
+import gemini_quota
 from helpers import env_int, env_float
 from log import log_info, log_warn, log_error
 
@@ -294,6 +295,27 @@ def _provider_configs():
     return providers
 
 
+def _metered_model(provider):
+    """
+    The Gemini model whose daily quota this provider spends, or None when the
+    provider isn't Gemini. Groq and custom endpoints have their own limits and
+    must not be counted against — or blocked by — the Gemini budget.
+    """
+    if "generativelanguage.googleapis.com" in (provider.get("base_url") or ""):
+        return provider.get("model")
+    return None
+
+
+def _provider_is_spent(provider):
+    """True when this provider can't serve another request right now: either it
+    failed with a quota error earlier in this run, or its model's daily free
+    requests are already used up (which outlives the run)."""
+    if provider["name"] in _EXHAUSTED_PROVIDERS:
+        return True
+    model = _metered_model(provider)
+    return bool(model) and gemini_quota.is_exhausted(model)
+
+
 def _extract_summary(data):
     """Pull the assistant message text out of an OpenAI-style response."""
     try:
@@ -446,6 +468,12 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
             return ""
 
         if resp.status_code == 200:
+            # One request served, so one request spent from this model's daily
+            # free-tier budget. Counted here rather than at the call site so an
+            # escalation retry — which is a second request — is counted too.
+            metered = _metered_model(provider)
+            if metered:
+                gemini_quota.record(metered)
             try:
                 data = resp.json()
             except ValueError as e:
@@ -490,6 +518,9 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
                 time.sleep(wait)
                 continue
             log_warn(f"{provider['name']} rate-limited (429) after retries; treating as quota exhausted.")
+            metered = _metered_model(provider)
+            if metered:
+                gemini_quota.mark_exhausted(metered)
             return QUOTA_EXHAUSTED_SENTINEL
 
         if resp.status_code in TRANSIENT_STATUS and attempt < LLM_MAX_RETRIES:
@@ -538,7 +569,7 @@ def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
 
     quota_hit = False
     for provider in providers:
-        if provider["name"] in _EXHAUSTED_PROVIDERS:
+        if _provider_is_spent(provider):
             log_info(f"Skipping {provider['name']} (quota exhausted earlier this run).")
             quota_hit = True
             continue
@@ -598,7 +629,7 @@ def summarize_transcript(transcript, title=None, compact=False):
     truncated_hit = False
     for provider in providers:
         # Skip providers already known to be quota-exhausted earlier this run.
-        if provider["name"] in _EXHAUSTED_PROVIDERS:
+        if _provider_is_spent(provider):
             log_info(f"Skipping {provider['name']} (quota exhausted earlier this run).")
             quota_hit = True
             continue

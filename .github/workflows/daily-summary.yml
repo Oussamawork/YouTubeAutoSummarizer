@@ -118,7 +118,7 @@ jobs:
       - name: Persist dedup state and signals
         if: always()  # commit progress even if the scraper step failed mid-run
         run: |
-          if git status --porcelain seen_videos.json data/signals.jsonl data/supadata_usage.json | grep -q .; then
+          if git status --porcelain seen_videos.json data/signals.jsonl data/supadata_usage.json data/gemini_usage.json | grep -q .; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add seen_videos.json
@@ -127,6 +127,12 @@ jobs:
             fi
             if [ -f data/supadata_usage.json ]; then
               git add data/supadata_usage.json
+            fi
+            # Per-model daily request counts. Committed for the same reason as
+            # the Supadata counter: each run is a fresh runner, so without this
+            # every run rediscovers a spent model by spending a request on it.
+            if [ -f data/gemini_usage.json ]; then
+              git add data/gemini_usage.json
             fi
             git commit -m "chore: update seen videos and signals [skip ci]"
             # Rebase onto any concurrent change, then push — retry on rejection,
