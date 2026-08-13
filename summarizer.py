@@ -61,7 +61,21 @@ GEMINI_MAX_INPUT_CHARS = env_int("GEMINI_MAX_INPUT_CHARS", 120000)  # 1M window,
 # runs on GEMINI_TRANSCRIPT_MODELS (transcript.py) and is deliberately kept off
 # this list: a 123k-token video call must never spend the summary budget.
 GEMINI_DEFAULT_MODEL = "gemini-3.7-flash"
-GEMINI_DEFAULT_FALLBACKS = "gemini-3-flash-preview,gemini-2.5-flash"
+# Only 3.6 backs up 3.7. The summary *is* the product, and the older Flash
+# generations are a visible drop in quality, so the chain buys a second daily
+# quota of comparable output rather than a longer tail of weaker ones. When both
+# are spent the video defers and goes out on the next run, which is the right
+# trade: late and good beats prompt and worse.
+GEMINI_DEFAULT_FALLBACKS = "gemini-3.6-flash"
+# Models permitted to write a summary, whatever else is configured. Model
+# choice is visible in the output, so this is a hard guarantee rather than a
+# default: a stale GEMINI_MODEL repo variable, a GROQ_API_KEY, or a custom
+# LLM_* endpoint would otherwise quietly hand summaries to a weaker model. A
+# request that no allowed model can serve defers to the next run instead.
+# Same source of truth as the chain above, so the two can't drift. Set
+# SUMMARY_MODELS to a comma-separated roster to change it, or to "*" to allow
+# any configured provider.
+SUMMARY_MODELS_DEFAULT = f"{GEMINI_DEFAULT_MODEL},{GEMINI_DEFAULT_FALLBACKS}"
 # Groq reserves max_tokens against TPM at admission, so input AND requested
 # output must both fit the per-minute budget or the call is rejected before
 # inference. ~3k input tokens leaves room for the reserved output.
@@ -249,8 +263,26 @@ def _gemini_models():
     return models
 
 
+def _summary_allowlist():
+    """
+    Models allowed to produce a summary, or None when unrestricted.
+
+    An unset GitHub Actions variable arrives as "", which must mean "use the
+    default roster" — reading it as "no restriction" would silently undo the
+    guarantee exactly when nobody configured anything. Disabling is therefore
+    explicit: SUMMARY_MODELS="*".
+    """
+    raw = (os.getenv("SUMMARY_MODELS") or SUMMARY_MODELS_DEFAULT).strip()
+    if raw == "*":
+        return None
+    return {model.strip() for model in raw.split(",") if model.strip()}
+
+
 def _provider_configs():
-    """Build the ordered list of configured LLM providers from the environment."""
+    """
+    Build the ordered list of configured LLM providers from the environment,
+    keeping only models allowed to write a summary (see _summary_allowlist).
+    """
     providers = []
 
     # `or` (not a getenv default): an unconfigured GitHub Actions repo variable
@@ -292,7 +324,19 @@ def _provider_configs():
             "max_input_chars": GROQ_MAX_INPUT_CHARS,
         })
 
-    return providers
+    allowed = _summary_allowlist()
+    if allowed is None:
+        return providers
+    kept = [p for p in providers if p["model"] in allowed]
+    blocked = [p["model"] for p in providers if p["model"] not in allowed]
+    if blocked:
+        # Loud, because this is configuration being overruled: someone set a
+        # provider up and it is not being used.
+        log_warn(
+            f"Ignoring provider model(s) not allowed to summarize: {', '.join(blocked)}. "
+            f"Allowed: {', '.join(sorted(allowed))} (set SUMMARY_MODELS to change)."
+        )
+    return kept
 
 
 def _metered_model(provider):
@@ -562,8 +606,9 @@ def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
     providers = _provider_configs()
     if not providers:
         log_warn(
-            "No LLM provider configured. Set GEMINI_API_KEY, GROQ_API_KEY, or "
-            "LLM_API_KEY + LLM_BASE_URL to enable completions."
+            "No usable LLM provider. Set GEMINI_API_KEY, GROQ_API_KEY, or "
+            "LLM_API_KEY + LLM_BASE_URL — and check SUMMARY_MODELS if a "
+            "provider is configured but disallowed."
         )
         return ""
 
@@ -620,10 +665,14 @@ def summarize_transcript(transcript, title=None, compact=False):
     providers = _provider_configs()
     if not providers:
         log_warn(
-            "No LLM provider configured. Set GEMINI_API_KEY, GROQ_API_KEY, or "
-            "LLM_API_KEY + LLM_BASE_URL to enable summarization."
+            "No usable LLM provider. Set GEMINI_API_KEY, GROQ_API_KEY, or "
+            "LLM_API_KEY + LLM_BASE_URL — and check SUMMARY_MODELS if a "
+            "provider is configured but disallowed."
         )
-        return ""
+        # Deferred, not empty: "" is a permanent failure that advances the
+        # watermark and loses the video. Misconfiguration must cost a delay,
+        # never a summary — and the run's stalled-delivery alert then fires.
+        return QUOTA_EXHAUSTED_SENTINEL
 
     quota_hit = False
     truncated_hit = False

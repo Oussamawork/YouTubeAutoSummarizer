@@ -40,7 +40,7 @@ class TestModelList:
     def test_default(self, monkeypatch):
         monkeypatch.delenv("GEMINI_TRANSCRIPT_MODELS", raising=False)
         assert transcript._gemini_transcript_models() == [
-            "gemini-3.6-flash", "gemini-3.5-flash",
+            "gemini-3.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash",
         ]
 
     def test_override(self, monkeypatch):
@@ -51,7 +51,7 @@ class TestModelList:
         # An unconfigured GitHub Actions variable arrives as "", which must not
         # become an empty model list (that would silently disable the source).
         monkeypatch.setenv("GEMINI_TRANSCRIPT_MODELS", "")
-        assert transcript._gemini_transcript_models()[0] == "gemini-3.6-flash"
+        assert transcript._gemini_transcript_models()[0] == "gemini-3.5-flash"
 
 
 class TestTextExtraction:
@@ -82,21 +82,21 @@ class TestFetchGeminiTranscript:
         text, exhausted, reason = transcript._fetch_gemini_transcript("vid00000001")
         assert text.startswith("word")
         assert (exhausted, reason) == (False, "gemini_ok")
-        assert len(calls) == 1 and "gemini-3.6-flash" in calls[0]
+        assert len(calls) == 1 and "gemini-3.5-flash" in calls[0]
 
     def test_rotates_past_a_model_out_of_quota(self, monkeypatch, gemini_key):
         seen = []
 
         def fake_post(url, **kwargs):
             seen.append(url)
-            if "gemini-3.6-flash" in url:
+            if "gemini-3.5-flash" in url:
                 return FakeResponse(status_code=429, text="RESOURCE_EXHAUSTED")
             return FakeResponse(payload=_payload(LONG))
 
         monkeypatch.setattr(transcript.requests, "post", fake_post)
         text, exhausted, reason = transcript._fetch_gemini_transcript("vid00000001")
         assert text and reason == "gemini_ok" and exhausted is False
-        assert len(seen) == 2 and "gemini-3.5-flash" in seen[1]
+        assert len(seen) == 2 and "gemini-3-flash-preview" in seen[1]
 
     def test_all_models_out_of_quota_defers(self, monkeypatch, gemini_key):
         monkeypatch.setattr(
@@ -133,8 +133,8 @@ class TestFetchGeminiTranscript:
         first = transcript._fetch_gemini_transcript("vid00000001")
         second = transcript._fetch_gemini_transcript("vid00000002")
         assert first == second == ("", True, "gemini_quota")
-        # Two models asked on the first video, none on the second.
-        assert len(calls) == 2
+        # Every model asked once on the first video, none on the second.
+        assert len(calls) == len(transcript._gemini_transcript_models())
 
     def test_no_key_is_skipped_quietly(self, monkeypatch):
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)

@@ -222,9 +222,13 @@ def test_summarize_empty_transcript():
     assert summarizer.summarize_transcript("   ") == ""
 
 
-def test_summarize_no_providers(monkeypatch):
+def test_summarize_no_providers_defers_instead_of_failing(monkeypatch):
+    # Not "": an empty summary is a permanent outcome — the caller marks the
+    # video decided and it is never revisited. A misconfiguration (no key, or
+    # every provider disallowed by SUMMARY_MODELS) must cost a delay, not the
+    # video, and the run's stalled-delivery alert then makes it visible.
     monkeypatch.setattr(summarizer, "_provider_configs", lambda: [])
-    assert summarizer.summarize_transcript("some text") == ""
+    assert summarizer.summarize_transcript("some text") == summarizer.QUOTA_EXHAUSTED_SENTINEL
 
 
 def _one_provider():
@@ -377,32 +381,26 @@ def test_provider_model_empty_env_falls_back(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     providers = summarizer._provider_configs()
     # Strongest Flash for the summary, then models with their own daily quota.
-    assert [p["model"] for p in providers] == [
-        "gemini-3.7-flash", "gemini-3-flash-preview", "gemini-2.5-flash",
-    ]
+    assert [p["model"] for p in providers] == ["gemini-3.7-flash", "gemini-3.6-flash"]
 
 
 def test_gemini_no_duplicate_when_pinned_to_a_fallback(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "k")
-    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")  # also the fallback
     monkeypatch.delenv("GEMINI_FALLBACK_MODELS", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     models = [p["model"] for p in summarizer._provider_configs()]
     # Pinned model runs first and is not called twice.
-    assert models[0] == "gemini-2.5-flash"
-    assert models.count("gemini-2.5-flash") == 1
+    assert models == ["gemini-3.6-flash"]
 
 
 def test_gemini_fallbacks_are_configurable(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    # The chain builder itself; whether those models are *allowed* to summarize
+    # is the separate guarantee covered by TestSummaryModelGuarantee.
     monkeypatch.setenv("GEMINI_MODEL", "gemini-3.7-flash")
     monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "alpha, beta")
-    monkeypatch.delenv("LLM_API_KEY", raising=False)
-    monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    assert [p["model"] for p in summarizer._provider_configs()] == [
-        "gemini-3.7-flash", "alpha", "beta",
-    ]
+    assert summarizer._gemini_models() == ["gemini-3.7-flash", "alpha", "beta"]
 
 
 def test_each_gemini_model_is_its_own_quota_bucket(monkeypatch):
@@ -415,7 +413,7 @@ def test_each_gemini_model_is_its_own_quota_bucket(monkeypatch):
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     names = [p["name"] for p in summarizer._provider_configs()]
-    assert names == ["gemini-3.7-flash", "gemini-3-flash-preview", "gemini-2.5-flash"]
+    assert names == ["gemini-3.7-flash", "gemini-3.6-flash"]
     assert len(set(names)) == len(names)
 
 
@@ -454,3 +452,70 @@ def test_bad_preferred_model_falls_through_to_next_provider(monkeypatch):
     monkeypatch.setattr(summarizer, "_EXHAUSTED_PROVIDERS", set())
     assert summarizer.summarize_transcript("some transcript") == "SUMMARY"
     assert calls == ["bad-model", "gemini-2.5-flash"]
+
+
+
+class TestSummaryModelGuarantee:
+    """Only 3.7 or 3.6 may write a summary. Defaults express the intent; this
+    guard is what makes it true when configuration disagrees."""
+
+    def _env(self, monkeypatch):
+        for var in ("GEMINI_MODEL", "GEMINI_FALLBACK_MODELS", "SUMMARY_MODELS",
+                    "LLM_API_KEY", "LLM_BASE_URL", "GROQ_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("GEMINI_API_KEY", "k")
+
+    def test_default_roster_is_37_and_36(self, monkeypatch):
+        self._env(monkeypatch)
+        assert summarizer._summary_allowlist() == {"gemini-3.7-flash", "gemini-3.6-flash"}
+
+    def test_groq_cannot_write_a_summary(self, monkeypatch):
+        # A configured GROQ_API_KEY would otherwise hand summaries to
+        # llama-3.3-70b once both Gemini models were spent.
+        self._env(monkeypatch)
+        monkeypatch.setenv("GROQ_API_KEY", "g")
+        models = [p["model"] for p in summarizer._provider_configs()]
+        assert models == ["gemini-3.7-flash", "gemini-3.6-flash"]
+
+    def test_custom_llm_endpoint_cannot_write_a_summary(self, monkeypatch):
+        # The custom provider is first in the chain, so without the guard it
+        # would take precedence over 3.7 for every summary.
+        self._env(monkeypatch)
+        monkeypatch.setenv("LLM_API_KEY", "k")
+        monkeypatch.setenv("LLM_BASE_URL", "http://somewhere")
+        monkeypatch.setenv("LLM_MODEL", "gpt-4o-mini")
+        models = [p["model"] for p in summarizer._provider_configs()]
+        assert "gpt-4o-mini" not in models
+        assert models == ["gemini-3.7-flash", "gemini-3.6-flash"]
+
+    def test_a_stale_gemini_model_variable_is_overruled(self, monkeypatch):
+        # The exact trap this repo was in: GEMINI_MODEL left over from an
+        # earlier default silently wins over the code's chain.
+        self._env(monkeypatch)
+        monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+        models = [p["model"] for p in summarizer._provider_configs()]
+        assert "gemini-2.5-flash" not in models
+        assert models == ["gemini-3.6-flash"]
+
+    def test_unset_actions_variable_keeps_the_guarantee(self, monkeypatch):
+        # An unconfigured repo variable arrives as "" — it must mean "use the
+        # default roster", not "allow anything".
+        self._env(monkeypatch)
+        monkeypatch.setenv("SUMMARY_MODELS", "")
+        monkeypatch.setenv("GROQ_API_KEY", "g")
+        assert [p["model"] for p in summarizer._provider_configs()] == [
+            "gemini-3.7-flash", "gemini-3.6-flash",
+        ]
+
+    def test_star_opts_out_explicitly(self, monkeypatch):
+        self._env(monkeypatch)
+        monkeypatch.setenv("SUMMARY_MODELS", "*")
+        monkeypatch.setenv("GROQ_API_KEY", "g")
+        assert "llama-3.3-70b-versatile" in [p["model"] for p in summarizer._provider_configs()]
+
+    def test_transcript_models_cannot_write_summaries_either(self, monkeypatch):
+        import transcript
+
+        self._env(monkeypatch)
+        allowed = summarizer._summary_allowlist()
+        assert allowed.isdisjoint(transcript._gemini_transcript_models())
