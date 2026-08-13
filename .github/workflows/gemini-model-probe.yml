@@ -116,19 +116,27 @@ jobs:
           # side, which is the whole point: it bypasses the runner IP block that
           # kills youtube-transcript-api, and costs no Supadata credits.
           VIDEO = "https://www.youtube.com/watch?v=oNd79ptPrIo"  # a currently-deferred video
-          video_payload = {
-              "contents": [{"parts": [
-                  {"text": "In one sentence, what is this video about?"},
-                  {"file_data": {"file_uri": VIDEO}},
-              ]}],
-              "generationConfig": {"maxOutputTokens": 800},
-              # Low media resolution keeps a 20-minute video inside the free
-              # tier's per-minute token budget.
-              "mediaResolution": "MEDIA_RESOLUTION_LOW",
-          }
-          for model in ["gemini-3.7-flash", "gemini-2.5-flash"]:
-              status, body = call(f"{BASE}/models/{model}:generateContent", video_payload)
-              print(f"\n  {model} + YouTube URL -> HTTP {status}")
+          def video_payload(low_res):
+              # mediaResolution lives inside generationConfig, not at the top
+              # level. Low resolution is what keeps a 20-minute video inside the
+              # free tier's per-minute token budget, so both are measured.
+              config = {"maxOutputTokens": 800}
+              if low_res:
+                  config["mediaResolution"] = "MEDIA_RESOLUTION_LOW"
+              return {
+                  "contents": [{"parts": [
+                      {"text": "In one sentence, what is this video about?"},
+                      {"file_data": {"file_uri": VIDEO}},
+                  ]}],
+                  "generationConfig": config,
+              }
+
+          for model, low_res in [("gemini-3.7-flash", True), ("gemini-3.7-flash", False),
+                                 ("gemini-2.5-flash", True)]:
+              status, body = call(f"{BASE}/models/{model}:generateContent",
+                                  video_payload(low_res))
+              res = "low-res" if low_res else "default-res"
+              print(f"\n  {model} + YouTube URL ({res}) -> HTTP {status}")
               if status == 200 and isinstance(body, dict):
                   usage = body.get("usageMetadata", {})
                   print(f"    tokens in/out/total={usage.get('promptTokenCount')}/"
