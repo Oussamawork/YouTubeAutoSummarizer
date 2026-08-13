@@ -2,6 +2,7 @@ import os
 import time
 
 import requests
+import gemini_quota
 from helpers import env_int, env_float
 from log import log_info, log_warn, log_error
 
@@ -21,7 +22,11 @@ from log import log_info, log_warn, log_error
 # Generous because the prompt can now carry a very long transcript and the
 # response budget can escalate; 60s was sized for a 48k-char input.
 LLM_TIMEOUT = env_int("LLM_TIMEOUT", 120)
-LLM_MAX_TOKENS = env_int("LLM_MAX_TOKENS", 2000)
+# 4000, not 2000: Gemini 3 counts thinking tokens against this cap, and an
+# escalation re-sends the entire transcript as a second request — which now
+# costs one of a model's 20 free requests for the day. Paying a few hundred
+# tokens up front is cheaper than paying a whole request to retry.
+LLM_MAX_TOKENS = env_int("LLM_MAX_TOKENS", 4000)
 # A response cut off at max_tokens is retried with a bigger budget, doubling up
 # to this ceiling. Shipping a half-written summary is worse than spending a
 # second request: the reader can't tell it was cut, and the video is marked
@@ -50,6 +55,13 @@ LLM_MAX_TRANSCRIPT_CHARS = env_int("LLM_MAX_TRANSCRIPT_CHARS", 120000)
 # bites long before the context window does — so each provider declares what it
 # can actually take and the prompt is trimmed to fit at call time.
 GEMINI_MAX_INPUT_CHARS = env_int("GEMINI_MAX_INPUT_CHARS", 120000)  # 1M window, TPM-bound
+# Summaries are the product, so they get the strongest Flash model; the
+# fallbacks exist because each model carries its own 20-requests-per-day free
+# tier, so a busy day can draw on four budgets instead of one. Transcription
+# runs on GEMINI_TRANSCRIPT_MODELS (transcript.py) and is deliberately kept off
+# this list: a 123k-token video call must never spend the summary budget.
+GEMINI_DEFAULT_MODEL = "gemini-3.7-flash"
+GEMINI_DEFAULT_FALLBACKS = "gemini-3-flash-preview,gemini-2.5-flash"
 # Groq reserves max_tokens against TPM at admission, so input AND requested
 # output must both fit the per-minute budget or the call is rejected before
 # inference. ~3k input tokens leaves room for the reserved output.
@@ -218,6 +230,25 @@ SUMMARY_USER_TEMPLATE = (
 )
 
 
+def _gemini_models():
+    """
+    Gemini models to try, in order: the preferred one then the fallbacks, with
+    duplicates dropped so pinning GEMINI_MODEL to a fallback doesn't call it
+    twice. Read at call time so tests and reloads see the current environment;
+    `or` (not a getenv default) because an unconfigured GitHub Actions variable
+    arrives as "" and must fall back to the default rather than becoming a
+    literal empty model name.
+    """
+    preferred = os.getenv("GEMINI_MODEL") or GEMINI_DEFAULT_MODEL
+    raw = os.getenv("GEMINI_FALLBACK_MODELS") or GEMINI_DEFAULT_FALLBACKS
+    models, seen = [], set()
+    for model in [preferred] + [m.strip() for m in raw.split(",")]:
+        if model and model not in seen:
+            seen.add(model)
+            models.append(model)
+    return models
+
+
 def _provider_configs():
     """Build the ordered list of configured LLM providers from the environment."""
     providers = []
@@ -236,25 +267,19 @@ def _provider_configs():
 
     if os.getenv("GEMINI_API_KEY"):
         gemini_base = "https://generativelanguage.googleapis.com/v1beta/openai"
-        # Preferred model first (Gemini 3 Flash: same free RPM as 2.5-flash but
-        # ~6x the daily request quota). If its ID is rejected or the model is
-        # unavailable, the chain falls through to the proven 2.5-flash entry in
-        # the same run — a bad preferred ID costs one failed call, never a
-        # missed summary.
-        preferred = os.getenv("GEMINI_MODEL") or "gemini-3-flash-preview"
-        providers.append({
-            "name": "gemini",
-            "base_url": gemini_base,
-            "api_key": os.getenv("GEMINI_API_KEY"),
-            "model": preferred,
-            "max_input_chars": GEMINI_MAX_INPUT_CHARS,
-        })
-        if preferred != "gemini-2.5-flash":
+        # Free-tier quota is per model — 20 requests per day each — so the
+        # fallbacks are not just insurance against a bad model ID, they are
+        # extra daily capacity. Measured 2026-08-13: the pipeline had already
+        # peaked at 26/20 requests on its preferred model while three other
+        # Flash models sat nearly unused, i.e. summaries were being lost to
+        # quota with capacity to spare. Each entry is named for its model so
+        # exhaustion is tracked per model rather than per provider.
+        for model in _gemini_models():
             providers.append({
-                "name": "gemini-2.5-flash",
+                "name": model,
                 "base_url": gemini_base,
                 "api_key": os.getenv("GEMINI_API_KEY"),
-                "model": "gemini-2.5-flash",
+                "model": model,
                 "max_input_chars": GEMINI_MAX_INPUT_CHARS,
             })
 
@@ -268,6 +293,27 @@ def _provider_configs():
         })
 
     return providers
+
+
+def _metered_model(provider):
+    """
+    The Gemini model whose daily quota this provider spends, or None when the
+    provider isn't Gemini. Groq and custom endpoints have their own limits and
+    must not be counted against — or blocked by — the Gemini budget.
+    """
+    if "generativelanguage.googleapis.com" in (provider.get("base_url") or ""):
+        return provider.get("model")
+    return None
+
+
+def _provider_is_spent(provider):
+    """True when this provider can't serve another request right now: either it
+    failed with a quota error earlier in this run, or its model's daily free
+    requests are already used up (which outlives the run)."""
+    if provider["name"] in _EXHAUSTED_PROVIDERS:
+        return True
+    model = _metered_model(provider)
+    return bool(model) and gemini_quota.is_exhausted(model)
 
 
 def _extract_summary(data):
@@ -422,6 +468,12 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
             return ""
 
         if resp.status_code == 200:
+            # One request served, so one request spent from this model's daily
+            # free-tier budget. Counted here rather than at the call site so an
+            # escalation retry — which is a second request — is counted too.
+            metered = _metered_model(provider)
+            if metered:
+                gemini_quota.record(metered)
             try:
                 data = resp.json()
             except ValueError as e:
@@ -466,6 +518,9 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
                 time.sleep(wait)
                 continue
             log_warn(f"{provider['name']} rate-limited (429) after retries; treating as quota exhausted.")
+            metered = _metered_model(provider)
+            if metered:
+                gemini_quota.mark_exhausted(metered)
             return QUOTA_EXHAUSTED_SENTINEL
 
         if resp.status_code in TRANSIENT_STATUS and attempt < LLM_MAX_RETRIES:
@@ -514,7 +569,7 @@ def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
 
     quota_hit = False
     for provider in providers:
-        if provider["name"] in _EXHAUSTED_PROVIDERS:
+        if _provider_is_spent(provider):
             log_info(f"Skipping {provider['name']} (quota exhausted earlier this run).")
             quota_hit = True
             continue
@@ -574,7 +629,7 @@ def summarize_transcript(transcript, title=None, compact=False):
     truncated_hit = False
     for provider in providers:
         # Skip providers already known to be quota-exhausted earlier this run.
-        if provider["name"] in _EXHAUSTED_PROVIDERS:
+        if _provider_is_spent(provider):
             log_info(f"Skipping {provider['name']} (quota exhausted earlier this run).")
             quota_hit = True
             continue

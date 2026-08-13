@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
 
 import requests
+import gemini_quota
 from helpers import env_flag, env_int
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
@@ -194,6 +195,173 @@ def budget_status(today=None):
         usage.get("day_count", 0),
         max(0, monthly_budget() - usage.get("count", 0)),
     )
+
+
+# --- Gemini video transcripts -----------------------------------------------
+#
+# Supadata's free tier runs dry (it did on 2026-08-11, and the pipeline went
+# quiet for two days), and youtube-transcript-api is IP-blocked from CI runners,
+# so a spent credit pool used to mean no summaries at all. Gemini accepts a
+# YouTube URL directly and fetches the video server-side: no credit, and no
+# runner IP involved. Measured on a 20-minute video: ~123k input tokens, ~6k
+# output, ~125 seconds.
+#
+# Free-tier quota is per model (5 RPM / 250k TPM / 20 RPD), so a list of models
+# is tried in turn — each has its own daily bucket. Summarization deliberately
+# runs on a different model (GEMINI_MODEL, gemini-3.7-flash), so transcription
+# can never eat the summary budget.
+GEMINI_TRANSCRIPT_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
+# Kept disjoint from summarizer's model chain on purpose: two models here (40
+# requests/day) comfortably covers the ~9 videos a day these channels publish,
+# and every model left out stays available for summaries.
+GEMINI_TRANSCRIPT_MODELS_DEFAULT = "gemini-3.6-flash,gemini-3.5-flash"
+# Measured at ~125s for a 20-minute video; 2.5-flash timed out at 60s, which is
+# what a too-tight timeout looks like from the outside.
+GEMINI_TRANSCRIPT_TIMEOUT = env_int("GEMINI_TRANSCRIPT_TIMEOUT", 300)
+GEMINI_TRANSCRIPT_MAX_OUTPUT_TOKENS = env_int("GEMINI_TRANSCRIPT_MAX_OUTPUT_TOKENS", 32768)
+GEMINI_TRANSCRIPT_RETRY_STATUS = {500, 502, 503, 504}
+GEMINI_TRANSCRIPT_MAX_RETRIES = 2
+GEMINI_TRANSCRIPT_RETRY_BACKOFF = 5  # base seconds, multiplied by the attempt
+# A model that answers with a sentence *about* the video instead of its words
+# has failed at transcription. Videos this short are already filtered out by the
+# duration gate, so anything below this is a refusal or a summary, not speech.
+GEMINI_MIN_TRANSCRIPT_CHARS = env_int("GEMINI_MIN_TRANSCRIPT_CHARS", 500)
+GEMINI_TRANSCRIPT_PROMPT = (
+    "Transcribe the spoken audio of this video verbatim, in full, as plain "
+    "text. Do not summarize, do not paraphrase, do not add commentary, "
+    "speaker labels or timestamps. Output only the transcript text."
+)
+
+
+def _gemini_transcript_models():
+    """
+    Transcription models, in order. Read at call time so tests and reloads see
+    the current environment; an unset GitHub Actions variable arrives as "",
+    which must fall back to the default rather than becoming an empty list.
+    """
+    raw = os.getenv("GEMINI_TRANSCRIPT_MODELS") or GEMINI_TRANSCRIPT_MODELS_DEFAULT
+    return [model.strip() for model in raw.split(",") if model.strip()]
+
+
+def _gemini_text_from_payload(data):
+    """Concatenated text parts of a generateContent response ("" if none)."""
+    if not isinstance(data, dict):
+        return ""
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    if not isinstance(parts, list):
+        return ""
+    return "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+
+
+def _fetch_gemini_with_model(vid, model, api_key):
+    """
+    One model's attempt at transcribing a video. Returns (text, reason); an
+    empty text with reason "quota" means this model's daily requests are spent,
+    which tells the caller to rotate rather than retry.
+    """
+    payload = {
+        "contents": [{"parts": [
+            {"text": GEMINI_TRANSCRIPT_PROMPT},
+            {"file_data": {"file_uri": f"https://www.youtube.com/watch?v={vid}"}},
+        ]}],
+        "generationConfig": {
+            "maxOutputTokens": GEMINI_TRANSCRIPT_MAX_OUTPUT_TOKENS,
+            "temperature": 0.0,
+        },
+    }
+    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+    url = GEMINI_TRANSCRIPT_URL.format(model=model)
+    log_info(f"Fetching transcript via Gemini ({model}) for video ID: {vid}")
+
+    for attempt in range(1, GEMINI_TRANSCRIPT_MAX_RETRIES + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=payload,
+                                 timeout=GEMINI_TRANSCRIPT_TIMEOUT)
+        except requests.RequestException as e:
+            log_warn(f"Gemini request error (attempt {attempt}/{GEMINI_TRANSCRIPT_MAX_RETRIES}): {e}")
+            if attempt < GEMINI_TRANSCRIPT_MAX_RETRIES:
+                time.sleep(GEMINI_TRANSCRIPT_RETRY_BACKOFF * attempt)
+                continue
+            return "", "unreachable"
+
+        # 429 is the free tier's daily/per-minute cap. Retrying the same model
+        # cannot help — the next model has its own bucket.
+        if resp.status_code == 429:
+            log_warn(f"Gemini {model} is rate-limited/out of daily quota.")
+            return "", "quota"
+
+        if resp.status_code in GEMINI_TRANSCRIPT_RETRY_STATUS and attempt < GEMINI_TRANSCRIPT_MAX_RETRIES:
+            log_warn(f"Transient Gemini status {resp.status_code}; retrying.")
+            time.sleep(GEMINI_TRANSCRIPT_RETRY_BACKOFF * attempt)
+            continue
+
+        if resp.status_code != 200:
+            log_warn(f"Gemini {model} returned {resp.status_code}: {resp.text[:200]}")
+            return "", f"http_{resp.status_code}"
+
+        try:
+            text = _gemini_text_from_payload(resp.json())
+        except ValueError as e:
+            log_error(f"Gemini returned invalid JSON: {e}")
+            return "", "invalid_json"
+
+        if len(text) < GEMINI_MIN_TRANSCRIPT_CHARS:
+            # Either a refusal or a summary of the video; both are useless as a
+            # transcript, and another model may well answer properly.
+            log_warn(
+                f"Gemini {model} returned {len(text)} chars, under the "
+                f"{GEMINI_MIN_TRANSCRIPT_CHARS}-char floor — not a transcript."
+            )
+            return "", "too_short"
+
+        log_info(f"Gemini ({model}) returned {len(text)} chars")
+        return text, "ok"
+
+    return "", "retries_exhausted"
+
+
+def _fetch_gemini_transcript(vid):
+    """
+    Transcribe a video with the first model that can. Returns
+    (text, quota_exhausted, reason): quota_exhausted is True when every model
+    was out of daily requests, which is a "come back later", not a video
+    without captions — the caller defers instead of writing the video off.
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "", False, "no_gemini_key"
+
+    models = _gemini_transcript_models()
+    quota_hit = 0
+    reason = "no_gemini_key"
+    for index, model in enumerate(models):
+        # A model already at its daily cap is still capped: asking again costs a
+        # round trip per video per model to be told the same thing, and the cap
+        # outlives the run, so the count has to as well.
+        if gemini_quota.is_exhausted(model):
+            log_info(f"Skipping Gemini {model} (daily quota already spent).")
+            quota_hit, reason = quota_hit + 1, "quota"
+            continue
+        text, reason = _fetch_gemini_with_model(vid, model, api_key)
+        if text:
+            gemini_quota.record(model)
+            return text, False, "gemini_ok"
+        if reason == "quota":
+            gemini_quota.mark_exhausted(model)
+            quota_hit += 1
+        if index + 1 < len(models):
+            log_warn(f"Gemini {model} failed ({reason}); trying {models[index + 1]}.")
+
+    if quota_hit == len(models):
+        log_warn(f"All {len(models)} Gemini transcript model(s) are out of daily quota.")
+        return "", True, "gemini_quota"
+    log_warn(f"All {len(models)} Gemini transcript model(s) failed (last: {reason}).")
+    return "", False, f"gemini_{reason}"
 
 
 def _extract_video_id(video_url_or_id):
@@ -456,14 +624,16 @@ def get_transcript_from_video(video_id):
     """
     Fetch the transcript for a YouTube video.
 
-    Tries Supadata first (free tier, works from blocked CI IPs) when a key is
-    set, then falls back to youtube-transcript-api (free, no key, works locally).
+    Sources are tried cheapest-first: Supadata (one credit, ~9k tokens of
+    transcript), then Gemini from the video itself (no credit, but ~123k tokens
+    and one request from a per-model daily quota), then youtube-transcript-api
+    (free, no key, works locally — but IP-blocked from CI runners).
 
     `video_id` may be a full URL or a bare ID. Always returns a dict shaped
     {"transcript": <str>, "budget_exhausted": <bool>, "reason": <str>} so
     callers never have to handle exceptions or None; an empty transcript means
-    none was available, budget_exhausted marks the "we chose not to spend a
-    credit" case (retry later rather than report as missing), and reason names
+    none was available, budget_exhausted marks the "every source we metered is
+    spent" case (retry later rather than report as missing), and reason names
     the outcome so a run can report why fetches failed.
     """
     vid = _extract_video_id(video_id)
@@ -472,6 +642,16 @@ def get_transcript_from_video(video_id):
         return {"transcript": "", "budget_exhausted": False, "reason": "bad_video_id"}
 
     text, budget_exhausted, reason = _fetch_supadata(vid)
+    if not text:
+        gemini_text, gemini_quota, gemini_reason = _fetch_gemini_transcript(vid)
+        if gemini_text:
+            text, reason = gemini_text, gemini_reason
+        elif gemini_reason != "no_gemini_key":
+            # Gemini actually tried, so its outcome is the more informative one.
+            # Its quota being spent defers the video just like Supadata's is:
+            # the transcript exists, we simply have nothing left to spend today.
+            reason = gemini_reason
+            budget_exhausted = budget_exhausted or gemini_quota
     if not text:
         fallback = _fetch_youtube_transcript_api(vid)
         if fallback:

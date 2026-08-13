@@ -143,8 +143,12 @@ def test_escalation_is_not_consumed_by_transient_failures(monkeypatch):
     monkeypatch.setattr(summarizer.requests, "post", fake_post)
     monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
     summarizer._call_provider(_provider(), "transcript text")
-    # One 503, then escalation still climbs the full 2000 -> 4000 -> 8000 path.
-    assert caps[-1] == summarizer.LLM_MAX_TOKENS_CEILING
+    # One 503, then escalation still climbs its full doubling path. Asserted
+    # relative to the starting budget rather than against the constant, because
+    # the effective ceiling is derived from wherever the call starts (see
+    # _call_provider) — pinning the constant just re-broke when the default
+    # budget changed, without anything being wrong.
+    assert caps[-1] == caps[0] * 2 ** summarizer.LLM_MAX_ESCALATIONS
 
 
 def test_budget_at_or_above_ceiling_still_escalates(monkeypatch):
@@ -368,21 +372,66 @@ def test_json_mode_sets_response_format(monkeypatch):
 def test_provider_model_empty_env_falls_back(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     monkeypatch.setenv("GEMINI_MODEL", "")  # unset repo variable arrives as ""
+    monkeypatch.delenv("GEMINI_FALLBACK_MODELS", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     providers = summarizer._provider_configs()
-    # Preferred Gemini model first, proven 2.5-flash as same-key fallback.
-    assert providers[0]["model"] == "gemini-3-flash-preview"
-    assert providers[1]["model"] == "gemini-2.5-flash"
+    # Strongest Flash for the summary, then models with their own daily quota.
+    assert [p["model"] for p in providers] == [
+        "gemini-3.7-flash", "gemini-3-flash-preview", "gemini-2.5-flash",
+    ]
 
 
-def test_gemini_no_duplicate_when_pinned_to_25_flash(monkeypatch):
+def test_gemini_no_duplicate_when_pinned_to_a_fallback(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash")
+    monkeypatch.delenv("GEMINI_FALLBACK_MODELS", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
-    providers = summarizer._provider_configs()
-    assert [p["model"] for p in providers] == ["gemini-2.5-flash"]
+    models = [p["model"] for p in summarizer._provider_configs()]
+    # Pinned model runs first and is not called twice.
+    assert models[0] == "gemini-2.5-flash"
+    assert models.count("gemini-2.5-flash") == 1
+
+
+def test_gemini_fallbacks_are_configurable(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.7-flash")
+    monkeypatch.setenv("GEMINI_FALLBACK_MODELS", "alpha, beta")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    assert [p["model"] for p in summarizer._provider_configs()] == [
+        "gemini-3.7-flash", "alpha", "beta",
+    ]
+
+
+def test_each_gemini_model_is_its_own_quota_bucket(monkeypatch):
+    # A 429 on one model must not write off the others: each carries its own
+    # 20-requests-per-day free-tier budget, which is the whole point of the
+    # chain. Provider entries are therefore named per model.
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("GEMINI_FALLBACK_MODELS", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    names = [p["name"] for p in summarizer._provider_configs()]
+    assert names == ["gemini-3.7-flash", "gemini-3-flash-preview", "gemini-2.5-flash"]
+    assert len(set(names)) == len(names)
+
+
+def test_transcription_models_never_share_the_summary_budget(monkeypatch):
+    # transcript.py spends ~123k tokens per call on its own models; if one of
+    # them appeared here too, a day of transcripts would eat the summary quota.
+    import transcript
+
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("GEMINI_FALLBACK_MODELS", raising=False)
+    monkeypatch.delenv("GEMINI_TRANSCRIPT_MODELS", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    summary_models = {p["model"] for p in summarizer._provider_configs()}
+    assert summary_models.isdisjoint(transcript._gemini_transcript_models())
 
 
 def test_bad_preferred_model_falls_through_to_next_provider(monkeypatch):
