@@ -26,7 +26,10 @@ concurrency:
 jobs:
   run-summarizer:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # A Gemini transcript takes ~2 minutes (it processes the video itself),
+    # against ~3 seconds for a Supadata one, so a run that falls back to Gemini
+    # for several videos needs materially more room than the old 20.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repo
@@ -71,6 +74,12 @@ jobs:
           # default, so a run processes everything published that day; set to
           # true to make the pool last until the reset date instead.
           SUPADATA_DAILY_PACING: ${{ vars.SUPADATA_DAILY_PACING }}
+          # Models used to transcribe a video from its YouTube URL when
+          # Supadata has no credits (comma separated, tried in order). Free-tier
+          # quota is per model, so each entry adds its own daily budget; keep
+          # GEMINI_MODEL out of this list so summaries and transcripts never
+          # compete for the same one.
+          GEMINI_TRANSCRIPT_MODELS: ${{ vars.GEMINI_TRANSCRIPT_MODELS }}
           # LLM summarizer (provider-agnostic). Set whichever you use; the
           # summarizer tries the generic LLM_* provider first, then Gemini, then Groq.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
