@@ -212,7 +212,10 @@ def budget_status(today=None):
 GEMINI_TRANSCRIPT_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
-GEMINI_TRANSCRIPT_MODELS_DEFAULT = "gemini-3.6-flash,gemini-3.5-flash,gemini-3-flash-preview"
+# Kept disjoint from summarizer's model chain on purpose: two models here (40
+# requests/day) comfortably covers the ~9 videos a day these channels publish,
+# and every model left out stays available for summaries.
+GEMINI_TRANSCRIPT_MODELS_DEFAULT = "gemini-3.6-flash,gemini-3.5-flash"
 # Measured at ~125s for a 20-minute video; 2.5-flash timed out at 60s, which is
 # what a too-tight timeout looks like from the outside.
 GEMINI_TRANSCRIPT_TIMEOUT = env_int("GEMINI_TRANSCRIPT_TIMEOUT", 300)

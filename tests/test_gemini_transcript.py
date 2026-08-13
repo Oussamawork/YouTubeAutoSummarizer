@@ -40,7 +40,7 @@ class TestModelList:
     def test_default(self, monkeypatch):
         monkeypatch.delenv("GEMINI_TRANSCRIPT_MODELS", raising=False)
         assert transcript._gemini_transcript_models() == [
-            "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash-preview",
+            "gemini-3.6-flash", "gemini-3.5-flash",
         ]
 
     def test_override(self, monkeypatch):
