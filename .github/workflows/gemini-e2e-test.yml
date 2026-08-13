@@ -1,0 +1,155 @@
+name: Gemini end-to-end test (temporary)
+
+# Proves the proposed split before any of it is implemented:
+#   transcript  <- gemini-3.6-flash, from the YouTube URL (no Supadata credit)
+#   summary     <- gemini-3.7-flash, through THIS REPO's real summarizer path
+#     (signals.summarize_with_signals, exactly what scraper._summarize_video
+#      calls in production), so what is measured is the pipeline, not a mock.
+#
+# Nothing is sent to Telegram — this only prints.
+# Temporary: delete once the result is in.
+
+on:
+  push:
+    branches: [claude/telegram-summaries-not-sending-b5421w]
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'Video to test (defaults to one from the stuck backlog)'
+        required: false
+        type: string
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+
+      - name: Transcript via 3.6-flash, then summary via 3.7-flash
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # The summarizer's preferred model for this run: the whole point of
+          # the test is whether 3.7 handles the real summary prompt.
+          GEMINI_MODEL: gemini-3.7-flash
+          LLM_REASONING_EFFORT: low
+          # 3.7 counts thinking against max_tokens (summarizer.py:33-40), so
+          # give the visible answer room.
+          LLM_MAX_TOKENS: '4000'
+          VIDEO_URL: ${{ inputs.video_url }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+
+          KEY = os.environ["GEMINI_API_KEY"]
+          BASE = "https://generativelanguage.googleapis.com/v1beta"
+          HEADERS = {"x-goog-api-key": KEY, "Content-Type": "application/json"}
+
+          # Default: a video that has been stuck in `pending` since the
+          # Supadata credits ran out, so this is a real backlog item.
+          VIDEO = os.environ.get("VIDEO_URL") or "https://www.youtube.com/watch?v=oNd79ptPrIo"
+          TITLE = "Carter Worth: The S&P's Next 10% Move Is Down - Here's What to Buy"
+          CHANNEL = "TheStreet"
+
+          # Transcription models in the order the plan proposes, 2.5 excluded:
+          # it timed out on video input in the earlier probe.
+          TRANSCRIBERS = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash-preview"]
+
+          PROMPT = (
+              "Transcribe the spoken audio of this video verbatim, in full, as plain "
+              "text. Do not summarize, do not paraphrase, do not add commentary, "
+              "speaker labels or timestamps. Output only the transcript text."
+          )
+
+
+          def transcribe(model):
+              """(text, usage, error). Never raises."""
+              payload = {
+                  "contents": [{"parts": [
+                      {"text": PROMPT},
+                      {"file_data": {"file_uri": VIDEO}},
+                  ]}],
+                  "generationConfig": {"maxOutputTokens": 32768, "temperature": 0.0},
+              }
+              req = urllib.request.Request(
+                  f"{BASE}/models/{model}:generateContent",
+                  data=json.dumps(payload).encode(), headers=HEADERS, method="POST")
+              try:
+                  # Video generation is slow; the earlier probe's 60s timeout was
+                  # what killed the 2.5-flash attempt, not the model.
+                  with urllib.request.urlopen(req, timeout=300) as resp:
+                      body = json.loads(resp.read().decode())
+              except urllib.error.HTTPError as e:
+                  raw = e.read().decode(errors="replace")
+                  return "", {}, f"HTTP {e.code}: {raw[:300]}"
+              except Exception as e:
+                  return "", {}, f"{type(e).__name__}: {e}"
+              usage = body.get("usageMetadata", {})
+              try:
+                  parts = body["candidates"][0]["content"]["parts"]
+                  text = "".join(p.get("text", "") for p in parts).strip()
+              except (KeyError, IndexError):
+                  finish = (body.get("candidates") or [{}])[0].get("finishReason")
+                  return "", usage, f"no text part (finishReason={finish})"
+              return text, usage, ""
+
+
+          print("=" * 72)
+          print(f"STEP 1 — TRANSCRIPT FROM {VIDEO}")
+          print("=" * 72)
+          transcript, used_model = "", None
+          for model in TRANSCRIBERS:
+              t0 = time.time()
+              text, usage, err = transcribe(model)
+              elapsed = time.time() - t0
+              print(f"\n  {model}: {elapsed:.1f}s")
+              if err:
+                  print(f"    FAILED: {err}")
+                  continue
+              print(f"    tokens in/out/total={usage.get('promptTokenCount')}/"
+                    f"{usage.get('candidatesTokenCount')}/{usage.get('totalTokenCount')}")
+              print(f"    transcript: {len(text)} chars, ~{len(text.split())} words")
+              print(f"    opening: {text[:300]}...")
+              print(f"    closing: ...{text[-200:]}")
+              transcript, used_model = text, model
+              break
+
+          if not transcript:
+              print("\nNo transcript from any model — stopping.")
+              raise SystemExit(1)
+
+          print()
+          print("=" * 72)
+          print("STEP 2 — SUMMARY VIA THE REPO'S OWN PATH (GEMINI_MODEL=gemini-3.7-flash)")
+          print("=" * 72)
+          # The real production call: scraper._summarize_video prefers the
+          # combined summary+signals call and falls back to the plain one.
+          from signals import summarize_with_signals
+          from summarizer import summarize_transcript
+          from helpers import clean_summary
+
+          t0 = time.time()
+          combined = summarize_with_signals(transcript, TITLE, compact=False,
+                                            channel_name=CHANNEL)
+          if combined is not None:
+              summary, sig = combined
+              path = "combined summary+signals (production's preferred path)"
+          else:
+              summary, sig = summarize_transcript(transcript, TITLE), None
+              path = "plain summary (combined path fell back)"
+          elapsed = time.time() - t0
+
+          print(f"\n  path: {path}")
+          print(f"  elapsed: {elapsed:.1f}s")
+          print(f"  summary: {len(summary or '')} chars")
+          print(f"  signals: {json.dumps(sig)[:400] if sig else None}")
+          print("\n" + "-" * 72)
+          print(clean_summary(summary or "(empty)"))
+          print("-" * 72)
+          print(f"\nSOURCE: transcript={used_model}, summary=gemini-3.7-flash")
+          PY
