@@ -26,17 +26,32 @@ jobs:
       - name: Transcript + summary through the real code path
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-3.7-flash
-          LLM_REASONING_EFFORT: low
-          LLM_MAX_TOKENS: '4000'
-          # Deliberately no SUPADATA_API_KEY: its credits are spent anyway, and
-          # leaving it out proves the Gemini path carries the run on its own.
+          # Deliberately NOT setting GEMINI_MODEL / LLM_MAX_TOKENS: the point is
+          # that the shipped defaults resolve to 3.7 for summaries and to the
+          # separate transcription models, with no repo variables configured.
+          # No SUPADATA_API_KEY either — its credits are spent anyway, so this
+          # proves the Gemini path carries a run on its own.
           MARKET_SIGNALS: 'true'
         run: |
           python - <<'PY'
           import time
           import scraper
+          import summarizer
+          import transcript as transcript_mod
           from transcript import get_transcript_from_video
+
+          print("=" * 72)
+          print("MODEL ROUTING AS SHIPPED (no repo variables set)")
+          print("=" * 72)
+          summary_models = [p["model"] for p in summarizer._provider_configs()]
+          transcript_models = transcript_mod._gemini_transcript_models()
+          print(f"  summaries:   {summary_models}")
+          print(f"  transcripts: {transcript_models}")
+          print(f"  max_tokens:  {summarizer.LLM_MAX_TOKENS}")
+          assert summary_models[0] == "gemini-3.7-flash", summary_models
+          assert set(summary_models).isdisjoint(transcript_models), "budgets overlap!"
+          print("  OK: summaries lead with 3.7 and share no model with transcripts")
+          print()
 
           VIDEO = "https://www.youtube.com/watch?v=6lXWHHsJyV8"  # stuck in pending
           print("=" * 72)
