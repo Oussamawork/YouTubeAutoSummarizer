@@ -143,8 +143,12 @@ def test_escalation_is_not_consumed_by_transient_failures(monkeypatch):
     monkeypatch.setattr(summarizer.requests, "post", fake_post)
     monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
     summarizer._call_provider(_provider(), "transcript text")
-    # One 503, then escalation still climbs the full 2000 -> 4000 -> 8000 path.
-    assert caps[-1] == summarizer.LLM_MAX_TOKENS_CEILING
+    # One 503, then escalation still climbs its full doubling path. Asserted
+    # relative to the starting budget rather than against the constant, because
+    # the effective ceiling is derived from wherever the call starts (see
+    # _call_provider) — pinning the constant just re-broke when the default
+    # budget changed, without anything being wrong.
+    assert caps[-1] == caps[0] * 2 ** summarizer.LLM_MAX_ESCALATIONS
 
 
 def test_budget_at_or_above_ceiling_still_escalates(monkeypatch):
