@@ -30,6 +30,15 @@ def _payload(text):
 LONG = "word " * 500  # comfortably over the minimum-length floor
 
 
+@pytest.fixture(autouse=True)
+def _clear_exhausted_models():
+    # Module-level, so one test's exhausted model would otherwise be skipped by
+    # every test that follows.
+    transcript._EXHAUSTED_TRANSCRIPT_MODELS.clear()
+    yield
+    transcript._EXHAUSTED_TRANSCRIPT_MODELS.clear()
+
+
 @pytest.fixture
 def gemini_key(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
@@ -117,6 +126,22 @@ class TestFetchGeminiTranscript:
         )
         text, exhausted, reason = transcript._fetch_gemini_transcript("vid00000001")
         assert text == "" and exhausted is False and reason == "gemini_too_short"
+
+    def test_a_capped_model_is_not_asked_again_this_run(self, monkeypatch, gemini_key):
+        # With ~9 videos in a run, re-asking a model that already answered "out
+        # of quota" would waste a round trip per video per model.
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+            return FakeResponse(status_code=429, text="quota")
+
+        monkeypatch.setattr(transcript.requests, "post", fake_post)
+        first = transcript._fetch_gemini_transcript("vid00000001")
+        second = transcript._fetch_gemini_transcript("vid00000002")
+        assert first == second == ("", True, "gemini_quota")
+        # Two models asked on the first video, none on the second.
+        assert len(calls) == 2
 
     def test_no_key_is_skipped_quietly(self, monkeypatch):
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)

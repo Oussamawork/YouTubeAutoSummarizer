@@ -234,6 +234,13 @@ GEMINI_TRANSCRIPT_PROMPT = (
 )
 
 
+# Models found to be out of daily requests during this run, mirroring how
+# summarizer.py tracks spent providers. Process-scoped on purpose: the quota is
+# a daily one, but each run is a fresh process, so this is a within-run
+# shortcut, not a substitute for the API's own accounting.
+_EXHAUSTED_TRANSCRIPT_MODELS = set()
+
+
 def _gemini_transcript_models():
     """
     Transcription models, in order. Read at call time so tests and reloads see
@@ -339,10 +346,19 @@ def _fetch_gemini_transcript(vid):
     quota_hit = 0
     reason = "no_gemini_key"
     for index, model in enumerate(models):
+        # A model that hit its daily cap earlier in this run is still capped:
+        # with ~9 videos in a run, re-asking would waste one round trip per
+        # video per model to be told the same thing.
+        if model in _EXHAUSTED_TRANSCRIPT_MODELS:
+            log_info(f"Skipping Gemini {model} (out of quota earlier this run).")
+            quota_hit, reason = quota_hit + 1, "quota"
+            continue
         text, reason = _fetch_gemini_with_model(vid, model, api_key)
         if text:
             return text, False, "gemini_ok"
-        quota_hit += reason == "quota"
+        if reason == "quota":
+            _EXHAUSTED_TRANSCRIPT_MODELS.add(model)
+            quota_hit += 1
         if index + 1 < len(models):
             log_warn(f"Gemini {model} failed ({reason}); trying {models[index + 1]}.")
 

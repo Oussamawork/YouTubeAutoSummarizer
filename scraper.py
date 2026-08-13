@@ -18,7 +18,10 @@ from summarizer import (
     TRUNCATED_SENTINEL,
 )
 from log import log_info, log_error, log_warn, log_debug
-from sendToTelegram import send_telegram_message, send_telegram_digest, send_telegram_teaser, build_teaser
+from sendToTelegram import (
+    send_telegram_message, send_telegram_digest, send_telegram_teaser,
+    send_telegram_text, build_teaser,
+)
 import os
 from datetime import datetime, timezone
 
@@ -662,6 +665,33 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     )
 
 
+def _alert_delivery_stalled(token, chat_id, outcomes, transcript_reasons):
+    """
+    Tell Telegram when a run delivered nothing because every transcript source
+    was exhausted. Returns True when an alert was sent.
+
+    Worth its own message because this failure is invisible otherwise: when
+    Supadata's credits ran out in August 2026 the pipeline went quiet for two
+    days while every scheduled run still exited green, since deferring a video
+    is a normal, successful outcome. A run that defers everything and delivers
+    nothing is not normal.
+    """
+    if outcomes.get("sent") or not outcomes.get("budget_deferred"):
+        return False
+    if not token or not chat_id:
+        log_warn("Delivery stalled but Telegram is not configured; cannot alert.")
+        return False
+    reasons = ", ".join(
+        f"{k}={v}" for k, v in sorted(transcript_reasons.items(), key=lambda kv: -kv[1])
+    ) or "unknown"
+    send_telegram_text(token, chat_id, (
+        f"⚠️ No summaries this run: {outcomes['budget_deferred']} video(s) deferred "
+        f"because no transcript source had budget left ({reasons}). "
+        "Nothing is lost — they stay queued and go out automatically once quota returns."
+    ))
+    return True
+
+
 def _record_market_signals(channel_id, video_details, summary, signals=None):
     """
     Best-effort: append the delivered summary plus its market signals to
@@ -1026,6 +1056,10 @@ def main():
                     f"{k}={v}" for k, v in sorted(transcript_reasons.items(), key=lambda kv: -kv[1])
                 )
                 log_warn(f"Transcript failures by reason: {breakdown}")
+
+            _alert_delivery_stalled(
+                TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, outcomes, transcript_reasons
+            )
 
             # Save the results to a JSON file
             if results:

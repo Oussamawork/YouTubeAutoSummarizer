@@ -878,3 +878,51 @@ def test_summarize_video_records_transcript_reason(monkeypatch):
     details = _vid("v1", "")
     scraper._summarize_video(details, no_transcript_attempts=0)
     assert details["transcript_reason"] == "empty_content"
+
+
+class TestDeliveryStalledAlert:
+    """A run that defers everything used to be indistinguishable from a quiet
+    day: both exit green. These cover the one case worth interrupting for."""
+
+    def _sent(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(scraper, "send_telegram_text",
+                            lambda token, chat_id, text: sent.append(text))
+        return sent
+
+    def test_alerts_when_everything_deferred_and_nothing_sent(self, monkeypatch):
+        sent = self._sent(monkeypatch)
+        fired = scraper._alert_delivery_stalled(
+            "tok", "chat", {"budget_deferred": 37}, {"no_credits": 37},
+        )
+        assert fired is True and len(sent) == 1
+        assert "37 video(s) deferred" in sent[0]
+        assert "no_credits=37" in sent[0]
+        # Must not read as data loss: the videos are queued, not dropped.
+        assert "Nothing is lost" in sent[0]
+
+    def test_silent_when_summaries_went_out(self, monkeypatch):
+        sent = self._sent(monkeypatch)
+        fired = scraper._alert_delivery_stalled(
+            "tok", "chat", {"sent": 2, "budget_deferred": 5}, {"no_credits": 5},
+        )
+        assert fired is False and sent == []
+
+    def test_silent_on_an_ordinary_quiet_run(self, monkeypatch):
+        # No new videos at all is the normal overnight case, not an outage.
+        sent = self._sent(monkeypatch)
+        assert scraper._alert_delivery_stalled("tok", "chat", {}, {}) is False
+        assert sent == []
+
+    def test_no_transcript_deferrals_are_not_an_outage(self, monkeypatch):
+        # Captions not published yet is the video's problem and resolves itself.
+        sent = self._sent(monkeypatch)
+        fired = scraper._alert_delivery_stalled(
+            "tok", "chat", {"no_transcript_deferred": 3}, {"empty_content": 3},
+        )
+        assert fired is False and sent == []
+
+    def test_without_telegram_config_it_does_not_crash_the_run(self, monkeypatch):
+        sent = self._sent(monkeypatch)
+        assert scraper._alert_delivery_stalled("", "", {"budget_deferred": 1}, {}) is False
+        assert sent == []

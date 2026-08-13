@@ -9,12 +9,18 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `scraper.py` — entry point / orchestration; RSS feed (primary) + YouTube Data API
   (fallback); candidate selection against the dedup watermark; per-video outcomes
   (send / defer / give up); digest mode; `--video-url` on-demand path.
-- `transcript.py` — transcript fetch (Supadata → youtube-transcript-api fallback);
-  meters Supadata free-tier credits in `data/supadata_usage.json`, rotates across
-  multiple keys, and paces a monthly budget over the days left in the month
-  (over-budget videos defer silently via the `budget_exhausted` flag).
+- `transcript.py` — transcript fetch, cheapest source first: Supadata → Gemini
+  from the YouTube URL → youtube-transcript-api. Meters Supadata free-tier
+  credits in `data/supadata_usage.json`, rotates across multiple keys, and paces
+  a monthly budget over the days left in the month. Gemini transcription rotates
+  across `GEMINI_TRANSCRIPT_MODELS` (free quota is 20 requests/day *per model*);
+  when every source is spent, videos defer silently via `budget_exhausted`
+  rather than being written off.
 - `summarizer.py` — provider-agnostic LLM summarization (OpenAI-compatible API);
   also exposes `complete()` for generic calls over the same provider chain.
+  Gemini runs `GEMINI_MODEL` then `GEMINI_FALLBACK_MODELS` — each model is a
+  separate daily quota, and the list must stay disjoint from
+  `GEMINI_TRANSCRIPT_MODELS` so video calls can't spend the summary budget.
 - `signals.py` — LLM extraction of structured market signals from summaries
   (opt-in via `MARKET_SIGNALS`; appends to `data/signals.jsonl`).
 - `market_pulse.py` — weekly aggregation over `data/signals.jsonl` (top assets,
@@ -43,6 +49,10 @@ watermark; deferring does not.
   efficiency (≈2.9 credits per delivered summary), the budget/pacing design and
   its critique, options considered, and the sequenced next steps. Read before
   changing `transcript.py` budget logic or channel caps.
+- `docs/tdd-gemini-transcripts.md` — the August 2026 two-day outage, the real
+  per-model free-tier limits (20 requests/day, not 1,500), measured cost of a
+  Gemini video transcript, and why the transcript and summary model pools must
+  stay disjoint. Read before changing either model list.
 
 ## Dev workflow
 ```bash
