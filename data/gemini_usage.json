@@ -1,10 +1,9 @@
 {
-  "day": "2026-08-13",
+  "day": "2026-08-14",
   "models": {
-    "gemini-2.5-flash": 20,
-    "gemini-3-flash-preview": 20,
+    "gemini-3-flash-preview": 3,
     "gemini-3.5-flash": 20,
-    "gemini-3.6-flash": 20,
-    "gemini-3.7-flash": 8
+    "gemini-3.6-flash": 6,
+    "gemini-3.7-flash": 20
   }
 }
