@@ -519,3 +519,112 @@ class TestSummaryModelGuarantee:
         self._env(monkeypatch)
         allowed = summarizer._summary_allowlist()
         assert allowed.isdisjoint(transcript._gemini_transcript_models())
+
+
+class TestRateLimitHandling:
+    """
+    A 429 must not cost a model its whole Pacific day unless the API says so.
+
+    The free tier enforces a per-minute limit (5 requests) and a per-day one
+    (20 requests) behind the same status code. Treating the first like the
+    second retires the preferred summary model over a speed bump, and every
+    later run that day falls to the fallback.
+    """
+
+    class _Resp:
+        def __init__(self, status_code, body="", payload=None):
+            self.status_code = status_code
+            self.text = body
+            self.headers = {}
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    _OK = {"choices": [{"message": {"content": "a summary"}, "finish_reason": "stop"}]}
+
+    def _gemini(self):
+        # base_url is what marks a provider as metered against the Gemini
+        # free-tier counter, so it has to be the real host.
+        return {
+            "name": "gemini-3.7-flash",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "api_key": "k",
+            "model": "gemini-3.7-flash",
+        }
+
+    def _responses(self, monkeypatch, sequence):
+        calls = []
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            calls.append(json["model"])
+            return sequence[min(len(calls) - 1, len(sequence) - 1)]
+
+        monkeypatch.setattr(summarizer.requests, "post", fake_post)
+        monkeypatch.setattr(summarizer.time, "sleep", lambda s: None)
+        return calls
+
+    def test_transient_errors_do_not_starve_the_rate_limit_retries(self, monkeypatch):
+        # The 2026-08-15 16:35 outage, reproduced. Two unrelated 503s consumed
+        # the retry budget, so the 429 behind them was never retried once and
+        # gemini-3.7-flash was retired for the day at 13 of its 20 requests.
+        import gemini_quota
+        from test_gemini_quota import PER_MINUTE_BODY
+
+        calls = self._responses(monkeypatch, [
+            self._Resp(503),
+            self._Resp(503),
+            self._Resp(429, PER_MINUTE_BODY),
+            self._Resp(200, payload=self._OK),
+        ])
+        result = summarizer._call_provider(self._gemini(), "transcript text")
+
+        assert result == "a summary"
+        assert len(calls) == 4  # the 429 got a retry of its own
+        assert gemini_quota.is_exhausted("gemini-3.7-flash") is False
+
+    def test_a_per_day_429_still_retires_the_model(self, monkeypatch):
+        # The limit this counter exists for: no amount of waiting brings the
+        # day's budget back, so retrying would only burn run time.
+        import gemini_quota
+        from test_gemini_quota import PER_DAY_BODY
+
+        calls = self._responses(monkeypatch, [self._Resp(429, PER_DAY_BODY)])
+        result = summarizer._call_provider(self._gemini(), "transcript text")
+
+        assert result == summarizer.QUOTA_EXHAUSTED_SENTINEL
+        assert len(calls) == 1
+        assert gemini_quota.is_exhausted("gemini-3.7-flash") is True
+
+    def test_an_unnamed_429_costs_the_run_not_the_day(self, monkeypatch):
+        # Nothing identified the quota, so the model is skipped for this run
+        # and left usable by the next one. Worst case that costs one wasted
+        # request an hour from now; the old behavior cost seven summaries.
+        import gemini_quota
+
+        calls = self._responses(monkeypatch, [self._Resp(429, "Too Many Requests")])
+        result = summarizer._call_provider(self._gemini(), "transcript text")
+
+        assert result == summarizer.QUOTA_EXHAUSTED_SENTINEL
+        assert len(calls) == summarizer.LLM_MAX_RATE_LIMIT_RETRIES
+        assert gemini_quota.is_exhausted("gemini-3.7-flash") is False
+
+    def test_googles_retry_delay_is_honored_over_a_blind_backoff(self, monkeypatch):
+        from test_gemini_quota import PER_MINUTE_BODY
+
+        waits = []
+        monkeypatch.setattr(summarizer.time, "sleep", lambda s: waits.append(s))
+        monkeypatch.setattr(summarizer.requests, "post", lambda *a, **k: self._Resp(
+            429, PER_MINUTE_BODY))
+        summarizer._call_provider(self._gemini(), "transcript text")
+
+        assert waits and waits[0] == 27  # RetryInfo, not LLM_RETRY_BACKOFF
+
+    def test_a_wait_is_capped_so_one_call_cannot_eat_the_run(self, monkeypatch):
+        body = '{"quotaId":"PerMinute","retryDelay":"9999s"}'
+        waits = []
+        monkeypatch.setattr(summarizer.time, "sleep", lambda s: waits.append(s))
+        monkeypatch.setattr(summarizer.requests, "post", lambda *a, **k: self._Resp(429, body))
+        summarizer._call_provider(self._gemini(), "transcript text")
+
+        assert waits and max(waits) == summarizer.LLM_RETRY_AFTER_CAP

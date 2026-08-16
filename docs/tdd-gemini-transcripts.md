@@ -86,11 +86,11 @@ made the August outage invisible for two days.
 
 ## 5. Deliberately not built
 
-- **A committed per-model daily counter** (the analogue of
-  `data/supadata_usage.json`). Reactive 429 handling plus the within-run skip
-  already avoids nearly all wasted calls; a persisted counter would add a state
-  file, commit plumbing and Pacific-midnight reset logic to save at most one
-  round trip per model per run. Revisit if quota waste shows up in the logs.
+- ~~**A committed per-model daily counter**~~ — built after all, as
+  `gemini_quota.py` + `data/gemini_usage.json`. The judgement above was wrong
+  about the size of the prize: without a persisted count, every run rediscovers
+  a spent model by spending a request on it, and with eight runs a day that is
+  not "at most one round trip per model per run" but eight.
 - **Alert de-duplication across runs.** The alert is stateless, so a multi-day
   outage produces one message per run (~8/day). Adding a "once per day" gate
   means new persisted state; the current behaviour is noisier but honest.
@@ -104,3 +104,53 @@ made the August outage invisible for two days.
 - `SUPADATA_RESET_DAY` is still unset, so the local credit meter resets on the
   1st while the real pools reset on plan anniversaries (17th and 26th per the
   July dashboard). Set the repo variable to stop that drift.
+
+## 7. One status code, two limits (2026-08-16)
+
+Three days of running the 3.7/3.6 summary chain surfaced a defect in how a 429
+was read. From the 2026-08-15 16:31 run:
+
+```
+16:35:23 [WARN] Transient gemini-3.7-flash status 503 (attempt 1/3); retrying.
+16:35:30 [WARN] Transient gemini-3.7-flash status 503 (attempt 2/3); retrying.
+16:35:34 [WARN] gemini-3.7-flash rate-limited (429) after retries; treating as quota exhausted.
+16:35:34 [INFO] Gemini gemini-3.7-flash marked spent for today (2026-08-15).
+```
+
+Two unrelated 503s consumed retry attempts 1 and 2, so the 429 landed on the
+last attempt and was **never retried once** before the model was written off
+until the Pacific reset. Reconstructing from the committed counter, 3.7 was at
+13 of 20 requests: **7 requests were thrown away**, and every summary for the
+rest of that day fell to 3.6.
+
+The root cause is that the free tier enforces two different limits behind one
+status code — 5 requests/minute and 20 requests/day — and only the response
+body distinguishes them (`GenerateRequestsPerMinutePerProjectPerModel-FreeTier`
+vs `...PerDay...`). That body was being discarded, so neither the code nor the
+logs could tell a 60-second speed bump from a 24-hour outage. Four summary calls
+inside one run can genuinely trip 5 RPM, which makes the per-minute case the
+*likely* one, not the exotic one.
+
+### Design
+
+- **Rate limits get their own retry budget** (`LLM_MAX_RATE_LIMIT_RETRIES`),
+  separate from the failure retries, so unrelated 5xx can never starve them. A
+  rate-limit wait decrements `attempt` for the same reason an escalation does:
+  waiting is not failing.
+- **`gemini_quota.classify_429`** reads the quota name out of the body. Per-day
+  → `mark_exhausted`, since no wait brings the budget back. Per-minute → back
+  off and retry, honoring `RetryInfo.retryDelay` (sent in the body, not in a
+  `Retry-After` header, so a header-only reader never saw it) capped at
+  `LLM_RETRY_AFTER_CAP`.
+- **Unknown quota → cost the run, not the day.** The provider is skipped for the
+  remainder of the run and left usable by the next one. Worst case that wastes
+  one request an hour later; the old behavior cost seven summaries.
+- **The counter stopped lying.** `mark_exhausted` used to write the cap into the
+  count, so `20` meant either "20 requests served" or "the API refused after 3"
+  — leaving the file unable to answer how much budget a run actually used, which
+  is the one question it is committed for. The decision now lives in a separate
+  `spent` list and the count stays a true tally.
+- `transcript.py` gets the same distinction, but no waiting: rotating to the
+  next model is cheaper than sleeping out a per-minute window. A model
+  rate-limited without a named day quota is remembered in
+  `_RATE_LIMITED_THIS_RUN` so it is not re-asked for every video in the run.

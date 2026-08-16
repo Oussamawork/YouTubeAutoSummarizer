@@ -21,6 +21,10 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   Gemini runs `GEMINI_MODEL` then `GEMINI_FALLBACK_MODELS` — each model is a
   separate daily quota, and the list must stay disjoint from
   `GEMINI_TRANSCRIPT_MODELS` so video calls can't spend the summary budget.
+- `gemini_quota.py` — per-model daily free-tier accounting in
+  `data/gemini_usage.json` (20 requests/day per model, resets midnight Pacific);
+  also classifies a 429 as a per-day or per-minute limit, which decides whether
+  a model is retired for the day or merely retried.
 - `signals.py` — LLM extraction of structured market signals from summaries
   (opt-in via `MARKET_SIGNALS`; appends to `data/signals.jsonl`).
 - `market_pulse.py` — weekly aggregation over `data/signals.jsonl` (top assets,
