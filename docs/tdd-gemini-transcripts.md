@@ -154,3 +154,44 @@ inside one run can genuinely trip 5 RPM, which makes the per-minute case the
   next model is cheaper than sleeping out a per-minute window. A model
   rate-limited without a named day quota is remembered in
   `_RATE_LIMITED_THIS_RUN` so it is not re-asked for every video in the run.
+
+## 8. Videos larger than the context window (2026-08-16)
+
+The `gemini_http_400` in the 2026-08-15 run resolved to one video,
+`ucrXJlTbB_w` ("COREWEAVE Q2 EARNINGS REPORT BREAKDOWN"):
+
+```
+[WARN] Gemini gemini-3.5-flash returned 400: "The input token count exceeds
+       the maximum number of tokens allowed 1048576."
+[WARN] Gemini gemini-3-flash-preview returned 400: "Request contains an invalid argument."
+[WARN] Gemini gemini-2.5-flash returned 400: "The input token count exceeds ..."
+[INFO] Transcript budget spent; deferring this video to a later run.
+```
+
+At the measured ~6.2k tokens per minute of video, 1,048,576 tokens is roughly
+2.8 hours — this is a long earnings stream, not a malformed request.
+
+Two things were wrong. All three models share that context window, so the
+rotation spent three requests and ~90 seconds to be told the same thing, on
+every retry of that video. And this is the video still sitting in `pending`
+with `attempts: 0`: it defers on Supadata's `budget_exhausted` flag, which
+deliberately does not consume a retry attempt.
+
+**The deferral is correct and was left alone.** Supadata has no 1M-token
+ceiling, so once its credits reset the video can still be transcribed. What was
+wrong was only the wasted rotation: a size rejection now returns `too_large` and
+stops after the first model, while any other 400 still rotates — the size limit
+is model-independent, a bad request is not.
+
+### The run summary was also miscounting
+
+```
+[WARN] Transcript failures by reason: gemini_ok=4, gemini_http_400=1
+```
+
+`gemini_ok` is a success. `scraper.py` filtered the breakdown against its own
+hand-written copy of the success reasons, `("ok", "fallback_ok")`, and that copy
+was never updated when the Gemini source was added — so every Gemini success was
+counted and reported as a failure. The set now lives in `transcript.py` beside
+the code that produces the reasons, and the scraper imports it, so it cannot
+drift again.

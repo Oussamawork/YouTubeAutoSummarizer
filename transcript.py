@@ -225,6 +225,16 @@ GEMINI_TRANSCRIPT_MODELS_DEFAULT = (
 # what a too-tight timeout looks like from the outside.
 GEMINI_TRANSCRIPT_TIMEOUT = env_int("GEMINI_TRANSCRIPT_TIMEOUT", 300)
 GEMINI_TRANSCRIPT_MAX_OUTPUT_TOKENS = env_int("GEMINI_TRANSCRIPT_MAX_OUTPUT_TOKENS", 32768)
+# Reasons that mean a transcript actually arrived. Defined beside the code that
+# produces them because the scraper's end-of-run failure breakdown filters on
+# this set: it used to keep its own hand-written copy, and when `gemini_ok` was
+# added here the copy was not updated, so every Gemini success was counted and
+# reported as a transcript failure.
+TRANSCRIPT_SUCCESS_REASONS = frozenset({"ok", "gemini_ok", "fallback_ok"})
+# Google rejects an over-long video with a 400 naming the context window. Every
+# Gemini model here shares that 1,048,576-token window, so the rotation cannot
+# rescue it — trying the rest only spends requests to be told the same thing.
+GEMINI_TOO_LARGE_MARKER = "input token count exceeds"
 GEMINI_TRANSCRIPT_RETRY_STATUS = {500, 502, 503, 504}
 GEMINI_TRANSCRIPT_MAX_RETRIES = 2
 GEMINI_TRANSCRIPT_RETRY_BACKOFF = 5  # base seconds, multiplied by the attempt
@@ -313,6 +323,8 @@ def _fetch_gemini_with_model(vid, model, api_key):
 
         if resp.status_code != 200:
             log_warn(f"Gemini {model} returned {resp.status_code}: {resp.text[:200]}")
+            if GEMINI_TOO_LARGE_MARKER in (resp.text or "").lower():
+                return "", "too_large"
             return "", f"http_{resp.status_code}"
 
         try:
@@ -362,6 +374,15 @@ def _fetch_gemini_transcript(vid):
         if text:
             gemini_quota.record(model)
             return text, False, "gemini_ok"
+        if reason == "too_large":
+            # The video does not fit any model here, so the rotation has
+            # nothing left to try. Not a budget problem: the video stays queued
+            # and a Supadata credit can still transcribe it later.
+            log_warn(
+                f"Video {vid} exceeds the Gemini context window; skipping the "
+                f"remaining {len(models) - index - 1} model(s)."
+            )
+            return "", False, "gemini_too_large"
         if reason.startswith("quota"):
             # Only a per-day 429 means this model is finished until the Pacific
             # reset. A per-minute one clears on its own, and rotating to the

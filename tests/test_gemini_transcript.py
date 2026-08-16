@@ -250,3 +250,87 @@ class TestRateLimitKind:
         transcript._fetch_gemini_transcript("vid00000001")
         transcript._fetch_gemini_transcript("vid00000002")
         assert len(calls) == len(transcript._gemini_transcript_models())
+
+
+class TestOversizedVideo:
+    """
+    A video too long for the context window is not a budget problem.
+
+    Every model in the rotation shares the same 1,048,576-token window, so once
+    one has rejected the video on size the others can only spend a request to
+    say the same thing.
+    """
+
+    TOO_LARGE = (
+        '{"error":{"code":400,"message":"The input token count exceeds the '
+        'maximum number of tokens allowed 1048576.","status":"INVALID_ARGUMENT"}}'
+    )
+
+    def test_the_rotation_stops_at_the_first_size_rejection(self, monkeypatch, gemini_key):
+        # Observed on ucrXJlTbB_w: three models, three 400s, ~90s of run time,
+        # repeated on every retry of that video.
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+            return FakeResponse(status_code=400, text=self.TOO_LARGE)
+
+        monkeypatch.setattr(transcript.requests, "post", fake_post)
+        text, exhausted, reason = transcript._fetch_gemini_transcript("vid00000001")
+
+        assert (text, reason) == ("", "gemini_too_large")
+        assert len(calls) == 1
+        # Not a deferral on budget grounds: nothing here is out of quota, and a
+        # Supadata credit can still transcribe this video later.
+        assert exhausted is False
+
+    def test_size_is_not_charged_to_the_daily_quota(self, monkeypatch, gemini_key):
+        import gemini_quota
+
+        monkeypatch.setattr(
+            transcript.requests, "post",
+            lambda url, **kwargs: FakeResponse(status_code=400, text=self.TOO_LARGE),
+        )
+        transcript._fetch_gemini_transcript("vid00000001")
+        for model in transcript._gemini_transcript_models():
+            assert gemini_quota.is_exhausted(model) is False
+
+    def test_an_unrelated_400_still_rotates(self, monkeypatch, gemini_key):
+        # Only the size rejection is model-independent; a bad request to one
+        # model says nothing about the next.
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+            return FakeResponse(status_code=400, text='{"error":{"message":"bad"}}')
+
+        monkeypatch.setattr(transcript.requests, "post", fake_post)
+        _, _, reason = transcript._fetch_gemini_transcript("vid00000001")
+        assert len(calls) == len(transcript._gemini_transcript_models())
+        assert reason == "gemini_http_400"
+
+
+class TestSuccessReasonsAreShared:
+    def test_every_success_path_is_declared_a_success(self, monkeypatch, gemini_key):
+        # scraper.py filters its end-of-run failure breakdown on this set. It
+        # used to hold a hand-written copy, so adding `gemini_ok` here silently
+        # made every Gemini success show up as a reported failure:
+        #   "Transcript failures by reason: gemini_ok=4, gemini_http_400=1"
+        monkeypatch.setattr(transcript, "_fetch_supadata", lambda vid: ("", False, "empty"))
+        monkeypatch.setattr(transcript, "_fetch_gemini_transcript",
+                            lambda vid: (LONG, False, "gemini_ok"))
+        result = transcript.get_transcript_from_video("https://youtu.be/dQw4w9WgXcQ")
+        assert result["transcript"]
+        assert result["reason"] in transcript.TRANSCRIPT_SUCCESS_REASONS
+
+    def test_supadata_and_fallback_successes_are_declared_too(self, monkeypatch, gemini_key):
+        monkeypatch.setattr(transcript, "_fetch_supadata", lambda vid: ("text", False, "ok"))
+        assert transcript.get_transcript_from_video(
+            "https://youtu.be/dQw4w9WgXcQ")["reason"] in transcript.TRANSCRIPT_SUCCESS_REASONS
+
+        monkeypatch.setattr(transcript, "_fetch_supadata", lambda vid: ("", False, "empty"))
+        monkeypatch.setattr(transcript, "_fetch_gemini_transcript",
+                            lambda vid: ("", False, "gemini_too_short"))
+        monkeypatch.setattr(transcript, "_fetch_youtube_transcript_api", lambda vid: "text")
+        assert transcript.get_transcript_from_video(
+            "https://youtu.be/dQw4w9WgXcQ")["reason"] in transcript.TRANSCRIPT_SUCCESS_REASONS
