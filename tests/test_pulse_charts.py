@@ -107,10 +107,17 @@ def test_upside_rows_math_and_order():
         _rec("2026-08-10", "A", [_asset("Reddit", "RDDT", price_target=203),
                                  _asset("Broadcom", "AVGO", price_target=505),
                                  _asset("Apple", "AAPL")]),  # no target -> excluded
+        _rec("2026-08-11", "B", [_asset("Broadcom", "AVGO", price_target=390)]),
     ])
-    rows = pc.upside_rows(current, {"RDDT": 177.0, "AVGO": 390.0})
-    assert [r["label"] for r in rows] == ["AVGO", "RDDT"]  # biggest implied move first
-    assert round(rows[1]["pct"], 1) == 14.7
+    rows = pc.upside_rows(current, {"RDDT": 177.0, "AVGO": 400.0})
+    assert [r["label"] for r in rows] == ["RDDT", "AVGO"]  # biggest implied move first
+    assert round(rows[0]["pct"], 1) == 14.7
+    # AVGO averages its two targets and keeps the low-high range for the chart —
+    # including a low target sitting below today's price (negative percent).
+    avgo = rows[1]
+    assert (avgo["t_lo"], avgo["t_hi"], avgo["n_targets"]) == (390, 505, 2)
+    assert round(avgo["lo"], 1) == -2.5 and round(avgo["hi"], 1) == 26.2
+    assert round(avgo["pct"], 1) == 11.9
 
 
 def test_render_charts_writes_pngs(tmp_path):

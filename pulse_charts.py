@@ -164,20 +164,30 @@ def conviction_points(current, limit=MAX_MAP_POINTS, min_directional=MIN_MAP_DIR
 
 
 def upside_rows(current, latest_prices, limit=MAX_UPSIDE_ROWS):
-    """Implied move from the latest close to the average creator target, for
-    assets that have both. Percentages compare cleanly across price scales
-    where raw dollar targets don't."""
+    """Implied move from the latest close to the creator price targets, for
+    assets that have both. Alongside the average, the low and high targets are
+    kept — the industry convention (low/average/high range vs current price)
+    and the honest display when one moonshot target would dominate a bare
+    average. Percentages compare cleanly across price scales where raw dollar
+    targets don't."""
     rows = []
     for key, entry in current.items():
         price = latest_prices.get(key)
         if not price or not entry["targets"]:
             continue
         target = sum(entry["targets"]) / len(entry["targets"])
+        t_lo, t_hi = min(entry["targets"]), max(entry["targets"])
+        pct = lambda t: (t - price) / price * 100.0
         rows.append({
             "label": entry["label"],
             "price": price,
             "target": target,
-            "pct": (target - price) / price * 100.0,
+            "t_lo": t_lo,
+            "t_hi": t_hi,
+            "pct": pct(target),
+            "lo": pct(t_lo),
+            "hi": pct(t_hi),
+            "n_targets": len(entry["targets"]),
         })
     rows.sort(key=lambda r: (-r["pct"], r["label"]))
     return rows[:limit]
@@ -339,40 +349,35 @@ def _render_tone(plt, data, path):
     height = 0.62 * len(weeks) + 2.7
     fig = _new_figure(plt, height)
     top = 1 - 1.6 / height
-    ax = fig.add_axes([0.17, 1.05 / height, 0.66, top - 1.05 / height])
+    ax = fig.add_axes([0.26, 1.05 / height, 0.6, top - 1.05 / height])
     _chrome(ax)
 
-    # Centered on the undecided block: bearish grows left, bullish grows
-    # right, so the eye compares the colored arms week over week.
-    scale = 0.66  # fraction of the axis a 100% week may span
+    # Edge-anchored 100% bars (the survey-share convention): bearish is
+    # anchored to the left edge and bullish to the right, so both headline
+    # aggregates line up across weeks and the eye compares them directly —
+    # a centered diverging layout shifts those anchors week to week.
     any_partial = False
     for i, week in enumerate(reversed(weeks)):
         n = week["n"]
         bear, mixed, neutral, bull = (week[k] / n for k in
                                       ("bearish", "mixed", "neutral", "bullish"))
-        undecided = mixed + neutral
-        center_left = -undecided * scale / 2
-        segments = [
-            (center_left - bear * scale, bear * scale, BEAR),
-            (center_left, mixed * scale, MIXED),
-            (center_left + mixed * scale, neutral * scale, NEUTRAL),
-            (center_left + undecided * scale, bull * scale, BULL),
-        ]
-        for x, w, color in segments:
-            if w > 0:
-                ax.barh(i, w, left=x, height=0.58, color=color)
-        ax.text(center_left - bear * scale - 0.015, i, f"{bear:.0%}",
-                ha="right", va="center", fontsize=10.5, fontweight="bold", color=BEAR)
-        ax.text(center_left + (undecided + bull) * scale + 0.015, i, f"{bull:.0%}",
-                ha="left", va="center", fontsize=10.5, fontweight="bold", color=BULL)
+        left = 0.0
+        for share, color in ((bear, BEAR), (mixed, MIXED), (neutral, NEUTRAL), (bull, BULL)):
+            if share > 0:
+                ax.barh(i, share, left=left, height=0.58, color=color,
+                        edgecolor=SURFACE, linewidth=1.5)
+                left += share
+        ax.text(-0.012, i, f"{bear:.0%}", ha="right", va="center",
+                fontsize=10.5, fontweight="bold", color=BEAR)
+        ax.text(1.012, i, f"{bull:.0%}", ha="left", va="center",
+                fontsize=10.5, fontweight="bold", color=BULL)
         label = week["label"] + ("*" if week["partial"] else "")
         any_partial = any_partial or week["partial"]
-        ax.text(-0.02, i, label, transform=ax.get_yaxis_transform(), ha="right",
+        ax.text(-0.09, i, label, transform=ax.get_yaxis_transform(), ha="right",
                 va="center", fontsize=10.5, fontweight="bold", color=INK)
-        ax.text(-0.02, i - 0.32, f"{n} videos", transform=ax.get_yaxis_transform(),
+        ax.text(-0.09, i - 0.32, f"{n} videos", transform=ax.get_yaxis_transform(),
                 ha="right", va="center", fontsize=8.5, color=MUTED)
-    ax.axvline(0, color=MUTED, lw=1, ls=(0, (2, 3)))
-    ax.set_xlim(-0.62, 0.62)
+    ax.set_xlim(0, 1)
     ax.set_ylim(-0.6, len(weeks) - 0.4)
     ax.set_xticks([])
     ax.set_yticks([])
@@ -389,8 +394,8 @@ def _render_tone(plt, data, path):
         fig, path,
         "The mood, week by week",
         "Share of analyzed videos expecting the market to rise or fall",
-        "How to read: newest week on top — blue reaching right means optimism, "
-        "red reaching left means pessimism, gray means undecided.",
+        "How to read: each bar is one week's videos, oldest at the top — the red "
+        "share expects a fall, the blue share a rise, gray is undecided.",
     )
     plt.close(fig)
 
@@ -461,39 +466,57 @@ def _render_map(plt, data, path):
     plt.close(fig)
 
 
+RANGE_BLUE = "#9ec5f4"  # light step of the bull blue, for the low-high span
+
+
 def _render_upside(plt, data, path):
+    """Low / average / high target range vs today's price — the convention
+    analyst-forecast pages use. The range strip keeps a lone moonshot target
+    visible as disagreement instead of letting it silently inflate a bare
+    average."""
     rows = data["upside"]
-    height = 0.5 * len(rows) + 2.4
+    height = 0.55 * len(rows) + 2.5
     fig = _new_figure(plt, height)
     top = 1 - 1.55 / height
-    ax = fig.add_axes([0.12, 0.75 / height, 0.6, top - 0.75 / height])
+    ax = fig.add_axes([0.12, 0.95 / height, 0.6, top - 0.95 / height])
     _chrome(ax)
 
     ys = range(len(rows) - 1, -1, -1)
-    max_pct = max(abs(r["pct"]) for r in rows)
+    lo_min = min(0, min(r["lo"] for r in rows))
+    hi_max = max(r["hi"] for r in rows)
+    span = hi_max - lo_min
     for y, row in zip(ys, rows):
-        color = BULL if row["pct"] >= 0 else BEAR
-        ax.barh(y, row["pct"], height=0.6, color=color)
-        ax.text(row["pct"] + (0.02 * max_pct if row["pct"] >= 0 else -0.02 * max_pct),
-                y, f"{row['pct']:+.0f}%", ha="left" if row["pct"] >= 0 else "right",
-                va="center", fontsize=11, fontweight="bold", color=INK)
+        if row["n_targets"] > 1:
+            ax.plot([row["lo"], row["hi"]], [y, y], color=RANGE_BLUE, lw=6,
+                    solid_capstyle="round", zorder=2)
+        dot = BULL if row["pct"] >= 0 else BEAR
+        ax.plot(row["pct"], y, "o", ms=11, color=dot, mec=SURFACE, mew=1.5, zorder=3)
+        ax.text(row["pct"], y + 0.34, f"{row['pct']:+.0f}%", ha="center",
+                va="bottom", fontsize=10.5, fontweight="bold", color=INK)
         # \$ keeps matplotlib from reading the pair of $s as inline mathtext.
-        ax.text(1.04, y, f"\\${row['price']:,.0f} now → \\${row['target']:,.0f} target",
-                transform=ax.get_yaxis_transform(), ha="left", va="center",
-                fontsize=9.5, color=MUTED)
+        if row["n_targets"] > 1:
+            note = (f"\\${row['price']:,.0f} now · {row['n_targets']} targets "
+                    f"\\${row['t_lo']:,.0f}–\\${row['t_hi']:,.0f}")
+        else:
+            note = f"\\${row['price']:,.0f} now · target \\${row['target']:,.0f}"
+        ax.text(1.04, y, note, transform=ax.get_yaxis_transform(),
+                ha="left", va="center", fontsize=9.5, color=MUTED)
     ax.axvline(0, color=MUTED, lw=1)
+    ax.text(0, -0.75, "today's price", ha="center", va="top", fontsize=9.5, color=MUTED)
     ax.set_yticks(list(ys), [r["label"] for r in rows], fontsize=11.5, color=INK)
     for tick in ax.get_yticklabels():
         tick.set_fontweight("bold")
-    ax.set_xlim(min(0, -max_pct * 0.1) - max_pct * 0.15, max_pct * 1.2)
+    ax.set_xlim(lo_min - span * 0.06, hi_max + span * 0.08)
+    ax.set_ylim(-0.8, len(rows) - 0.2 + 0.5)
     ax.set_xticks([])
 
     _finish(
         fig, path,
         "How far this week's price targets reach",
         f"{data['window']} · assets with a stated target and a known market price",
-        "How to read: each bar is the climb (or drop) from today's price to the "
-        "average target creators named this week.",
+        "How to read: the dot is the average target creators named, measured from "
+        "today's price; a light bar stretches from their most cautious to their "
+        "most optimistic target.",
     )
     plt.close(fig)
 
