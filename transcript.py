@@ -228,6 +228,11 @@ GEMINI_TRANSCRIPT_MAX_OUTPUT_TOKENS = env_int("GEMINI_TRANSCRIPT_MAX_OUTPUT_TOKE
 GEMINI_TRANSCRIPT_RETRY_STATUS = {500, 502, 503, 504}
 GEMINI_TRANSCRIPT_MAX_RETRIES = 2
 GEMINI_TRANSCRIPT_RETRY_BACKOFF = 5  # base seconds, multiplied by the attempt
+# Models that hit a rate limit this run without the API naming a per-day quota.
+# Such a limit may clear within the hour, so it must not be written into the
+# day's counter — but asking again for every video in the same run only buys
+# the same refusal, so it is remembered for the length of the process.
+_RATE_LIMITED_THIS_RUN = set()
 # A model that answers with a sentence *about* the video instead of its words
 # has failed at transcription. Videos this short are already filtered out by the
 # duration gate, so anything below this is a refusal or a summary, not speech.
@@ -296,8 +301,10 @@ def _fetch_gemini_with_model(vid, model, api_key):
         # 429 is the free tier's daily/per-minute cap. Retrying the same model
         # cannot help — the next model has its own bucket.
         if resp.status_code == 429:
-            log_warn(f"Gemini {model} is rate-limited/out of daily quota.")
-            return "", "quota"
+            body = resp.text or ""
+            kind = gemini_quota.classify_429(body)
+            log_warn(f"Gemini {model} rate-limited (429, {kind} quota): {body[:200]}")
+            return "", f"quota_{kind}"
 
         if resp.status_code in GEMINI_TRANSCRIPT_RETRY_STATUS and attempt < GEMINI_TRANSCRIPT_MAX_RETRIES:
             log_warn(f"Transient Gemini status {resp.status_code}; retrying.")
@@ -347,16 +354,24 @@ def _fetch_gemini_transcript(vid):
         # A model already at its daily cap is still capped: asking again costs a
         # round trip per video per model to be told the same thing, and the cap
         # outlives the run, so the count has to as well.
-        if gemini_quota.is_exhausted(model):
-            log_info(f"Skipping Gemini {model} (daily quota already spent).")
+        if gemini_quota.is_exhausted(model) or model in _RATE_LIMITED_THIS_RUN:
+            log_info(f"Skipping Gemini {model} (rate-limited or out of daily quota).")
             quota_hit, reason = quota_hit + 1, "quota"
             continue
         text, reason = _fetch_gemini_with_model(vid, model, api_key)
         if text:
             gemini_quota.record(model)
             return text, False, "gemini_ok"
-        if reason == "quota":
-            gemini_quota.mark_exhausted(model)
+        if reason.startswith("quota"):
+            # Only a per-day 429 means this model is finished until the Pacific
+            # reset. A per-minute one clears on its own, and rotating to the
+            # next model is a cheaper answer than writing off the day — but
+            # re-asking it for every video in the same run just buys the same
+            # refusal, so it is skipped for the rest of the run.
+            if reason == "quota_day":
+                gemini_quota.mark_exhausted(model)
+            else:
+                _RATE_LIMITED_THIS_RUN.add(model)
             quota_hit += 1
         if index + 1 < len(models):
             log_warn(f"Gemini {model} failed ({reason}); trying {models[index + 1]}.")

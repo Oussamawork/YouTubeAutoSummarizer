@@ -13,6 +13,7 @@ lets the API be the authority.
 """
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 from helpers import env_int
@@ -45,6 +46,47 @@ def quota_day(now=None):
     return (now - timedelta(hours=8)).date()
 
 
+# A free-tier 429 comes in two very different flavors, and the response body is
+# the only thing that tells them apart: a per-day quota is gone until the
+# Pacific reset, while a per-minute one (5 requests/minute, or the token
+# equivalent) clears in about a minute. Google names the offending quota in the
+# error payload — "GenerateRequestsPerDayPerProjectPerModel-FreeTier" versus
+# "...PerMinute...". Matching the quota id as text rather than walking the JSON
+# keeps this working whether the id arrives under `quotaId`, `quotaMetric`, or
+# only in the human-readable message.
+_PER_DAY_MARKER = re.compile(r"per[_\s-]?day", re.IGNORECASE)
+_PER_MINUTE_MARKER = re.compile(r"per[_\s-]?minute", re.IGNORECASE)
+# `"retryDelay": "27s"` inside google.rpc.RetryInfo. The REST API sends this in
+# the body, not in a Retry-After header, so a header-only reader never sees it.
+_RETRY_DELAY = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
+
+
+def classify_429(body):
+    """
+    Which quota a 429 refers to: "day", "minute", or "unknown".
+
+    Per-day wins when a payload names both, because that is the binding limit —
+    waiting out the minute would just hit the day again.
+    """
+    body = body or ""
+    if _PER_DAY_MARKER.search(body):
+        return "day"
+    if _PER_MINUTE_MARKER.search(body):
+        return "minute"
+    return "unknown"
+
+
+def retry_delay_seconds(body):
+    """The RetryInfo delay from a 429 body in seconds, or None if absent."""
+    match = _RETRY_DELAY.search(body or "")
+    if not match:
+        return None
+    try:
+        return max(0, int(float(match.group(1))))
+    except (TypeError, ValueError):  # pragma: no cover - regex already bounds it
+        return None
+
+
 def load_usage(now=None):
     """Today's per-model counts, resetting when the Pacific day has rolled."""
     day = quota_day(now).isoformat()
@@ -59,6 +101,8 @@ def load_usage(now=None):
         data = {"day": day, "models": {}}
     models = data.get("models")
     data["models"] = models if isinstance(models, dict) else {}
+    spent = data.get("spent")
+    data["spent"] = sorted(m for m in spent if isinstance(m, str)) if isinstance(spent, list) else []
     return data
 
 
@@ -84,7 +128,8 @@ def used(model, usage=None):
 
 def is_exhausted(model, usage=None):
     """True when `model` has no free requests left today."""
-    return used(model, usage) >= GEMINI_REQUESTS_PER_DAY
+    usage = usage if usage is not None else load_usage()
+    return model in usage["spent"] or used(model, usage) >= GEMINI_REQUESTS_PER_DAY
 
 
 def record(model, usage=None):
@@ -99,24 +144,35 @@ def mark_exhausted(model):
     """
     Record that the API itself said `model` is out of requests for the day.
 
-    Set to the cap rather than incremented: a 429 means the real count is at
-    least the limit, whatever our local tally says — the API is the authority
-    and our count can only ever be an undercount (failed requests aren't
-    metered).
+    Flagged rather than counted up to the cap. Writing the cap into the count
+    made the number mean two different things — "20 requests served" and "the
+    API said stop after 3" — so the file could not answer how much budget a run
+    actually used, which is the one question it exists to answer. The flag
+    carries the "stop asking" decision; the count stays a true tally.
     """
     usage = load_usage()
-    usage["models"][model] = max(used(model, usage), GEMINI_REQUESTS_PER_DAY)
+    if model not in usage["spent"]:
+        usage["spent"] = sorted(usage["spent"] + [model])
     save_usage(usage)
-    log_info(f"Gemini {model} marked spent for today ({quota_day().isoformat()}).")
+    log_info(
+        f"Gemini {model} marked spent for today ({quota_day().isoformat()}) "
+        f"after {used(model, usage)} recorded request(s)."
+    )
     return usage
 
 
 def report():
     """One line of remaining budget per model, for the end-of-run log."""
     usage = load_usage()
-    if not usage["models"]:
+    models = dict(usage["models"])
+    # A model can be flagged spent without ever having served a request today,
+    # and that is exactly the case worth seeing in the log.
+    for model in usage["spent"]:
+        models.setdefault(model, 0)
+    if not models:
         return ""
     return ", ".join(
         f"{model}={max(0, GEMINI_REQUESTS_PER_DAY - count)}/{GEMINI_REQUESTS_PER_DAY} left"
-        for model, count in sorted(usage["models"].items())
+        + (" (capped by API)" if model in usage["spent"] else "")
+        for model, count in sorted(models.items())
     )

@@ -81,6 +81,11 @@ SUMMARY_MODELS_DEFAULT = f"{GEMINI_DEFAULT_MODEL},{GEMINI_DEFAULT_FALLBACKS}"
 # inference. ~3k input tokens leaves room for the reserved output.
 GROQ_MAX_INPUT_CHARS = env_int("GROQ_MAX_INPUT_CHARS", 12000)
 LLM_MAX_RETRIES = 3
+# Rate limits get their own budget rather than sharing the failure retries
+# above. They shared it once, and an unrelated pair of 503s could then leave a
+# 429 with no attempts left — which retired a model for the whole Pacific day
+# on its first rate limit, with most of its daily requests still unspent.
+LLM_MAX_RATE_LIMIT_RETRIES = env_int("LLM_MAX_RATE_LIMIT_RETRIES", 3)
 LLM_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
 # Honor a server's Retry-After on 429, but cap it so a huge value can't stall
 # the daily run past its workflow timeout.
@@ -498,7 +503,7 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
     # every truncation into a discard — worse behavior for a bigger setting.
     start_cap = payload["max_tokens"]
     ceiling = max(LLM_MAX_TOKENS_CEILING, start_cap * (2 ** max(1, LLM_MAX_ESCALATIONS)))
-    attempt, escalations = 0, 0
+    attempt, escalations, rate_limits = 0, 0, 0
     while attempt < LLM_MAX_RETRIES:
         attempt += 1
         try:
@@ -548,23 +553,51 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
                 log_warn(f"{provider['name']} returned an empty summary.")
             return summary
 
-        # 429 = rate limit / quota. Honor Retry-After while retrying; if it
-        # persists, signal quota exhaustion so the caller can defer (and so we
-        # stop hammering this provider for the rest of the run).
+        # 429 = rate limit / quota — two different things behind one status
+        # code. A per-day quota is gone until the Pacific reset; a per-minute
+        # one clears in about a minute. Only the body tells them apart, so it
+        # is logged (previously it was discarded, leaving the logs unable to
+        # say which limit had been hit).
         if resp.status_code == 429:
-            if attempt < LLM_MAX_RETRIES:
-                retry_after = _parse_retry_after(resp)
-                wait = retry_after if retry_after is not None else LLM_RETRY_BACKOFF * attempt
+            body = resp.text or ""
+            kind = gemini_quota.classify_429(body)
+            metered = _metered_model(provider)
+            log_warn(
+                f"{provider['name']} rate-limited (429, {kind} quota): {body[:200]}"
+            )
+            if kind == "day":
+                # No amount of waiting brings the day's budget back.
+                if metered:
+                    gemini_quota.mark_exhausted(metered)
+                return QUOTA_EXHAUSTED_SENTINEL
+
+            rate_limits += 1
+            if rate_limits < LLM_MAX_RATE_LIMIT_RETRIES:
+                wait = gemini_quota.retry_delay_seconds(body)
+                if wait is None:
+                    wait = _parse_retry_after(resp)
+                if wait is None:
+                    wait = LLM_RETRY_BACKOFF * rate_limits
+                wait = min(wait, LLM_RETRY_AFTER_CAP)
                 log_warn(
-                    f"{provider['name']} rate-limited (429); retrying in {wait}s "
-                    f"(attempt {attempt}/{LLM_MAX_RETRIES})."
+                    f"Retrying in {wait}s (rate-limit attempt "
+                    f"{rate_limits}/{LLM_MAX_RATE_LIMIT_RETRIES})."
                 )
                 time.sleep(wait)
+                # Waiting out a rate limit is not a failed attempt: it must not
+                # consume the budget reserved for genuine errors.
+                attempt -= 1
                 continue
-            log_warn(f"{provider['name']} rate-limited (429) after retries; treating as quota exhausted.")
-            metered = _metered_model(provider)
-            if metered:
-                gemini_quota.mark_exhausted(metered)
+
+            # Still limited, and the API never said the day is gone. Skipping
+            # this provider for the rest of the run is enough — writing the day
+            # off would cost every later run its preferred model on the word of
+            # a limit that may well clear in a minute. The worst case is one
+            # wasted request next run; the old behavior cost seven.
+            log_warn(
+                f"{provider['name']} still rate-limited after "
+                f"{rate_limits} attempt(s); skipping it for this run only."
+            )
             return QUOTA_EXHAUSTED_SENTINEL
 
         if resp.status_code in TRANSIENT_STATUS and attempt < LLM_MAX_RETRIES:

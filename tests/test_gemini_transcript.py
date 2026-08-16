@@ -198,3 +198,55 @@ class TestSourceOrder:
         assert result["transcript"] == "local text"
         assert result["reason"] == "fallback_ok"
         assert result["budget_exhausted"] is False
+
+
+class TestRateLimitKind:
+    """
+    Only a per-day 429 may spend the day's budget.
+
+    The rotation makes this cheap to get right: a model that is merely
+    rate-limited for the minute is skipped in favor of the next one, and is
+    still available to the next run an hour later.
+    """
+
+    def test_a_per_day_429_writes_the_model_off_for_the_day(self, monkeypatch, gemini_key):
+        import gemini_quota
+        from test_gemini_quota import PER_DAY_BODY
+
+        monkeypatch.setattr(
+            transcript.requests, "post",
+            lambda url, **kwargs: FakeResponse(status_code=429, text=PER_DAY_BODY),
+        )
+        transcript._fetch_gemini_transcript("vid00000001")
+        assert gemini_quota.is_exhausted("gemini-3.5-flash") is True
+
+    def test_a_per_minute_429_leaves_the_day_intact(self, monkeypatch, gemini_key):
+        import gemini_quota
+        from test_gemini_quota import PER_MINUTE_BODY
+
+        monkeypatch.setattr(
+            transcript.requests, "post",
+            lambda url, **kwargs: FakeResponse(status_code=429, text=PER_MINUTE_BODY),
+        )
+        text, exhausted, reason = transcript._fetch_gemini_transcript("vid00000001")
+        # Still a deferral — every model refused — but tomorrow's counter is
+        # not carrying a write-off that a minute would have cleared.
+        assert (text, exhausted, reason) == ("", True, "gemini_quota")
+        for model in transcript._gemini_transcript_models():
+            assert gemini_quota.is_exhausted(model) is False
+
+    def test_a_minute_limited_model_is_not_re_asked_this_run(self, monkeypatch, gemini_key):
+        # Not written into the day's counter, so the skip has to be remembered
+        # in the process — otherwise every video re-asks and is refused again.
+        from test_gemini_quota import PER_MINUTE_BODY
+
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+            return FakeResponse(status_code=429, text=PER_MINUTE_BODY)
+
+        monkeypatch.setattr(transcript.requests, "post", fake_post)
+        transcript._fetch_gemini_transcript("vid00000001")
+        transcript._fetch_gemini_transcript("vid00000002")
+        assert len(calls) == len(transcript._gemini_transcript_models())
