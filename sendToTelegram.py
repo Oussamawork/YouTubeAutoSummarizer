@@ -1,11 +1,19 @@
 import html
+import json
+import os
 
 import requests
 from log import log_info, log_warn, log_error
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+TELEGRAM_PHOTO_API = "https://api.telegram.org/bot{token}/sendPhoto"
+TELEGRAM_MEDIA_GROUP_API = "https://api.telegram.org/bot{token}/sendMediaGroup"
 TELEGRAM_TIMEOUT = 15
+# Photo uploads carry megabytes, not kilobytes; give them a wider window.
+TELEGRAM_UPLOAD_TIMEOUT = 60
 TELEGRAM_MAX_LEN = 4096  # Telegram's hard limit on message text length
+TELEGRAM_ALBUM_MAX = 10  # Telegram's hard limit on media items per album
+TELEGRAM_CAPTION_MAX = 1024  # Telegram's hard limit on media caption length
 
 
 def _build_html_message(channel_name, video_title, video_url, published_at, summary):
@@ -164,6 +172,69 @@ def send_telegram_text(bot_token, chat_id, text):
         return True
     log_error("Failed to send Telegram text message.")
     return False
+
+
+def send_telegram_photo_album(bot_token, chat_id, photo_paths, caption=None):
+    """
+    Send local image files as one photo album (sendMediaGroup), with `caption`
+    shown under the album (Telegram displays the first item's caption). A
+    single photo goes through sendPhoto instead — sendMediaGroup requires at
+    least two items. More than TELEGRAM_ALBUM_MAX photos are split across
+    albums. Returns True only if every send was accepted; missing files are
+    skipped with a warning, and no failure ever raises.
+    """
+    paths = []
+    for path in photo_paths or []:
+        if os.path.isfile(path):
+            paths.append(path)
+        else:
+            log_warn(f"Album photo missing, skipping: {path}")
+    if not paths:
+        log_warn("No photos to send to Telegram.")
+        return False
+
+    caption = (caption or "")[:TELEGRAM_CAPTION_MAX] or None
+    for start in range(0, len(paths), TELEGRAM_ALBUM_MAX):
+        batch = paths[start:start + TELEGRAM_ALBUM_MAX]
+        first_batch = start == 0
+        try:
+            if len(batch) == 1:
+                with open(batch[0], "rb") as f:
+                    data = {"chat_id": chat_id}
+                    if caption and first_batch:
+                        data["caption"] = caption
+                    resp = requests.post(
+                        TELEGRAM_PHOTO_API.format(token=bot_token), data=data,
+                        files={"photo": f}, timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                    )
+            else:
+                media, files, handles = [], {}, []
+                try:
+                    for i, path in enumerate(batch):
+                        key = f"photo{i}"
+                        handle = open(path, "rb")
+                        handles.append(handle)
+                        files[key] = (os.path.basename(path), handle, "image/png")
+                        item = {"type": "photo", "media": f"attach://{key}"}
+                        if caption and first_batch and i == 0:
+                            item["caption"] = caption
+                        media.append(item)
+                    resp = requests.post(
+                        TELEGRAM_MEDIA_GROUP_API.format(token=bot_token),
+                        data={"chat_id": chat_id, "media": json.dumps(media)},
+                        files=files, timeout=TELEGRAM_UPLOAD_TIMEOUT,
+                    )
+                finally:
+                    for handle in handles:
+                        handle.close()
+        except (OSError, requests.RequestException) as e:
+            log_error(f"Telegram photo album send failed: {e}")
+            return False
+        if resp.status_code != 200:
+            log_warn(f"Telegram album send failed ({resp.status_code}): {resp.text[:200]}")
+            return False
+    log_info(f"Photo album with {len(paths)} image(s) sent to Telegram.")
+    return True
 
 
 def build_teaser(summary):

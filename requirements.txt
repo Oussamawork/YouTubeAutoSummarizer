@@ -3,6 +3,7 @@ charset-normalizer==3.4.2
 colorama==0.4.6
 defusedxml==0.7.1
 idna==3.10
+matplotlib==3.11.1
 python-dotenv==1.1.0
 requests==2.32.3
 urllib3==2.4.0

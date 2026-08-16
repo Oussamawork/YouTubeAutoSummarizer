@@ -1,0 +1,535 @@
+"""Weekly pulse charts: renders the signals aggregation as PNG images for the
+Telegram photo album that accompanies the text pulse (see market_pulse.py).
+
+Written for a non-technical reader: every chart carries a plain-English
+headline, a one-line "How to read" hint on the image itself, word-based axis
+labels ("all bearish / split / all bullish" rather than -1/0/+1), and direct
+value labels instead of a legend wherever possible.
+
+The data-prep functions are pure (no matplotlib import) so they stay testable
+in environments without the plotting stack; rendering imports matplotlib
+lazily and every chart is best-effort — a failed chart is logged and skipped,
+never raised, so the text pulse always goes out.
+"""
+import os
+from datetime import timedelta
+
+from log import log_warn
+
+from market_pulse import (
+    CONVICTION_WEIGHTS,  # noqa: F401  (documented dependency of net_stance)
+    NET_THRESHOLD,
+    net_stance,
+    _direction,
+    _directional_mentions,
+    _overall_tone,
+    _parse_date,
+    _in_window,
+)
+
+# Light-surface palette shared with the artifact mockups; PNGs render one
+# fixed theme (Telegram photos have no dark mode).
+SURFACE = "#fcfcfb"
+INK = "#0b0b0b"
+INK2 = "#52514e"
+MUTED = "#898781"
+GRID = "#e1e0d9"
+BULL = "#2a78d6"
+BEAR = "#e34948"
+NEUTRAL = "#e6e5e0"
+MIXED = "#c9c8c1"
+
+DISCLAIMER = "Aggregated creator opinions - research input, not investment advice."
+
+MAX_CONSENSUS_ROWS = 10
+MAX_FLIP_ROWS = 8
+MAX_UPSIDE_ROWS = 8
+MAX_MAP_POINTS = 15
+# A scatter point needs this many directional calls to be worth plotting;
+# below that the position is mostly noise.
+MIN_MAP_DIRECTIONAL = 3
+TONE_WEEKS = 4
+
+
+# ---------------------------------------------------------------------------
+# Pure data prep (no matplotlib)
+
+def window_label(start, end):
+    """Human date range for a (start, end] window: 'Aug 10 - 16, 2026'.
+    `start` is exclusive (the dedup-window convention), so the first shown
+    day is start+1."""
+    first = start + timedelta(days=1)
+    if first.year != end.year:
+        return f"{first.strftime('%b %-d, %Y')} - {end.strftime('%b %-d, %Y')}"
+    if first.month != end.month:
+        return f"{first.strftime('%b %-d')} - {end.strftime('%b %-d')}, {end.year}"
+    return f"{first.strftime('%b %-d')} - {end.day}, {end.year}"
+
+
+def consensus_rows(current, limit=MAX_CONSENSUS_ROWS):
+    """Top assets for the consensus board, ranked like the text pulse (most
+    directional calls first). Assets nobody took a side on are skipped — an
+    empty bar says nothing."""
+    ranked = sorted(
+        current.items(),
+        key=lambda kv: (-_directional_mentions(kv[1]), -abs(net_stance(kv[1])),
+                        -kv[1]["mentions"], kv[1]["label"]),
+    )
+    rows = []
+    for _, entry in ranked:
+        if not _directional_mentions(entry):
+            continue
+        rows.append({
+            "label": entry["label"],
+            "bull": entry["bull"],
+            "bear": entry["bear"],
+            "neutral": entry["neutral"],
+            "channels": len(entry["channels"]),
+        })
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def flip_rows(current, previous, limit=MAX_FLIP_ROWS):
+    """Consensus flips with the evidence behind them: weighted net stance in
+    both windows plus the directional-call counts, so the chart can draw a
+    one-vote flip thinner than a well-attended reversal."""
+    rows = []
+    for key, entry in current.items():
+        prev = previous.get(key)
+        if not prev:
+            continue
+        cur_score, prev_score = net_stance(entry), net_stance(prev)
+        if {_direction(cur_score), _direction(prev_score)} != {"bullish", "bearish"}:
+            continue
+        rows.append({
+            "label": entry["label"],
+            "from_score": prev_score,
+            "to_score": cur_score,
+            "from_votes": _directional_mentions(prev),
+            "to_votes": _directional_mentions(entry),
+        })
+    rows.sort(key=lambda r: (-min(r["from_votes"], r["to_votes"]), r["label"]))
+    return rows[:limit]
+
+
+def tone_weeks(records, today, num_weeks=TONE_WEEKS):
+    """Weekly market-sentiment buckets for the trailing `num_weeks` 7-day
+    windows, oldest first. Windows with no records are dropped; a window the
+    dataset only partially covers is flagged so the chart can say so."""
+    dates = sorted(d for d in (_parse_date(r.get("date")) for r in records) if d)
+    if not dates:
+        return []
+    earliest = dates[0]
+    weeks = []
+    end = today
+    for _ in range(num_weeks):
+        start = end - timedelta(days=7)
+        bucket = [r for r in records if _in_window(r, start, end)]
+        if bucket:
+            tone = _overall_tone(bucket)
+            # No year in the row label: it's a rolling four weeks, and the
+            # shorter text keeps the row labels inside the figure.
+            first = start + timedelta(days=1)
+            weeks.append({
+                "label": f"{first.strftime('%b %-d')} - {end.strftime('%b %-d')}",
+                "n": len(bucket),
+                "bullish": tone.get("bullish", 0),
+                "bearish": tone.get("bearish", 0),
+                "neutral": tone.get("neutral", 0),
+                "mixed": tone.get("mixed", 0),
+                "partial": earliest > start + timedelta(days=1),
+            })
+        end = start
+    weeks.reverse()
+    return weeks
+
+
+def conviction_points(current, limit=MAX_MAP_POINTS, min_directional=MIN_MAP_DIRECTIONAL):
+    """Assets for the agreement-vs-attention scatter: net stance (x) and
+    directional-call count (y), for assets with enough calls to place. The cap
+    keeps a crowded week readable, but never at the cost of the story: assets
+    that are NOT part of the bullish pile (bearish or contested) are re-added
+    past the cap — they are rare, and they are what the chart exists to show."""
+    points = [
+        {"label": e["label"], "net": net_stance(e), "directional": _directional_mentions(e)}
+        for e in current.values()
+        if _directional_mentions(e) >= min_directional
+    ]
+    points.sort(key=lambda p: (-p["directional"], p["label"]))
+    kept = points[:limit]
+    extra = [p for p in points[limit:] if p["net"] < NET_THRESHOLD][:3]
+    return kept + extra
+
+
+def upside_rows(current, latest_prices, limit=MAX_UPSIDE_ROWS):
+    """Implied move from the latest close to the average creator target, for
+    assets that have both. Percentages compare cleanly across price scales
+    where raw dollar targets don't."""
+    rows = []
+    for key, entry in current.items():
+        price = latest_prices.get(key)
+        if not price or not entry["targets"]:
+            continue
+        target = sum(entry["targets"]) / len(entry["targets"])
+        rows.append({
+            "label": entry["label"],
+            "price": price,
+            "target": target,
+            "pct": (target - price) / price * 100.0,
+        })
+    rows.sort(key=lambda r: (-r["pct"], r["label"]))
+    return rows[:limit]
+
+
+def build_chart_data(records, current, previous, window_start, today):
+    """Everything the renderer needs, as plain dicts/lists. `current` and
+    `previous` are aggregate_assets() outputs for the two windows."""
+    current_records = [r for r in records if _in_window(r, window_start, today)]
+    channels = {r.get("channel_name") for r in current_records if r.get("channel_name")}
+    return {
+        "window": window_label(window_start, today),
+        "videos": len(current_records),
+        "channels": len(channels),
+        "consensus": consensus_rows(current),
+        "flips": flip_rows(current, previous),
+        "tone": tone_weeks(records, today),
+        "map": conviction_points(current),
+        "upside": [],  # filled by the caller once latest prices are known
+    }
+
+
+# ---------------------------------------------------------------------------
+# Rendering (matplotlib, lazy import, best-effort per chart)
+
+def _new_figure(plt, height):
+    fig = plt.figure(figsize=(10, height), facecolor=SURFACE)
+    return fig
+
+
+def _chrome(ax):
+    """Recessive axes: no box, hairline grid only where a chart asks for it."""
+    ax.set_facecolor(SURFACE)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.tick_params(colors=MUTED, labelsize=10, length=0)
+
+
+def _finish(fig, path, title, meta, howto):
+    """Shared header (headline + context + how-to-read) and footer, then save.
+    The header lives on the figure, not the axes, so every chart carries the
+    same reading aids in the same place."""
+    fig.text(0.05, 0.965, title, fontsize=16, fontweight="bold", color=INK, va="top")
+    fig.text(0.05, 0.965 - 0.075 * (2.8 / fig.get_figheight()), meta,
+             fontsize=10.5, color=MUTED, va="top")
+    fig.text(0.05, 0.965 - 0.145 * (2.8 / fig.get_figheight()), howto,
+             fontsize=11, color=INK2, va="top", wrap=True)
+    fig.text(0.05, 0.012, DISCLAIMER, fontsize=8.5, color=MUTED)
+    fig.savefig(path, dpi=180, facecolor=SURFACE)
+
+
+def _render_consensus(plt, data, path):
+    rows = data["consensus"]
+    height = 0.42 * len(rows) + 2.4
+    fig = _new_figure(plt, height)
+    top = 1 - 1.55 / height
+    ax = fig.add_axes([0.13, 1.15 / height, 0.62, top - 1.15 / height])
+    _chrome(ax)
+
+    ys = range(len(rows) - 1, -1, -1)
+    max_bull = max(r["bull"] for r in rows)
+    max_bear = max(r["bear"] for r in rows)
+    for y, row in zip(ys, rows):
+        if row["bear"]:
+            ax.barh(y, -row["bear"], height=0.62, color=BEAR)
+            ax.text(-row["bear"] - 0.25, y, str(row["bear"]), ha="right", va="center",
+                    fontsize=10.5, color=INK2)
+        if row["bull"]:
+            ax.barh(y, row["bull"], height=0.62, color=BULL)
+            ax.text(row["bull"] + 0.25, y, str(row["bull"]), ha="left", va="center",
+                    fontsize=10.5, fontweight="bold", color=INK)
+        ax.text(1.04, y, f"{row['neutral']} neutral · {row['channels']} channels",
+                transform=ax.get_yaxis_transform(), ha="left", va="center",
+                fontsize=9.5, color=MUTED)
+    ax.axvline(0, color=MUTED, lw=1)
+    ax.set_yticks(list(ys), [r["label"] for r in rows], fontsize=11.5, color=INK)
+    for tick in ax.get_yticklabels():
+        tick.set_fontweight("bold")
+    ax.set_xlim(-max_bear - 2.5, max_bull + 2.5)
+    ax.set_xticks([])
+    ax.set_ylim(-0.7, len(rows) - 0.3)
+    # Direction captions hang off the zero line (x in data coords, y in axes
+    # coords) so they can never clip at the figure edge.
+    ax.text(-0.4, -0.04, "← say it's going down", transform=ax.get_xaxis_transform(),
+            ha="right", va="top", fontsize=10.5, color=BEAR)
+    ax.text(0.4, -0.04, "say it's going up →", transform=ax.get_xaxis_transform(),
+            ha="left", va="top", fontsize=10.5, color=BULL)
+
+    _finish(
+        fig, path,
+        "Where creators stand this week",
+        f"{data['window']} · {data['videos']} videos from {data['channels']} channels",
+        "How to read: each number is one creator call — blue bars (right) say the asset "
+        "goes up, red bars (left) say it goes down.",
+    )
+    plt.close(fig)
+
+
+def _render_flips(plt, data, path):
+    rows = data["flips"]
+    fig = _new_figure(plt, 5.2)
+    ax = fig.add_axes([0.24, 0.13, 0.52, 0.6])
+    _chrome(ax)
+
+    for score in (-1, 0, 1):
+        ax.axhline(score, color=GRID if score else MUTED, lw=1, zorder=0)
+    ax.set_ylim(-1.25, 1.25)
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_yticks([-1, 0, 1], ["all say down", "split", "all say up"],
+                  fontsize=10.5, color=INK2)
+    ax.set_xticks([0, 1], ["last week", "this week"], fontsize=11, color=INK2)
+
+    # Deterministic label placement: a top-down sweep keeps a minimum gap
+    # between labels, then the whole stack shifts up if it ran past the floor.
+    def place(labels):
+        out, prev = [], None
+        for anchor, text, strong, color in sorted(labels, key=lambda l: -l[0]):
+            y = anchor if prev is None else min(anchor, prev - 0.16)
+            out.append([y, text, strong, color])
+            prev = y
+        if out and out[-1][0] < -1.2:
+            shift = -1.2 - out[-1][0]
+            for item in out:
+                item[0] += shift
+        return out
+
+    # Labels live on the right side only (name + evidence); the left edge
+    # keeps just the word scale, so the two never collide.
+    right = []
+    for row in rows:
+        strong = min(row["from_votes"], row["to_votes"]) >= 2
+        color = BULL if row["to_score"] > 0 else BEAR
+        alpha, lw = (1.0, 3.0) if strong else (0.45, 1.4)
+        ax.plot([0, 1], [row["from_score"], row["to_score"]], color=color,
+                lw=lw, alpha=alpha, solid_capstyle="round", zorder=2)
+        ax.plot(0, row["from_score"], "o", ms=8 if strong else 5, color=color,
+                alpha=alpha, mec=SURFACE, mew=1.5, zorder=3)
+        ax.plot(1, row["to_score"], "o", ms=8 if strong else 5, color=color,
+                alpha=alpha, mec=SURFACE, mew=1.5, zorder=3)
+        votes = f"{row['from_votes']}→{row['to_votes']} calls"
+        right.append((row["to_score"], f"{row['label']} ({votes})", strong, color))
+    for y, text, strong, _ in place(right):
+        ax.text(1.06, y, text, ha="left", va="center", fontsize=10.5,
+                color=INK if strong else MUTED,
+                fontweight="bold" if strong else "normal")
+
+    _finish(
+        fig, path,
+        "Who changed their mind",
+        f"{data['window']} vs the week before",
+        "How to read: each line is one asset creators flipped on — faint thin lines "
+        "rest on a single call, so treat those as noise.",
+    )
+    plt.close(fig)
+
+
+def _render_tone(plt, data, path):
+    weeks = data["tone"]
+    height = 0.62 * len(weeks) + 2.7
+    fig = _new_figure(plt, height)
+    top = 1 - 1.6 / height
+    ax = fig.add_axes([0.17, 1.05 / height, 0.66, top - 1.05 / height])
+    _chrome(ax)
+
+    # Centered on the undecided block: bearish grows left, bullish grows
+    # right, so the eye compares the colored arms week over week.
+    scale = 0.66  # fraction of the axis a 100% week may span
+    any_partial = False
+    for i, week in enumerate(reversed(weeks)):
+        n = week["n"]
+        bear, mixed, neutral, bull = (week[k] / n for k in
+                                      ("bearish", "mixed", "neutral", "bullish"))
+        undecided = mixed + neutral
+        center_left = -undecided * scale / 2
+        segments = [
+            (center_left - bear * scale, bear * scale, BEAR),
+            (center_left, mixed * scale, MIXED),
+            (center_left + mixed * scale, neutral * scale, NEUTRAL),
+            (center_left + undecided * scale, bull * scale, BULL),
+        ]
+        for x, w, color in segments:
+            if w > 0:
+                ax.barh(i, w, left=x, height=0.58, color=color)
+        ax.text(center_left - bear * scale - 0.015, i, f"{bear:.0%}",
+                ha="right", va="center", fontsize=10.5, fontweight="bold", color=BEAR)
+        ax.text(center_left + (undecided + bull) * scale + 0.015, i, f"{bull:.0%}",
+                ha="left", va="center", fontsize=10.5, fontweight="bold", color=BULL)
+        label = week["label"] + ("*" if week["partial"] else "")
+        any_partial = any_partial or week["partial"]
+        ax.text(-0.02, i, label, transform=ax.get_yaxis_transform(), ha="right",
+                va="center", fontsize=10.5, fontweight="bold", color=INK)
+        ax.text(-0.02, i - 0.32, f"{n} videos", transform=ax.get_yaxis_transform(),
+                ha="right", va="center", fontsize=8.5, color=MUTED)
+    ax.axvline(0, color=MUTED, lw=1, ls=(0, (2, 3)))
+    ax.set_xlim(-0.62, 0.62)
+    ax.set_ylim(-0.6, len(weeks) - 0.4)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    handles = [plt.Rectangle((0, 0), 1, 1, color=c) for c in (BEAR, MIXED, NEUTRAL, BULL)]
+    ax.legend(handles, ["Expecting a fall", "Mixed", "No lean", "Expecting a rise"],
+              loc="upper center", bbox_to_anchor=(0.5, -0.02), ncol=4, frameon=False,
+              fontsize=9.5, labelcolor=INK2, handlelength=1.1, handleheight=1.1)
+    if any_partial:
+        # Figure-level, above the disclaimer — the legend owns the axes margin.
+        fig.text(0.05, 0.045, "* data collection started mid-week",
+                 fontsize=8.5, color=MUTED)
+
+    _finish(
+        fig, path,
+        "The mood, week by week",
+        "Share of analyzed videos expecting the market to rise or fall",
+        "How to read: newest week on top — blue reaching right means optimism, "
+        "red reaching left means pessimism, gray means undecided.",
+    )
+    plt.close(fig)
+
+
+def _render_map(plt, data, path):
+    points = data["map"]
+    fig = _new_figure(plt, 6.0)
+    ax = fig.add_axes([0.12, 0.13, 0.82, 0.6])
+    _chrome(ax)
+
+    max_dir = max(p["directional"] for p in points)
+    ax.set_xlim(-1.1, 1.1)
+    ax.set_ylim(0, max_dir * 1.15)
+    for x in (-1, 0, 1):
+        ax.axvline(x, color=GRID if x else MUTED, lw=1, zorder=0)
+    ax.set_xticks([-1, 0, 1], ["all say down", "split", "all say up"],
+                  fontsize=10.5, color=INK2)
+    ax.set_yticks([])
+    ax.set_ylabel("how much creators talked about it →", fontsize=10, color=MUTED)
+    ax.text(0, max_dir * 1.08, "much discussed, no agreement", ha="center",
+            fontsize=9.5, color=MUTED, style="italic")
+
+    for p in points:
+        color = (BULL if p["net"] > NET_THRESHOLD
+                 else BEAR if p["net"] < -NET_THRESHOLD else MUTED)
+        ax.plot(p["net"], p["directional"], "o", ms=10, color=color,
+                mec=SURFACE, mew=1.5, zorder=3)
+
+    # Labels stack per half-unit column of the x axis: a top-down sweep keeps
+    # a minimum gap inside each column, so the crowded "everyone agrees"
+    # edge becomes a tidy list beside its dots instead of a pile-up. A stack
+    # that would run below the axis shifts up as a block, and any label that
+    # drifted from its dot gets a hairline leader so ownership stays clear.
+    step = max_dir * 0.09
+    columns = {}
+    for p in points:
+        columns.setdefault(round(p["net"] * 2), []).append(p)
+    top_needed = max_dir * 1.15
+    for column in columns.values():
+        column.sort(key=lambda p: -p["directional"])
+        ys, prev = [], None
+        for p in column:
+            y = p["directional"] if prev is None else min(p["directional"], prev - step)
+            ys.append(y)
+            prev = y
+        floor = step * 0.7
+        if ys and ys[-1] < floor:
+            shift = floor - ys[-1]
+            ys = [y + shift for y in ys]
+        top_needed = max(top_needed, ys[0] + step * 0.6 if ys else 0)
+        for p, y in zip(column, ys):
+            left = p["net"] > 0.75
+            lx = p["net"] - 0.045 if left else p["net"] + 0.045
+            if abs(y - p["directional"]) > step * 0.5:
+                ax.plot([p["net"], lx + (0.01 if left else -0.01)],
+                        [p["directional"], y], color=GRID, lw=1, zorder=1)
+            ax.text(lx, y, p["label"], ha="right" if left else "left", va="center",
+                    fontsize=10, fontweight="bold", color=INK)
+    ax.set_ylim(0, top_needed)
+
+    _finish(
+        fig, path,
+        "Agreement vs. attention",
+        f"{data['window']} · assets with at least {MIN_MAP_DIRECTIONAL} up-or-down calls",
+        "How to read: the higher a dot, the more calls an asset drew; the further "
+        "right, the more creators agree it's going up.",
+    )
+    plt.close(fig)
+
+
+def _render_upside(plt, data, path):
+    rows = data["upside"]
+    height = 0.5 * len(rows) + 2.4
+    fig = _new_figure(plt, height)
+    top = 1 - 1.55 / height
+    ax = fig.add_axes([0.12, 0.75 / height, 0.6, top - 0.75 / height])
+    _chrome(ax)
+
+    ys = range(len(rows) - 1, -1, -1)
+    max_pct = max(abs(r["pct"]) for r in rows)
+    for y, row in zip(ys, rows):
+        color = BULL if row["pct"] >= 0 else BEAR
+        ax.barh(y, row["pct"], height=0.6, color=color)
+        ax.text(row["pct"] + (0.02 * max_pct if row["pct"] >= 0 else -0.02 * max_pct),
+                y, f"{row['pct']:+.0f}%", ha="left" if row["pct"] >= 0 else "right",
+                va="center", fontsize=11, fontweight="bold", color=INK)
+        # \$ keeps matplotlib from reading the pair of $s as inline mathtext.
+        ax.text(1.04, y, f"\\${row['price']:,.0f} now → \\${row['target']:,.0f} target",
+                transform=ax.get_yaxis_transform(), ha="left", va="center",
+                fontsize=9.5, color=MUTED)
+    ax.axvline(0, color=MUTED, lw=1)
+    ax.set_yticks(list(ys), [r["label"] for r in rows], fontsize=11.5, color=INK)
+    for tick in ax.get_yticklabels():
+        tick.set_fontweight("bold")
+    ax.set_xlim(min(0, -max_pct * 0.1) - max_pct * 0.15, max_pct * 1.2)
+    ax.set_xticks([])
+
+    _finish(
+        fig, path,
+        "How far this week's price targets reach",
+        f"{data['window']} · assets with a stated target and a known market price",
+        "How to read: each bar is the climb (or drop) from today's price to the "
+        "average target creators named this week.",
+    )
+    plt.close(fig)
+
+
+CHARTS = [
+    ("consensus", "1-consensus.png", _render_consensus),
+    ("flips", "2-flips.png", _render_flips),
+    ("tone", "3-tone.png", _render_tone),
+    ("map", "4-map.png", _render_map),
+    ("upside", "5-upside.png", _render_upside),
+]
+
+# The tone chart needs history to compare; a single week says nothing.
+MIN_TONE_WEEKS = 2
+
+
+def render_charts(data, out_dir):
+    """Render every chart whose data section is non-empty. Returns the list of
+    written paths, in album order; a chart that fails is logged and skipped so
+    one bad render never blocks the rest."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        log_warn(f"matplotlib unavailable; skipping pulse charts: {e}")
+        return []
+    os.makedirs(out_dir, exist_ok=True)
+    paths = []
+    for key, filename, renderer in CHARTS:
+        if not data.get(key) or (key == "tone" and len(data["tone"]) < MIN_TONE_WEEKS):
+            continue
+        path = os.path.join(out_dir, filename)
+        try:
+            renderer(plt, data, path)
+            paths.append(path)
+        except Exception as e:
+            log_warn(f"Pulse chart '{key}' failed to render: {e}")
+    return paths
