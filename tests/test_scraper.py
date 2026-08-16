@@ -926,3 +926,53 @@ class TestDeliveryStalledAlert:
         sent = self._sent(monkeypatch)
         assert scraper._alert_delivery_stalled("", "", {"budget_deferred": 1}, {}) is False
         assert sent == []
+
+
+def _main_harness(monkeypatch, feed, summarize):
+    """Minimal main() wiring: one channel, no network, no Telegram."""
+    for name, value in {"YOUTUBE_API_KEY": "yt", "TELEGRAM_TOKEN": "tok",
+                        "TELEGRAM_CHANNEL_ID": "premium"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MARKET_SIGNALS", "false")
+    monkeypatch.delenv("DAILY_DIGEST", raising=False)
+    monkeypatch.delenv("TELEGRAM_FREE_CHANNEL_ID", raising=False)
+    monkeypatch.setattr(scraper, "read_channels", lambda p: [
+        {"channel_id": "c1", "digest": False, "max_per_run": 10, "only": []},
+    ])
+    monkeypatch.setattr(scraper, "load_state", lambda p: {
+        "channels": {"c1": {"last_video_id": "seed",
+                            "last_published": "2026-01-01T00:00:00+00:00"}},
+        "pending": {},
+    })
+    monkeypatch.setattr(scraper, "save_state", lambda p, s: None)
+    monkeypatch.setattr(scraper, "save_to_json", lambda r, f: None)
+    monkeypatch.setattr(scraper, "get_recent_videos", lambda k, c: feed)
+    monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
+    monkeypatch.setattr(scraper, "_summarize_video", summarize)
+    warnings = []
+    monkeypatch.setattr(scraper, "log_warn", lambda msg: warnings.append(msg))
+    return warnings
+
+
+def test_a_gemini_success_is_not_reported_as_a_transcript_failure(monkeypatch):
+    # The run summary used to read "Transcript failures by reason: gemini_ok=4,
+    # gemini_http_400=1" — four successful transcripts counted as failures,
+    # because scraper kept its own copy of the success reasons and it drifted
+    # when the Gemini source was added.
+    def summarize(d, a, compact=False, want_signals=False, hours_since_first=None):
+        d["transcript_reason"] = "gemini_ok"
+        return ("S", "sent", True, None)
+
+    warnings = _main_harness(monkeypatch, [_vid("v1", "2026-07-03T00:00:00+00:00")], summarize)
+    scraper.main()
+    assert not [w for w in warnings if "Transcript failures" in w]
+
+
+def test_a_real_transcript_failure_is_still_reported(monkeypatch):
+    def summarize(d, a, compact=False, want_signals=False, hours_since_first=None):
+        d["transcript_reason"] = "gemini_too_large"
+        return ("S", "no_transcript", True, None)
+
+    warnings = _main_harness(monkeypatch, [_vid("v1", "2026-07-03T00:00:00+00:00")], summarize)
+    scraper.main()
+    assert [w for w in warnings if "Transcript failures" in w and "gemini_too_large" in w]

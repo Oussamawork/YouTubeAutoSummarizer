@@ -5,7 +5,11 @@ import sys
 import time
 from dotenv import load_dotenv
 from defusedxml import ElementTree as SafeET
-from transcript import get_transcript_from_video, budget_status
+from transcript import (
+    TRANSCRIPT_SUCCESS_REASONS,
+    get_transcript_from_video,
+    budget_status,
+)
 from helpers import (
     read_channels, save_to_json, clean_summary, load_state, save_state, env_int,
     env_float, append_jsonl, title_matches,
@@ -920,7 +924,7 @@ def main():
                         )
                         outcomes[outcome] += 1
                         reason = video_details.get("transcript_reason")
-                        if reason and reason not in ("ok", "fallback_ok"):
+                        if reason and reason not in TRANSCRIPT_SUCCESS_REASONS:
                             transcript_reasons[reason] = transcript_reasons.get(reason, 0) + 1
 
                         # One notice per run per deferral kind is enough; later
