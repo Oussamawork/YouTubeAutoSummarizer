@@ -25,6 +25,17 @@ from sendToTelegram import send_telegram_text
 load_dotenv('.env')
 
 STOOQ_URL = "https://stooq.com/q/d/l/?s={symbol}&d1={d1}&d2={d2}&i=d"
+# Stooq rejects the default python-requests user agent, answering 404 for every
+# symbol — indistinguishable from "no such ticker" in the logs, which is how it
+# went unnoticed from the first scheduled run (2026-07-27) onward: every price
+# lookup failed, so implied-upside annotations, track-record weighting and the
+# scorecard all silently degraded to "unavailable". A browser UA is what the
+# endpoint expects from a CSV client.
+STOOQ_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
+    "Accept": "text/csv,text/plain,*/*",
+}
 REQUEST_TIMEOUT = 15
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2
@@ -69,7 +80,7 @@ def fetch_prices(symbol, start, end):
     )
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.get(url, timeout=REQUEST_TIMEOUT)
+            resp = requests.get(url, headers=STOOQ_HEADERS, timeout=REQUEST_TIMEOUT)
         except requests.RequestException as e:
             log_warn(f"Stooq request error for {symbol} (attempt {attempt}/{MAX_RETRIES}): {e}")
             if attempt < MAX_RETRIES:

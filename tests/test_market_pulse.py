@@ -284,3 +284,35 @@ def test_asset_line_separates_direction_from_breadth():
     line = mp._format_asset_line(stats["NVDA"])
     assert "net bullish (1↑/0↓, 1 neutral)" in line
     assert "2 mentions across 2 channels" in line
+
+
+def test_fetch_latest_prices_warns_when_every_lookup_fails(monkeypatch):
+    """All-tickers-failed is a source outage, not a per-symbol miss; it must
+    surface as one loud line rather than only per-symbol warnings."""
+    warnings = []
+    monkeypatch.setattr(mp, "log_warn", lambda msg: warnings.append(msg))
+    entries = mp.aggregate_assets([
+        _rec("2026-08-10", "A", [_asset(price_target=500)]),
+        _rec("2026-08-10", "A", [_asset("Nvidia", "NVDA", price_target=200)]),
+    ])
+    prices = mp.fetch_latest_prices(entries, price_fetcher=lambda *a: {},
+                                    today=date(2026, 8, 16))
+    assert prices == {}
+    assert any("any of the 2 tickers" in w for w in warnings)
+
+
+def test_fetch_latest_prices_quiet_on_partial_success(monkeypatch):
+    warnings = []
+    monkeypatch.setattr(mp, "log_warn", lambda msg: warnings.append(msg))
+    entries = mp.aggregate_assets([
+        _rec("2026-08-10", "A", [_asset(price_target=500)]),
+        _rec("2026-08-10", "A", [_asset("Nvidia", "NVDA", price_target=200)]),
+    ])
+
+    def fetcher(symbol, start, end):
+        return {end.isoformat(): 100.0} if symbol == "tsla.us" else {}
+
+    prices = mp.fetch_latest_prices(entries, price_fetcher=fetcher,
+                                    today=date(2026, 8, 16))
+    assert prices == {"TSLA": 100.0}
+    assert not any("any of the" in w for w in warnings)
