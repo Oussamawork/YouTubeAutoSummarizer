@@ -53,6 +53,15 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   reads the cache and only goes live for gaps, so every caller inherits it. The
   cache is process-wide (`price_cache.active`) — tests isolate it via the autouse
   fixture in `tests/conftest.py`, or one test's lookup answers another's mock.
+  A requested window must contain a *settled* session or the provider answers
+  HTTP 400, which looks exactly like a dead ticker: a Saturday-dated call spans
+  Sat–Mon, and Monday has not closed when the warm runs at 06:00 UTC.
+  `widen_to_settled_session` pulls the start back to the last published close.
+  When a symbol looks unpriceable, read the `[WARN] Twelve Data returned …`
+  line — it carries the provider's own explanation — and reproduce it with
+  `warm_prices.py --probe SYM --probe-days 3,10,90` before concluding the
+  ticker is wrong; note that `--probe-days N` counts back from *today*, which
+  is not the same window the warm derives from a call date.
 - `channel_scorecard.py` — Friday per-channel accuracy scorecard: directional
   calls vs daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
   Prices come from **Twelve Data** when `TWELVEDATA_API` is set (free tier: 800

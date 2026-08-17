@@ -125,6 +125,10 @@ def needed_ranges(records, today):
         end = min(end, today)
         if start > end:
             return
+        # A window with no settled session in it is rejected outright by the
+        # provider, which reads like an unpriceable ticker. Weekend-dated
+        # calls produce one until the next close is published.
+        start, end = cs.widen_to_settled_session(start, end, today)
         if symbol in ranges:
             known_start, known_end = ranges[symbol]
             ranges[symbol] = (min(known_start, start), max(known_end, end))

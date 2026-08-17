@@ -272,3 +272,20 @@ def test_probe_windows_parse_and_dedupe():
     assert warm_prices._probe_windows("") == [warm_prices.PROBE_DAYS]
     assert warm_prices._probe_windows(None) == [warm_prices.PROBE_DAYS]
     assert warm_prices._probe_windows("0,-4,abc") == [warm_prices.PROBE_DAYS]
+
+
+def test_weekend_dated_calls_get_an_answerable_range():
+    """The four symbols that failed the 2026-08-17 warm did so because their
+    call landed on a Saturday, not because the ticker was wrong."""
+    import warm_prices
+
+    records = [{"date": "2026-08-15", "channel_name": "A", "signals": {
+        "assets": [{"name": "QXO", "ticker": "QXO", "stance": "bullish",
+                    "action": "buy", "price_target": None, "catalysts": [],
+                    "type": "stock", "conviction": "medium",
+                    "horizon": "unspecified"}],
+        "market_sentiment": "bullish", "topics": []}}]
+    ranges = warm_prices.needed_ranges(records, date(2026, 8, 17))
+    start, end = ranges["qxo.us"]
+    assert start == date(2026, 8, 14)   # Friday, whose close exists
+    assert end == date(2026, 8, 17)

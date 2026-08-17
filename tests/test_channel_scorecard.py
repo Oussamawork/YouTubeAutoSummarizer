@@ -351,3 +351,26 @@ def test_provider_detail_falls_back_to_the_raw_body():
     assert cs._provider_detail(_Resp(status_code=500, text="")) != ""
     # A JSON body with no message is no better than the raw text.
     assert cs._provider_detail(_Resp(status_code=400, payload={"code": 400})) != ""
+
+
+def test_weekend_window_widens_to_a_settled_session():
+    """Measured 2026-08-17: a Sat->Mon window holds no published close —
+    Saturday and Sunday never traded and Monday has not settled — and the
+    provider answers 400, which reads downstream as a dead ticker."""
+    today = date(2026, 8, 17)                      # Monday
+    start, end = cs.widen_to_settled_session(date(2026, 8, 15), today, today)
+    assert start == date(2026, 8, 14)              # back to Friday's close
+    assert end == today                            # never moves the end
+
+
+def test_widening_leaves_an_already_answerable_window_alone():
+    """It must only ever widen: narrowing, or shifting a good window, would
+    invalidate every cached range and refetch the whole dataset."""
+    today = date(2026, 8, 17)
+    # A Friday start already contains a settled session.
+    assert cs.widen_to_settled_session(date(2026, 8, 14), today, today)[0] == date(2026, 8, 14)
+    # So does a long historical range.
+    assert cs.widen_to_settled_session(date(2026, 7, 1), today, today)[0] == date(2026, 7, 1)
+    # A fully-past window ending on a Sunday still reaches back to Friday.
+    assert cs.widen_to_settled_session(date(2026, 8, 15), date(2026, 8, 16),
+                                       today)[0] == date(2026, 8, 14)

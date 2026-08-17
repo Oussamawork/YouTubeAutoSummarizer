@@ -438,6 +438,32 @@ def _parse_stooq_csv(text, symbol):
     return prices
 
 
+def widen_to_settled_session(start, end, today):
+    """
+    Pull `start` back far enough that the window contains a session whose
+    close has actually been published.
+
+    A window holding no settled session cannot return a close, and the
+    provider rejects it with a 400 rather than answering "no data" — so it
+    reads downstream like a broken ticker. A call recorded on a Saturday
+    produces exactly that: Saturday and Sunday never traded, and Monday's
+    close does not exist yet when the warm runs at 06:00 UTC.
+
+    Measured 2026-08-17: AMTM, ECG, NU and QXO were the only four symbols in
+    a 177-symbol warm whose window began on the Saturday, and the only four
+    that failed. All four priced on the first attempt once the preceding
+    Friday was in range.
+
+    Widening costs no extra request — it is the same call with an earlier
+    start — and only ever moves `start` earlier, so a window that already
+    holds a settled session is returned untouched and stays cache-covered.
+    """
+    day = min(end, today - timedelta(days=1))
+    while day.weekday() >= 5:   # Saturday, Sunday: no session to settle
+        day -= timedelta(days=1)
+    return min(start, day), end
+
+
 def price_on_or_after(prices, day, max_lag=MAX_PRICE_LAG_DAYS):
     """Close on `day` or the next available trading day within `max_lag` days."""
     for offset in range(max_lag + 1):
