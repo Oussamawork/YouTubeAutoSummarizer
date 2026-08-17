@@ -52,6 +52,7 @@ RETRY_BACKOFF = 2
 # is built for server-side use, and its free tier (800 requests/day, 8 per
 # minute) comfortably covers a weekly pulse and scorecard.
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
+TWELVEDATA_SEARCH_URL = "https://api.twelvedata.com/symbol_search"
 # The plan allows 8 credits/minute; we pace below it on purpose. Measured
 # 2026-08-17: pacing at exactly 8 tripped 429s, because the limit is enforced
 # on the provider's rolling minute across *all* our runs while the pacer below
@@ -106,18 +107,72 @@ def twelvedata_key():
     return (os.getenv("TWELVEDATA_API") or os.getenv("TWELVEDATA_API_KEY") or "").strip()
 
 
+# Internal symbols carry their trading venue as a suffix ("nvda.us",
+# "000660.krx"), and each venue maps to the parameter the provider needs to
+# resolve a bare ticker unambiguously. Without one, a ticker listed on several
+# exchanges comes back as a 400 asking which is meant.
+VENUES = {
+    "us": {"country": "United States"},
+    "sse": {"exchange": "SSE"},         # Shanghai, incl. the STAR board
+    "szse": {"exchange": "SZSE"},       # Shenzhen
+    "krx": {"exchange": "KRX"},         # Korea
+    "xetra": {"exchange": "XETRA"},     # Germany
+    "ams": {"exchange": "Euronext Amsterdam"},
+    "hkex": {"exchange": "HKEX"},       # Hong Kong
+    "lse": {"exchange": "LSE"},         # London
+    "tse": {"exchange": "TSE"},         # Tokyo
+}
+
+
 def twelvedata_symbol(symbol):
     """
-    Translate our internal Stooq-style symbol to Twelve Data's spelling:
-    "nvda.us" -> "NVDA", "btcusd" -> "BTC/USD". Keeping the internal symbol
-    unchanged means symbol_for() and its callers stay provider-agnostic.
+    Translate our internal symbol to Twelve Data's spelling: "nvda.us" ->
+    "NVDA", "000660.krx" -> "000660", "btcusd" -> "BTC/USD". Keeping the
+    internal symbol unchanged means symbol_for() and its callers stay
+    provider-agnostic.
     """
     symbol = (symbol or "").strip().lower()
-    if symbol.endswith(".us"):
-        return symbol[:-3].upper() or None
+    if "." in symbol:
+        base, suffix = symbol.rsplit(".", 1)
+        if suffix in VENUES and base:
+            return base.upper()
+        return None
     if symbol.endswith("usd"):
         return f"{symbol[:-3].upper()}/USD" if symbol[:-3] else None
     return None
+
+
+def venue_params(symbol):
+    """The exchange/country parameter that pins an internal symbol's venue."""
+    symbol = (symbol or "").strip().lower()
+    suffix = symbol.rsplit(".", 1)[-1] if "." in symbol else ""
+    return dict(VENUES.get(suffix, {}))
+
+
+def search_symbols(query, api_key, limit=8):
+    """
+    Candidate listings for a company name, from the provider's own symbol
+    search. This is how a wrong ticker gets corrected with evidence instead of
+    a guess: it returns the real symbol, exchange, currency and instrument
+    name. Returns [] on any failure (logged, never raises).
+    """
+    try:
+        resp = requests.get(TWELVEDATA_SEARCH_URL,
+                            params={"symbol": query, "outputsize": limit,
+                                    "apikey": api_key},
+                            timeout=REQUEST_TIMEOUT)
+    except requests.RequestException as e:
+        log_warn(f"Twelve Data symbol search failed for {query!r}: {e}")
+        return []
+    if resp.status_code != 200:
+        log_warn(f"Twelve Data symbol search returned {resp.status_code} for {query!r}.")
+        return []
+    try:
+        payload = resp.json()
+    except ValueError:
+        log_warn(f"Twelve Data symbol search sent a non-JSON body for {query!r}.")
+        return []
+    return [row for row in (payload.get("data") or []) if isinstance(row, dict)][:limit]
 
 
 def _twelvedata_pace(now=None, _calls=[]):
@@ -197,10 +252,9 @@ def fetch_prices_twelvedata(symbol, start, end, api_key):
     }
     # A bare ticker listed on several exchanges is rejected with a 400 asking
     # for disambiguation — that is what NU (Nu Holdings), AMTM (Amentum) and
-    # ECG (Everus) hit, all of which are perfectly real US listings. Our
-    # ".us" symbols mean the US listing, so say so.
-    if symbol.strip().lower().endswith(".us"):
-        params["country"] = "United States"
+    # ECG (Everus) hit, all of which are perfectly real US listings. The
+    # venue suffix carries the answer.
+    params.update(venue_params(symbol))
     for attempt in range(1, MAX_RETRIES + 1):
         _twelvedata_pace()
         try:
