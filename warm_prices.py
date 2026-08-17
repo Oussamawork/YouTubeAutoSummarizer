@@ -100,6 +100,8 @@ def main():
     parser = argparse.ArgumentParser(description="Warm the daily-close cache")
     parser.add_argument("--signals", default=SIGNALS_FILE)
     parser.add_argument("--cache", default=price_cache.CACHE_FILE)
+    parser.add_argument("--ticker-map", default=ticker_resolver.MAP_FILE,
+                        dest="ticker_map")
     parser.add_argument("--dry-run", action="store_true",
                         help="Report what would be fetched without calling the provider")
     parser.add_argument("--resolve", action="store_true",
@@ -122,20 +124,30 @@ def main():
             log_error("No price API key configured (TWELVEDATA_API).")
             return 1
         key = cs.twelvedata_key()
-        learned = ticker_resolver.load()
-        # One entry per (name, recorded ticker) that currently prices as
-        # nothing. Already-resolved keys are skipped, so this is cheap to
-        # re-run and only pays for genuinely new names.
+        records = load_signals(args.signals)
+        if not records:
+            log_info("No signal records yet; nothing to resolve.")
+            return 0
+        learned = ticker_resolver.load(args.ticker_map)
+        # What counts as "needs resolving" is a symbol the warm job could not
+        # actually price — not merely one we failed to build. A ticker like
+        # APPLE forms the symbol apple.us perfectly well and still 404s, so
+        # the cache (which only holds symbols that really returned closes) is
+        # the honest signal here.
+        cache = price_cache.load(args.cache)
+        if not cache:
+            log_warn("Price cache is empty, so every asset looks unresolved; "
+                     "run a warm first to make this selective.")
         unresolved = {}
         for _, asset in mp._iter_assets(records):
             name = (asset.get("name") or "").strip()
             recorded = (asset.get("ticker") or "").strip().upper()
-            ticker = mp.canonical_ticker(asset)
             key_name = recorded or name.upper()
             if not name or key_name in learned:
                 continue
-            if ticker and cs.symbol_for(asset):
-                continue  # already priceable
+            symbol = cs.symbol_for(asset)
+            if symbol and symbol in cache:
+                continue  # already priced, nothing to learn
             unresolved.setdefault(key_name, (name, recorded))
         if not unresolved:
             log_info("Every asset already resolves to a priceable ticker.")
@@ -146,7 +158,7 @@ def main():
             learned[key_name] = entry
             status = entry["ticker"] or "no US listing"
             log_info(f"  {name[:34]:36} {recorded or '-':10} -> {status} ({entry['via']})")
-        ticker_resolver.save(learned)
+        ticker_resolver.save(learned, args.ticker_map)
         return 0
 
     if args.find:
