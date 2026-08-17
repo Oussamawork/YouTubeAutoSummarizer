@@ -85,7 +85,10 @@ jobs:
           fi
 
       - name: Alert on failure
-        if: failure()
+        # Probe/find runs are diagnostics: a symbol that does not resolve is
+        # the answer being looked for, not a broken workflow, so they must not
+        # page the Telegram channel.
+        if: ${{ failure() && inputs.probe == '' && inputs.find == '' }}
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}

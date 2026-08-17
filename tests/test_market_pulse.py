@@ -316,3 +316,22 @@ def test_fetch_latest_prices_quiet_on_partial_success(monkeypatch):
                                     today=date(2026, 8, 16))
     assert prices == {"TSLA": 100.0}
     assert not any("any of the" in w for w in warnings)
+
+
+def test_latest_prices_skip_non_usd_listings(monkeypatch):
+    """A euro close against a dollar price target is arithmetic on two
+    different units — the implied-move annotation must skip it."""
+    import channel_scorecard as cs
+    monkeypatch.setattr(cs, "symbol_for", lambda asset: "bas.xetra")
+    asked = []
+
+    def fetcher(symbol, start, end):
+        asked.append(symbol)
+        return {end.isoformat(): 45.0}
+
+    entries = mp.aggregate_assets([
+        _rec("2026-08-10", "A", [_asset("BASF", "BASF", price_target=60)]),
+    ])
+    prices = mp.fetch_latest_prices(entries, price_fetcher=fetcher,
+                                    today=date(2026, 8, 16))
+    assert prices == {} and asked == []  # never even requested

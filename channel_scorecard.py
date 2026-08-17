@@ -116,12 +116,30 @@ VENUES = {
     "sse": {"exchange": "SSE"},         # Shanghai, incl. the STAR board
     "szse": {"exchange": "SZSE"},       # Shenzhen
     "krx": {"exchange": "KRX"},         # Korea
-    "xetra": {"exchange": "XETRA"},     # Germany
-    "ams": {"exchange": "Euronext Amsterdam"},
+    "xetra": {"exchange": "XETR"},      # Germany
+    "ams": {"exchange": "Euronext"},    # Amsterdam
     "hkex": {"exchange": "HKEX"},       # Hong Kong
     "lse": {"exchange": "LSE"},         # London
     "tse": {"exchange": "TSE"},         # Tokyo
 }
+
+# What each venue quotes in. A foreign listing still scores fine on the
+# scorecard, which only reads the direction of a move — but its close must
+# never be compared against a price target the speaker gave in dollars, so
+# the implied-upside annotation and the price-target chart take USD only.
+VENUE_CURRENCY = {
+    "us": "USD", "sse": "CNY", "szse": "CNY", "krx": "KRW",
+    "xetra": "EUR", "ams": "EUR", "hkex": "HKD", "lse": "GBP", "tse": "JPY",
+}
+
+
+def quotes_in_usd(symbol):
+    """True when the symbol's venue quotes in dollars (crypto pairs are
+    explicitly /USD, so they qualify)."""
+    symbol = (symbol or "").strip().lower()
+    if "." not in symbol:
+        return symbol.endswith("usd")
+    return VENUE_CURRENCY.get(symbol.rsplit(".", 1)[-1]) == "USD"
 
 
 def twelvedata_symbol(symbol):

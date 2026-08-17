@@ -384,6 +384,11 @@ def fetch_latest_prices(entries, price_fetcher=None, today=None):
             symbol = cs.symbol_for({"ticker": entry["ticker"], "type": entry["type"]})
             if not symbol:
                 continue
+            # Price targets are quoted in dollars. A foreign listing's close is
+            # in its own currency, so an implied move against it would be
+            # arithmetic on two different units — skip rather than mislead.
+            if not cs.quotes_in_usd(symbol):
+                continue
             attempted += 1
             series = fetcher(symbol, today - timedelta(days=10), today)
             latest = _latest_price(series)
