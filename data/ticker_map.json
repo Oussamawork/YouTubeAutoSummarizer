@@ -1,12 +1,5 @@
 {
  "tickers": {
-  "AEROSPACE": {
-   "checked": "2026-08-17",
-   "company": "Honeywell Aerospace Inc.",
-   "exchange": "NASDAQ",
-   "ticker": "HONAV",
-   "via": "search"
-  },
   "AGNICO EAGLE MINES": {
    "checked": "2026-08-17",
    "company": "Agnico Eagle Mines Limited",
@@ -34,27 +27,6 @@
    "exchange": "NYSE",
    "ticker": "ALC",
    "via": "search"
-  },
-  "ALTCOINS": {
-   "checked": "2026-08-17",
-   "company": "CoinShares Altcoins ETF",
-   "exchange": "NASDAQ",
-   "ticker": "DIME",
-   "via": "search"
-  },
-  "ANTHROPIC": {
-   "checked": "2026-08-17",
-   "company": "Harbor Anthropic AI Lab Ecosystem ETF",
-   "exchange": "NYSE",
-   "ticker": "ANTW",
-   "via": "search"
-  },
-  "APOLLO": {
-   "checked": "2026-08-17",
-   "company": null,
-   "exchange": null,
-   "ticker": null,
-   "via": "unresolved"
   },
   "ARCHER AVIATION": {
    "checked": "2026-08-17",
@@ -91,13 +63,6 @@
    "ticker": "CRWV",
    "via": "search"
   },
-  "CXMT": {
-   "checked": "2026-08-17",
-   "company": null,
-   "exchange": null,
-   "ticker": null,
-   "via": "unresolved"
-  },
   "EATON": {
    "checked": "2026-08-17",
    "company": "Eaton Corporation plc",
@@ -124,13 +89,6 @@
    "company": "First Majestic Silver Corp.",
    "exchange": "NYSE",
    "ticker": "AG",
-   "via": "search"
-  },
-  "GOLD MINERS": {
-   "checked": "2026-08-17",
-   "company": "VanEck Gold Miners ETF",
-   "exchange": "NYSE",
-   "ticker": "GDX",
    "via": "search"
   },
   "GOLDMAN SACHS": {
@@ -175,20 +133,6 @@
    "ticker": "MA",
    "via": "search"
   },
-  "MCDONALD'S": {
-   "checked": "2026-08-17",
-   "company": "McDonald's Holdings Company (Japan), Ltd.",
-   "exchange": "OTC",
-   "ticker": "MDNDF",
-   "via": "search"
-  },
-  "OPENAI": {
-   "checked": "2026-08-17",
-   "company": "OpenAI Lab Ecosystem ETF",
-   "exchange": "NYSE",
-   "ticker": "OAIW",
-   "via": "search"
-  },
   "PAN AMERICAN SILVER": {
    "checked": "2026-08-17",
    "company": "Pan American Silver Corp.",
@@ -217,13 +161,6 @@
    "ticker": "SPGI",
    "via": "search"
   },
-  "SAMSUNG": {
-   "checked": "2026-08-17",
-   "company": null,
-   "exchange": null,
-   "ticker": null,
-   "via": "unresolved"
-  },
   "SANDISK": {
    "checked": "2026-08-17",
    "company": "SanDisk Corporation",
@@ -231,54 +168,12 @@
    "ticker": "SNDK",
    "via": "search"
   },
-  "SEMICONDUCTORS": {
-   "checked": "2026-08-17",
-   "company": "ProShares Ultra Semiconductors",
-   "exchange": "NYSE",
-   "ticker": "USD",
-   "via": "search"
-  },
-  "SK HYNIX": {
-   "checked": "2026-08-17",
-   "company": null,
-   "exchange": null,
-   "ticker": null,
-   "via": "unresolved"
-  },
-  "SOFTWARE": {
-   "checked": "2026-08-17",
-   "company": "Unity Software Inc.",
-   "exchange": "NYSE",
-   "ticker": "U",
-   "via": "search"
-  },
-  "SPACEX": {
-   "checked": "2026-08-17",
-   "company": null,
-   "exchange": null,
-   "ticker": null,
-   "via": "unresolved"
-  },
   "TRANE TECHNOLOGIES": {
    "checked": "2026-08-17",
    "company": "Trane Technologies plc",
    "exchange": "NYSE",
    "ticker": "TT",
    "via": "search"
-  },
-  "VISA": {
-   "checked": "2026-08-17",
-   "company": null,
-   "exchange": null,
-   "ticker": null,
-   "via": "unresolved"
-  },
-  "WAYMO": {
-   "checked": "2026-08-17",
-   "company": null,
-   "exchange": null,
-   "ticker": null,
-   "via": "unresolved"
   }
  },
  "version": 1

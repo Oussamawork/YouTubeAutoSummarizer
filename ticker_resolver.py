@@ -104,21 +104,87 @@ def save(entries, path=MAP_FILE):
     return True
 
 
-def _usable_listing(row):
-    """A row we can actually price: US-listed and quoted in dollars. The free
-    provider plan carries US markets only, and a dollar close is the one that
-    can be compared against the dollar price targets speakers give."""
-    return (row.get("country") == "United States"
+# Words that mark a listing as a fund/product rather than the company itself.
+# A call on Anthropic scored against "Harbor Anthropic AI Lab Ecosystem ETF",
+# or on semiconductors against "ProShares Ultra Semiconductors" (2x leveraged),
+# would be measuring a different instrument — and in the leveraged case would
+# double every move the scorecard reads.
+FUND_MARKERS = {
+    "etf", "etn", "etp", "fund", "trust", "index", "ecosystem", "ultra",
+    "leveraged", "inverse", "2x", "3x", "ishares", "proshares", "vaneck",
+    "spdr", "invesco", "harbor", "coinshares", "direxion", "wisdomtree",
+    "bitwise", "grayscale", "amplify", "roundhill", "defiance",
+}
+
+# Sector, theme and geography labels the extractor files as "stock". They are
+# not companies, and any listing whose name shares the word is a coincidence:
+# "Aerospace" matched Honeywell Aerospace, "Software" matched Unity Software.
+GENERIC_LABELS = {
+    "aerospace", "software", "hardware", "semiconductors", "semis", "altcoins",
+    "crypto", "miners", "mining", "gold", "silver", "financials", "banks",
+    "healthcare", "biotech", "energy", "oil", "utilities", "industrials",
+    "materials", "retail", "consumer", "technology", "tech", "defense",
+    "china", "europe", "japan", "india", "emerging", "markets", "market",
+    "stocks", "equities", "indices", "bonds", "treasuries", "commodities",
+    "quantum", "robotics", "cloud", "cybersecurity", "infrastructure",
+}
+
+
+def is_generic_label(asset_name):
+    """True when the 'asset' is a sector or theme, not a company."""
+    tokens = _tokens(asset_name)
+    return bool(tokens) and tokens <= GENERIC_LABELS
+
+
+def _is_fund(listing_name):
+    return bool(_tokens(listing_name) & FUND_MARKERS)
+
+
+def _usable_listing(row, recorded_ticker=None):
+    """
+    A row we can actually price and that is genuinely the company: US-listed,
+    quoted in dollars, and not a fund tracking it.
+
+    The fund exclusion is skipped only when the speaker named that exact
+    ticker — someone saying "GDX" means the ETF, but someone saying "gold
+    miners" does not.
+    """
+    if not (row.get("country") == "United States"
             and (row.get("currency") or "").upper() == "USD"
-            and (row.get("symbol") or "").isalpha())
+            and (row.get("symbol") or "").isalpha()):
+        return False
+    instrument = (row.get("instrument_type") or "").lower()
+    if "warrant" in instrument or "right" in instrument:
+        return False
+    if _is_fund(row.get("instrument_name")) or "etf" in instrument or "fund" in instrument:
+        return (recorded_ticker or "").upper() == (row.get("symbol") or "").upper()
+    return True
 
 
-def search_candidates(query, api_key, searcher=None):
-    """US/USD listings the provider returns for a name or ticker."""
+# Exchanges that carry a company's primary US listing. An OTC row for a
+# foreign franchise entity (McDonald's Holdings Japan) is a real listing and
+# the wrong one, so primary venues are preferred when both are offered.
+PRIMARY_EXCHANGES = ("NASDAQ", "NYSE", "NYSE ARCA", "AMEX", "BATS")
+
+
+def _rank(asset_name, row):
+    """Sort key preferring the closest name on the most primary exchange."""
+    name_score = SequenceMatcher(None, (asset_name or "").lower(),
+                                 (row.get("instrument_name") or "").lower()).ratio()
+    exchange = (row.get("exchange") or "").upper()
+    primary = 0 if exchange in PRIMARY_EXCHANGES else 1
+    return (primary, -round(name_score, 3), len(row.get("symbol") or ""))
+
+
+def search_candidates(query, api_key, searcher=None, recorded_ticker=None,
+                      asset_name=None):
+    """Usable listings for a query, best match first."""
     if searcher is None:
         import channel_scorecard as cs
         searcher = cs.search_symbols
-    return [row for row in (searcher(query, api_key) or []) if _usable_listing(row)]
+    rows = [row for row in (searcher(query, api_key) or [])
+            if _usable_listing(row, recorded_ticker)]
+    return sorted(rows, key=lambda row: _rank(asset_name or query, row))
 
 
 LLM_SYSTEM = (
@@ -173,6 +239,11 @@ def resolve(asset_name, recorded_ticker, api_key, searcher=None, completer=None)
 
     Returns an entry dict recording the outcome and how it was reached.
     """
+    if is_generic_label(asset_name):
+        return {"ticker": None, "company": None, "exchange": None,
+                "via": "not-a-company",
+                "checked": datetime.now(timezone.utc).date().isoformat()}
+
     stamp = datetime.now(timezone.utc).date().isoformat()
     # "unchecked" is deliberately not "unresolved": a lookup that never
     # completed must not be cached as a verdict, or one rate-limited run would
@@ -187,9 +258,18 @@ def resolve(asset_name, recorded_ticker, api_key, searcher=None, completer=None)
     # 1. Ask the catalogue directly, by name and by the recorded ticker.
     try:
         for query in filter(None, (asset_name, recorded_ticker)):
-            for row in search_candidates(query, api_key, searcher=searcher):
+            for row in search_candidates(query, api_key, searcher=searcher,
+                                         recorded_ticker=recorded_ticker,
+                                         asset_name=asset_name):
+                symbol = (row.get("symbol") or "").upper()
+                # An exact ticker match is itself the identity check: the
+                # speaker named this symbol and the catalogue confirms it
+                # exists. Company-name similarity does not apply — nobody
+                # expects "GDX" to look like "VanEck Gold Miners ETF".
+                if symbol and symbol == (recorded_ticker or "").upper():
+                    return entry(symbol, row, "search")
                 if names_match(asset_name, row.get("instrument_name")):
-                    return entry(row["symbol"].upper(), row, "search")
+                    return entry(symbol, row, "search")
     except Exception as e:
         if type(e).__name__ == "SearchUnavailable":
             return entry(None, None, "unchecked")
@@ -203,7 +283,9 @@ def resolve(asset_name, recorded_ticker, api_key, searcher=None, completer=None)
         candidates = []
     for candidate in candidates:
         try:
-            rows = search_candidates(candidate, api_key, searcher=searcher)
+            rows = search_candidates(candidate, api_key, searcher=searcher,
+                                     recorded_ticker=recorded_ticker,
+                                     asset_name=asset_name)
         except Exception as e:
             if type(e).__name__ == "SearchUnavailable":
                 return entry(None, None, "unchecked")

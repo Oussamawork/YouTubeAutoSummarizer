@@ -140,6 +140,9 @@ TICKER_ALIASES = {
     "SALESFORCE": "CRM", "WESTERN DIGITAL": "WDC", "MASTEC": "MTZ",
     "NCINO": "NCNO", "BLOCK": "XYZ", "PALANTIR": "PLTR", "BROADCOM": "AVGO",
     # Tickers the transcript got wrong outright.
+    "SPACEX": "SPCX",  # verified live 2026-08-17: spcx.us returns closes,
+                       # while symbol search only surfaces Thai DRs and 3x
+                       # leveraged ETPs, which are the wrong instrument
     "NEBL": "NBIS",    # Nebius is NBIS
     "RUBY": "RBRK",    # "Rubric" mis-transcribed; the company is Rubrik
     "PAS": "PAAS",     # Pan American Silver
@@ -151,7 +154,7 @@ TICKER_ALIASES = {
 # per run to rediscover a 404. They still aggregate by name in the pulse —
 # only the price lookup is suppressed.
 UNPRICEABLE_TICKERS = {
-    "SPACEX", "OPENAI", "STRIPE", "BYTEDANCE",  # private
+    "OPENAI", "STRIPE", "BYTEDANCE", "ANTHROPIC", "WAYMO", "ANDURIL",  # private
     "CXMT", "YMTC",                             # unlisted Chinese memory makers
     "SK HYNIX", "BASF", "VOW", "P911", "ADYEN",  # non-US listings
 }

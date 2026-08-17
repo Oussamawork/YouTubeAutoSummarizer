@@ -138,7 +138,7 @@ def test_resolve_cli_runs_end_to_end(tmp_path, monkeypatch, capsys):
                          {date(2026, 8, 14): 1.0})
     price_cache.save(seeded, str(cache_path), today=date(2026, 8, 17))
     monkeypatch.setattr(tr, "search_candidates",
-                        lambda q, k, searcher=None: [_listing("RBRK", "Rubrik Inc")])
+                        lambda *a, **k: [_listing("RBRK", "Rubrik Inc")])
     monkeypatch.setattr(warm_prices.sys, "argv",
                         ["warm_prices.py", "--resolve", "--signals", str(signals),
                          "--cache", str(cache_path),
@@ -184,3 +184,55 @@ def test_backlog_is_scoped_to_scoreable_assets_and_ranked(tmp_path):
     backlog = warm_prices.resolvable_assets(records, cache={}, learned={})
     names = [name for _, name, _ in backlog]
     assert names == ["Loud Co", "Target Co"]        # ranked by mentions
+
+
+def _row(symbol, name, exchange="NASDAQ", itype="Common Stock"):
+    return {"symbol": symbol, "instrument_name": name, "exchange": exchange,
+            "country": "United States", "currency": "USD",
+            "instrument_type": itype}
+
+
+def test_sector_labels_are_never_companies():
+    """'Aerospace' matched Honeywell Aerospace and 'Software' matched Unity
+    Software in the first live run — coincidences, not resolutions."""
+    for label in ("Aerospace", "Software", "Semiconductors", "Healthcare", "China"):
+        entry = tr.resolve(label, None, "key",
+                           searcher=lambda *a, **k: pytest.fail("must not look up a sector"),
+                           completer=lambda *a, **k: pytest.fail("must not ask the model"))
+        assert entry["ticker"] is None and entry["via"] == "not-a-company"
+
+
+def test_funds_are_rejected_for_a_company_asset():
+    """A private company must not resolve to an ETF that merely tracks it."""
+    def searcher(query, api_key):
+        return [_row("ANTW", "Harbor Anthropic AI Lab Ecosystem ETF")]
+
+    entry = tr.resolve("Anthropic", None, "key", searcher=searcher,
+                       completer=lambda *a, **k: "")
+    assert entry["ticker"] is None
+
+
+def test_a_fund_is_accepted_when_the_speaker_named_its_ticker():
+    """Saying 'GDX' means the ETF; saying 'gold miners' does not."""
+    def searcher(query, api_key):
+        return [_row("GDX", "VanEck Gold Miners ETF", exchange="NYSE ARCA")]
+
+    entry = tr.resolve("GDX", "GDX", "key", searcher=searcher,
+                       completer=lambda *a, **k: "")
+    assert entry["ticker"] == "GDX"
+
+
+def test_primary_listing_beats_a_foreign_franchise_entity():
+    """McDonald's resolved to the Japan holding company on OTC in the first run."""
+    def searcher(query, api_key):
+        return [_row("MDNDF", "McDonald's Holdings Company (Japan), Ltd.", exchange="OTC"),
+                _row("MCD", "McDonald's Corporation", exchange="NYSE")]
+
+    entry = tr.resolve("McDonald's", None, "key", searcher=searcher,
+                       completer=lambda *a, **k: "")
+    assert entry["ticker"] == "MCD"
+
+
+def test_warrants_are_never_usable():
+    assert not tr._usable_listing(_row("57MS28", "Korea Warrant 2026 on SK hynix",
+                                       itype="Warrant"))
