@@ -40,7 +40,11 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   calls vs Stooq daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
   Prices come from **Twelve Data** when `TWELVEDATA_API` is set (free tier: 800
   requests/day, 8/min — `_twelvedata_pace` respects the per-minute budget so a
-  scorecard run doesn't turn into 429s). Internal symbols stay Stooq-shaped
+  scorecard run doesn't turn into 429s). 8/min makes wall clock the binding
+  constraint, not the daily quota: the dataset spans ~180 symbols, so
+  `TWELVEDATA_MAX_REQUESTS` (120) caps a run at ~15 min and callers spend it in
+  priority order — `_pulse_inputs` fetches the reader-visible latest prices
+  before the optional track-record weighting. Both weekly workflows allow 25 min. Internal symbols stay Stooq-shaped
   (`nvda.us`, `btcusd`) and are translated per provider by `twelvedata_symbol`.
   **Stooq is the keyless legacy path and is unusable server-side** (verified
   2026-08-17): the default UA gets 404, a browser UA gets a JavaScript challenge
