@@ -131,6 +131,29 @@ TICKER_ALIASES = {
     "GOOG": "GOOGL",   # Alphabet share classes
     "UA": "UAA",       # Under Armour share classes
     "SQ": "XYZ",       # Block's 2025 ticker change
+    # Speakers say the company name and the extractor records it in the ticker
+    # field. Left alone these split one asset across two buckets — the dataset
+    # carried both AAPL and APPLE, diluting mention counts and consensus in
+    # every chart — and they price as nothing, since no exchange lists "APPLE".
+    "APPLE": "AAPL", "GOOGLE": "GOOGL", "ALPHABET": "GOOGL", "NVIDIA": "NVDA",
+    "AMAZON": "AMZN", "MICROSOFT": "MSFT", "TESLA": "TSLA", "NETFLIX": "NFLX",
+    "SALESFORCE": "CRM", "WESTERN DIGITAL": "WDC", "MASTEC": "MTZ",
+    "NCINO": "NCNO", "BLOCK": "XYZ", "PALANTIR": "PLTR", "BROADCOM": "AVGO",
+    # Tickers the transcript got wrong outright.
+    "NEBL": "NBIS",    # Nebius is NBIS
+    "RUBY": "RBRK",    # "Rubric" mis-transcribed; the company is Rubrik
+    "PAS": "PAAS",     # Pan American Silver
+}
+
+# Recorded tickers that no US listing can price: private companies, and
+# foreign or unlisted names the speakers discuss by local ticker. Kept
+# explicit so they are skipped up front instead of spending a price request
+# per run to rediscover a 404. They still aggregate by name in the pulse —
+# only the price lookup is suppressed.
+UNPRICEABLE_TICKERS = {
+    "SPACEX", "OPENAI", "STRIPE", "BYTEDANCE",  # private
+    "CXMT", "YMTC",                             # unlisted Chinese memory makers
+    "SK HYNIX", "BASF", "VOW", "P911", "ADYEN",  # non-US listings
 }
 
 
