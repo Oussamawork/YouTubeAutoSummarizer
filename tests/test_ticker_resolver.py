@@ -107,3 +107,43 @@ def test_curated_table_outranks_the_learned_map():
         assert mp.canonical_ticker({"name": "SK Hynix", "ticker": "SK HYNIX"}) == "HXSCF"
     finally:
         mp.reset_learned_tickers(None)
+
+
+def test_resolve_cli_runs_end_to_end(tmp_path, monkeypatch, capsys):
+    """A smoke test over main(): the first live --resolve run crashed on an
+    unassigned `records`, which no unit test covered because they all called
+    resolve() directly."""
+    import json as jsonlib
+    import warm_prices
+
+    signals = tmp_path / "signals.jsonl"
+    signals.write_text(jsonlib.dumps({
+        "date": "2026-08-10", "channel_name": "A",
+        "signals": {"assets": [{"name": "Rubric", "ticker": "RUBY",
+                                "stance": "bullish", "type": "stock",
+                                "conviction": "medium", "action": "none",
+                                "price_target": None, "catalysts": [],
+                                "horizon": "unspecified"}],
+                    "market_sentiment": "bullish", "topics": []},
+    }) + "\n", encoding="utf-8")
+    map_path = tmp_path / "ticker_map.json"
+
+    monkeypatch.setenv("TWELVEDATA_API", "tok")
+    # A non-empty cache that lacks ruby.us: the ticker builds a symbol but
+    # never priced, which is exactly what --resolve is for.
+    cache_path = tmp_path / "prices.json"
+    import price_cache
+    seeded = {}
+    price_cache.remember(seeded, "nvda.us", date(2026, 8, 10), date(2026, 8, 16),
+                         {date(2026, 8, 14): 1.0})
+    price_cache.save(seeded, str(cache_path), today=date(2026, 8, 17))
+    monkeypatch.setattr(tr, "search_candidates",
+                        lambda q, k, searcher=None: [_listing("RBRK", "Rubrik Inc")])
+    monkeypatch.setattr(warm_prices.sys, "argv",
+                        ["warm_prices.py", "--resolve", "--signals", str(signals),
+                         "--cache", str(cache_path),
+                         "--ticker-map", str(map_path)])
+
+    assert warm_prices.main() == 0
+    saved = jsonlib.loads(map_path.read_text(encoding="utf-8"))
+    assert saved["tickers"]["RUBY"]["ticker"] == "RBRK"
