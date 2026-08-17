@@ -1,0 +1,88 @@
+name: Warm Price Cache
+
+# The price provider's free tier allows 8 requests/minute and the dataset spans
+# hundreds of symbols, so this job — not the Monday pulse or the Friday
+# scorecard — is the one allowed to be slow. It tops up data/prices.json ahead
+# of both. Closes are immutable, so a covered symbol is never refetched: only
+# new tickers and still-open horizons cost anything after the first run.
+
+on:
+  schedule:
+    - cron: '0 6 * * 0'  # Sundays at 06:00 UTC, ahead of the Monday pulse
+  workflow_dispatch:      # Allows manual triggering from GitHub UI
+
+permissions:
+  contents: write  # commits the refreshed data/prices.json
+
+jobs:
+  warm-prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90  # 8 requests/minute; a cold start is ~180 symbols
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Warm the price cache
+        run: python warm_prices.py
+        env:
+          TWELVEDATA_API: ${{ secrets.TWELVEDATA_API }}
+          # This job is the slow one by design, so it gets a far larger share
+          # of the 800/day quota than the interactive weekly jobs.
+          TWELVEDATA_MAX_REQUESTS: '600'
+
+      - name: Persist the price cache
+        run: |
+          if git status --porcelain data/prices.json | grep -q .; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add data/prices.json
+            git commit -m "chore: warm price cache [skip ci]"
+            pushed=false
+            for attempt in 1 2 3; do
+              git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+              if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+                pushed=true
+                break
+              fi
+              echo "Push attempt ${attempt} failed; retrying in $((attempt * 5))s..."
+              sleep $((attempt * 5))
+            done
+            if [ "${pushed}" != "true" ]; then
+              echo "::error::Failed to persist data/prices.json after 3 attempts; the weekly jobs will refetch."
+              exit 1
+            fi
+          else
+            echo "Price cache unchanged; nothing to commit."
+          fi
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: |
+          if [ -z "${TELEGRAM_TOKEN}" ] || [ -z "${TELEGRAM_CHANNEL_ID}" ]; then
+            echo "Telegram secrets not set; cannot send failure alert."
+            exit 0
+          fi
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          TEXT="🚨 Warm Price Cache workflow failed.
+          Repo: ${GITHUB_REPOSITORY}
+          Run: ${RUN_URL}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHANNEL_ID}" \
+            --data-urlencode "text=${TEXT}" \
+            --data-urlencode "disable_web_page_preview=true" > /dev/null \
+            || echo "Failed to send Telegram failure alert."

@@ -8,6 +8,7 @@ Tests that exercise the duration gate override it explicitly.
 """
 import pytest
 
+import price_cache
 import scraper
 
 # Captured before the autouse fixture can replace it, so tests that exercise
@@ -44,3 +45,16 @@ def _isolated_gemini_quota(tmp_path, monkeypatch):
     # Run-scoped rate-limit memory is process state, so it leaks between tests
     # unless it is reset with the counter it complements.
     monkeypatch.setattr(transcript, "_RATE_LIMITED_THIS_RUN", set())
+
+
+@pytest.fixture(autouse=True)
+def _isolated_price_cache():
+    """Isolate the process-wide daily-close cache.
+
+    Sharing it across a run is deliberate in production (a run must never
+    refetch a symbol it already has), but that same sharing would let one test
+    answer another's price lookup from cache instead of the mock it installed.
+    """
+    price_cache.reset({})
+    yield
+    price_cache.reset(None)

@@ -36,15 +36,21 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   imports lazily and every chart is best-effort — chart failures never block the
   text pulse. A chart with too little history to mean anything is either skipped
   (`MIN_SPREAD_WEEKS`) or labels itself as early days (`MATURE_SPREAD_WEEKS`).
+- `price_cache.py` / `warm_prices.py` — the daily-close cache (`data/prices.json`)
+  and the Sunday job that fills it (`warm-prices.yml`). Closes are immutable
+  history, so a covered range is never refetched; this is what lets the weekly
+  jobs finish at 8 requests/minute over ~180 symbols. `channel_scorecard.fetch_prices`
+  reads the cache and only goes live for gaps, so every caller inherits it. The
+  cache is process-wide (`price_cache.active`) — tests isolate it via the autouse
+  fixture in `tests/conftest.py`, or one test's lookup answers another's mock.
 - `channel_scorecard.py` — Friday per-channel accuracy scorecard: directional
-  calls vs Stooq daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
+  calls vs daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
   Prices come from **Twelve Data** when `TWELVEDATA_API` is set (free tier: 800
   requests/day, 8/min — `_twelvedata_pace` respects the per-minute budget so a
-  scorecard run doesn't turn into 429s). 8/min makes wall clock the binding
-  constraint, not the daily quota: the dataset spans ~180 symbols, so
-  `TWELVEDATA_MAX_REQUESTS` (120) caps a run at ~15 min and callers spend it in
-  priority order — `_pulse_inputs` fetches the reader-visible latest prices
-  before the optional track-record weighting. Both weekly workflows allow 25 min. Internal symbols stay Stooq-shaped
+  run doesn't turn into 429s), served through the `price_cache` (see below).
+  `TWELVEDATA_MAX_REQUESTS` (120) still caps any single run, and callers spend
+  it in priority order — `_pulse_inputs` fetches the reader-visible latest
+  prices before the optional track-record weighting. Internal symbols stay Stooq-shaped
   (`nvda.us`, `btcusd`) and are translated per provider by `twelvedata_symbol`.
   **Stooq is the keyless legacy path and is unusable server-side** (verified
   2026-08-17): the default UA gets 404, a browser UA gets a JavaScript challenge

@@ -156,6 +156,7 @@ least want to miss first — the ones at the bottom absorb whatever is left.
 | `SUPADATA_MONTHLY_BUDGET` | keys × credits | Explicit override for the whole cycle's budget. |
 | `SUPADATA_DAILY_PACING` | `false` | Ration the cycle's credits across its remaining days instead of spending what's needed each run. Off means a day's videos are all processed that day. |
 | `TWELVEDATA_API` (secret) | — | Price data for implied upside, the accuracy scorecard and the price-target chart ([twelvedata.com](https://twelvedata.com), free tier: 800 requests/day, 8/min). Without it prices are unavailable: the legacy Stooq source sits behind a browser check and returns no data to a server (verified 2026-08-17). |
+| `TWELVEDATA_MAX_REQUESTS` | `120` | Ceiling on price requests per run, so a paced run can't outlast its workflow timeout. The Sunday cache warmer raises it to 600. |
 | `SUPADATA_RESET_DAY` | `1` | Day of the month the plan's credits reset. Supadata resets on the plan's anniversary, not the 1st — the dashboard shows it ("Credits reset on 08/17" → set `17`). Only consulted when pacing is enabled: it makes the pacing think the cycle ends sooner than it does; a per-day ceiling of budget ÷ 28 limits the damage, but set it correctly. |
 
 ### Market signals (on by default):
@@ -185,6 +186,16 @@ The text pulse is followed by a **photo album of six charts** built for
 non-technical reading — each carries a plain-English headline and a "how to
 read" line on the image itself. Charts are best-effort: any that fails, or has
 too little history to mean anything, is skipped and never blocks the text.
+
+Prices are not fetched by those jobs on the hot path. The provider's free tier
+allows 8 requests/minute and the dataset spans hundreds of symbols, so
+`.github/workflows/warm-prices.yml` runs every **Sunday** and tops up a
+committed cache of daily closes (`data/prices.json`, `python warm_prices.py
+--dry-run` to see what it would fetch). Closes are immutable history, so a
+symbol whose calls have all elapsed is fetched once and never again — after the
+first warm, a normal week only pays for new tickers and still-open horizons.
+The Monday pulse and Friday scorecard read the cache and only reach the network
+for gaps.
 
 Every Friday, `.github/workflows/weekly-scorecard.yml` sends a **per-channel
 accuracy scorecard** (`python channel_scorecard.py --dry-run` locally): each
