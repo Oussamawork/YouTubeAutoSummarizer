@@ -40,6 +40,23 @@ _STOPWORDS = {
     "co", "co.", "ltd", "ltd.", "limited", "plc", "sa", "nv", "ag", "the",
     "holdings", "holding", "group", "technologies", "technology", "systems",
     "international", "class", "common", "stock", "shares", "adr", "sponsored",
+    "and", "se", "kgaa", "ab", "oyj", "spa", "asa", "nyse", "nasdaq",
+}
+
+# A country in the listing's name that the speaker never said marks a
+# different legal entity: "McDonald's Holdings Company (Japan)" trades on OTC
+# as MDNDF and is not McDonald's Corporation. Measured 2026-08-17 — a symbol
+# search for "McDonald's" returns the Japan entity and never MCD at all, so
+# exchange ranking has nothing to promote and this is the only thing that
+# stops the wrong security being adopted.
+GEO_QUALIFIERS = {
+    "japan", "japanese", "china", "chinese", "india", "indian", "korea",
+    "korean", "brazil", "brazilian", "mexico", "mexican", "europe", "european",
+    "germany", "german", "france", "french", "italy", "italian", "spain",
+    "spanish", "britain", "british", "australia", "australian", "canada",
+    "canadian", "africa", "african", "asia", "asian", "russia", "russian",
+    "taiwan", "thailand", "indonesia", "malaysia", "singapore", "philippines",
+    "vietnam", "turkey", "poland", "netherlands", "dutch", "swiss",
 }
 
 
@@ -54,9 +71,14 @@ def names_match(asset_name, listing_name):
     identity word — "Rubrik" vs "Rubrik Inc" passes, "Rubrik" vs "Ruby Tuesday"
     does not. This is the guard that stops a hallucinated-but-real ticker being
     accepted for the wrong company.
+
+    A listing that adds a country the asset never mentioned is rejected even
+    when the rest matches: the shared name is the franchise, not the company.
     """
     asset, listing = _tokens(asset_name), _tokens(listing_name)
     if not asset or not listing:
+        return False
+    if (listing & GEO_QUALIFIERS) - asset:
         return False
     if asset & listing:
         return True
