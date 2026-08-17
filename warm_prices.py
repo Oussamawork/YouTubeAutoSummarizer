@@ -100,10 +100,11 @@ def main():
     parser.add_argument("--cache", default=price_cache.CACHE_FILE)
     parser.add_argument("--dry-run", action="store_true",
                         help="Report what would be fetched without calling the provider")
-    parser.add_argument("--probe", metavar="SYMBOL", nargs="?", const="nvda.us",
-                        help="Fetch one symbol live and report what came back, without "
-                             "touching the cache. Answers 'is the price provider "
-                             "actually working?' in seconds instead of a full warm run.")
+    parser.add_argument("--probe", metavar="SYMBOLS", nargs="?", const="nvda.us",
+                        help="Fetch these comma-separated symbols live and report what "
+                             "came back, without touching the cache. Answers 'is the "
+                             "price provider working, and does this ticker resolve?' in "
+                             "seconds instead of a full warm run.")
     args = parser.parse_args()
 
     if args.probe:
@@ -111,13 +112,22 @@ def main():
             log_error("No price API key configured (TWELVEDATA_API).")
             return 1
         today = datetime.now(timezone.utc).date()
-        prices = cs.fetch_prices_live(args.probe, today - timedelta(days=10), today)
-        if not prices:
-            log_error(f"Probe failed: no closes returned for {args.probe}.")
+        symbols = [s.strip() for s in args.probe.split(",") if s.strip()]
+        failed = []
+        for symbol in symbols:
+            prices = cs.fetch_prices_live(symbol, today - timedelta(days=10), today)
+            if prices:
+                latest = max(prices)
+                log_info(f"Probe OK: {symbol} -> {len(prices)} closes, "
+                         f"latest {latest} = {prices[latest]}.")
+            else:
+                failed.append(symbol)
+                log_warn(f"Probe FAILED: {symbol} returned no closes.")
+        if failed:
+            log_error(f"{len(failed)}/{len(symbols)} symbols unavailable: "
+                      f"{', '.join(failed)}")
             return 1
-        latest = max(prices)
-        log_info(f"Probe OK: {args.probe} returned {len(prices)} closes, "
-                 f"latest {latest} = {prices[latest]}.")
+        log_info(f"All {len(symbols)} probed symbols resolved.")
         return 0
 
     records = load_signals(args.signals)

@@ -255,3 +255,40 @@ def test_spend_request_budget_logs_the_ceiling_once(monkeypatch):
     assert cs._spend_request_budget(_state=state) is False
     assert cs._spend_request_budget(_state=state) is False
     assert len(warned) == 1  # one line at the ceiling, not one per symbol
+
+
+def test_name_recorded_as_ticker_folds_to_the_real_one():
+    """Speakers say the company name and the extractor files it as the ticker.
+    Unfolded, one asset splits across two buckets and prices as nothing."""
+    for name, recorded, expected in [
+        ("Apple", "APPLE", "aapl.us"), ("Google", "GOOGLE", "googl.us"),
+        ("Nvidia", "NVIDIA", "nvda.us"), ("Nebius", "NEBL", "nbis.us"),
+        ("Pan American Silver", "PAS", "paas.us"),
+    ]:
+        assert cs.symbol_for({"name": name, "ticker": recorded, "type": "stock"}) == expected
+
+
+def test_unpriceable_tickers_are_skipped_before_any_request():
+    for ticker in ("SPACEX", "CXMT", "SK HYNIX", "BASF"):
+        assert cs.symbol_for({"name": ticker, "ticker": ticker, "type": "stock"}) is None
+
+
+def test_us_symbols_disambiguate_by_country(monkeypatch):
+    """A bare ticker on several exchanges is rejected with a 400 asking which
+    one — NU, AMTM and ECG are all real US listings that hit exactly that."""
+    monkeypatch.setenv("TWELVEDATA_API", "tok")
+    monkeypatch.setattr(cs.time, "sleep", lambda s: None)
+    seen = {}
+
+    def fake_get(url, params=None, timeout=None):
+        seen.update(params)
+        return _Resp(payload={"status": "ok", "values": [
+            {"datetime": "2026-08-14", "close": "12.0"}]})
+
+    monkeypatch.setattr(cs.requests, "get", fake_get)
+    cs.fetch_prices_live("nu.us", date(2026, 8, 10), date(2026, 8, 16))
+    assert seen["country"] == "United States"
+
+    seen.clear()
+    cs.fetch_prices_live("btcusd", date(2026, 8, 10), date(2026, 8, 16))
+    assert "country" not in seen  # crypto is not exchange-listed

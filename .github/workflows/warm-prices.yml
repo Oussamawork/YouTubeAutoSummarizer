@@ -12,9 +12,9 @@ on:
   workflow_dispatch:      # Allows manual triggering from GitHub UI
     inputs:
       probe:
-        description: 'Check the price provider with one symbol instead of warming the cache'
-        type: boolean
-        default: false
+        description: 'Comma-separated symbols to check (e.g. nu.us,aapl.us) instead of warming the cache'
+        type: string
+        default: ''
 
 permissions:
   contents: write  # commits the refreshed data/prices.json
@@ -41,8 +41,8 @@ jobs:
 
       - name: Warm the price cache
         run: |
-          if [ "${{ inputs.probe }}" = "true" ]; then
-            python warm_prices.py --probe
+          if [ -n "${{ inputs.probe }}" ]; then
+            python warm_prices.py --probe "${{ inputs.probe }}"
           else
             python warm_prices.py
           fi
@@ -53,7 +53,7 @@ jobs:
           TWELVEDATA_MAX_REQUESTS: '600'
 
       - name: Persist the price cache
-        if: ${{ inputs.probe != true }}
+        if: ${{ inputs.probe == '' }}
         run: |
           if git status --porcelain data/prices.json | grep -q .; then
             git config user.name "github-actions[bot]"

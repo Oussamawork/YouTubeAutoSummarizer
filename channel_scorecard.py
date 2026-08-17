@@ -12,6 +12,7 @@ import price_cache
 from log import log_info, log_warn, log_error
 from market_pulse import (
     SIGNALS_FILE, load_signals, _parse_date, _iter_assets, canonical_ticker,
+    UNPRICEABLE_TICKERS,
 )
 from sendToTelegram import send_telegram_text
 
@@ -87,9 +88,10 @@ def symbol_for(asset):
     call on "Chevron" scores even though the speaker never said "CVX" — a
     third of directional calls were ticker-less and invisible before this.
     """
-    ticker = (canonical_ticker(asset) or "").lower()
-    if not ticker:
+    ticker = (canonical_ticker(asset) or "").upper()
+    if not ticker or ticker in UNPRICEABLE_TICKERS:
         return None
+    ticker = ticker.lower()
     asset_type = asset.get("type")
     if asset_type in ("stock", "etf"):
         return f"{ticker}.us"
@@ -193,6 +195,12 @@ def fetch_prices_twelvedata(symbol, start, end, api_key):
         "start_date": start.isoformat(), "end_date": end.isoformat(),
         "order": "ASC", "format": "JSON", "outputsize": 5000, "apikey": api_key,
     }
+    # A bare ticker listed on several exchanges is rejected with a 400 asking
+    # for disambiguation — that is what NU (Nu Holdings), AMTM (Amentum) and
+    # ECG (Everus) hit, all of which are perfectly real US listings. Our
+    # ".us" symbols mean the US listing, so say so.
+    if symbol.strip().lower().endswith(".us"):
+        params["country"] = "United States"
     for attempt in range(1, MAX_RETRIES + 1):
         _twelvedata_pace()
         try:
