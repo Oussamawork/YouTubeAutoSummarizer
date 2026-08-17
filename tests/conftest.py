@@ -8,6 +8,7 @@ Tests that exercise the duration gate override it explicitly.
 """
 import pytest
 
+import market_pulse
 import price_cache
 import scraper
 
@@ -58,3 +59,12 @@ def _isolated_price_cache():
     price_cache.reset({})
     yield
     price_cache.reset(None)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_ticker_map():
+    """Keep the learned ticker map out of tests: it is committed data, and a
+    real entry would silently change what canonical_ticker returns."""
+    market_pulse.reset_learned_tickers({})
+    yield
+    market_pulse.reset_learned_tickers(None)

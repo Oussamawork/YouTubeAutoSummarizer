@@ -161,15 +161,60 @@ def _normalized_name(asset):
     return " ".join((asset.get("name") or "").split()).upper()
 
 
+LEARNED_TICKERS_FILE = "data/ticker_map.json"
+_LEARNED = None
+
+
+def learned_tickers(path=LEARNED_TICKERS_FILE):
+    """
+    Tickers resolved by ticker_resolver and committed to data/ticker_map.json.
+    Read as plain data (not by importing the resolver) so the pulse has no
+    dependency on the LLM or price provider. Loaded once per run.
+    """
+    global _LEARNED
+    if _LEARNED is None:
+        _LEARNED = {}
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                if isinstance(payload, dict) and payload.get("version") == 1:
+                    for key, entry in (payload.get("tickers") or {}).items():
+                        if isinstance(entry, dict) and entry.get("ticker"):
+                            _LEARNED[key.strip().upper()] = entry["ticker"].strip().upper()
+        except (OSError, ValueError) as e:
+            log_warn(f"Could not read the learned ticker map: {e}")
+    return _LEARNED
+
+
+def reset_learned_tickers(value=None):
+    """Test seam for the process-wide learned map."""
+    global _LEARNED
+    _LEARNED = value
+    return _LEARNED
+
+
 def canonical_ticker(asset):
     """
     The asset's ticker, taking the recorded one first and falling back to the
-    curated alias table. None when neither knows one.
+    curated alias table, then to the learned map. None when none of them
+    knows one.
+
+    Order is deliberate: the curated table is hand-checked and wins, so a
+    learned entry can never quietly override a decision someone made on
+    purpose. Learned entries only fill gaps the table doesn't cover.
     """
     ticker = (asset.get("ticker") or "").strip().upper()
+    name = _normalized_name(asset)
     if not ticker:
-        ticker = ASSET_ALIASES.get(_normalized_name(asset))
-    return TICKER_ALIASES.get(ticker, ticker) if ticker else None
+        ticker = ASSET_ALIASES.get(name)
+    if ticker and ticker in TICKER_ALIASES:
+        return TICKER_ALIASES[ticker]
+    learned = learned_tickers()
+    for key in filter(None, (ticker, name)):
+        if key in learned:
+            return learned[key]
+    return ticker or None
 
 
 def _asset_key(asset):
