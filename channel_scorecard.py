@@ -45,6 +45,12 @@ STOOQ_HEADERS = {
 REQUEST_TIMEOUT = 15
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2
+
+# Twelve Data is the price source once TWELVEDATA_API is set: unlike Stooq it
+# is built for server-side use, and its free tier (800 requests/day, 8 per
+# minute) comfortably covers a weekly pulse and scorecard.
+TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
+TWELVEDATA_PER_MINUTE = 8
 # A signal dated on a weekend/holiday uses the next trading day's close, up to
 # this many days later; beyond that the price point is treated as missing.
 MAX_PRICE_LAG_DAYS = 5
@@ -76,11 +82,135 @@ def symbol_for(asset):
     return None  # index/commodity/macro naming on Stooq is too inconsistent
 
 
+def twelvedata_key():
+    """The Twelve Data key from the environment, or "" when unset. Accepts the
+    repo's secret name (TWELVEDATA_API) and the conventional one."""
+    return (os.getenv("TWELVEDATA_API") or os.getenv("TWELVEDATA_API_KEY") or "").strip()
+
+
+def twelvedata_symbol(symbol):
+    """
+    Translate our internal Stooq-style symbol to Twelve Data's spelling:
+    "nvda.us" -> "NVDA", "btcusd" -> "BTC/USD". Keeping the internal symbol
+    unchanged means symbol_for() and its callers stay provider-agnostic.
+    """
+    symbol = (symbol or "").strip().lower()
+    if symbol.endswith(".us"):
+        return symbol[:-3].upper() or None
+    if symbol.endswith("usd"):
+        return f"{symbol[:-3].upper()}/USD" if symbol[:-3] else None
+    return None
+
+
+def _twelvedata_pace(now=None, _calls=[]):
+    """
+    Block until another request fits inside the free tier's per-minute budget.
+    The plan allows TWELVEDATA_PER_MINUTE requests per rolling 60s (800/day),
+    and the scorecard asks for dozens of symbols in one run, so pacing here is
+    what keeps a run from turning into a wall of 429s. Sleeps only when the
+    budget is actually spent.
+    """
+    now = now if now is not None else time.monotonic()
+    cutoff = now - 60.0
+    while _calls and _calls[0] <= cutoff:
+        _calls.pop(0)
+    if len(_calls) >= TWELVEDATA_PER_MINUTE:
+        wait = _calls[0] + 60.0 - now
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+            cutoff = now - 60.0
+            while _calls and _calls[0] <= cutoff:
+                _calls.pop(0)
+    _calls.append(now)
+
+
+def _parse_twelvedata(payload, symbol):
+    """{date: close} from a Twelve Data time_series body. The API reports its
+    own errors inside a 200 body (status="error"), so that is checked before
+    the values are read."""
+    if not isinstance(payload, dict):
+        log_warn(f"Unexpected Twelve Data response for {symbol}.")
+        return {}
+    if payload.get("status") == "error":
+        log_warn(f"Twelve Data error for {symbol}: "
+                 f"{payload.get('code')} {payload.get('message', '')[:120]}")
+        return {}
+    prices = {}
+    for row in payload.get("values") or []:
+        day = _parse_date((row.get("datetime") or "")[:10])
+        try:
+            close = float(row.get("close"))
+        except (TypeError, ValueError):
+            continue
+        if day:
+            prices[day] = close
+    if not prices:
+        log_warn(f"No usable price data from Twelve Data for {symbol}.")
+    return prices
+
+
+def fetch_prices_twelvedata(symbol, start, end, api_key):
+    """Daily closes for `symbol` from Twelve Data as {date: close}. Returns {}
+    on any failure (logged, never raises), like every other fetcher here."""
+    td_symbol = twelvedata_symbol(symbol)
+    if not td_symbol:
+        return {}
+    params = {
+        "symbol": td_symbol, "interval": "1day",
+        "start_date": start.isoformat(), "end_date": end.isoformat(),
+        "order": "ASC", "format": "JSON", "outputsize": 5000, "apikey": api_key,
+    }
+    for attempt in range(1, MAX_RETRIES + 1):
+        _twelvedata_pace()
+        try:
+            resp = requests.get(TWELVEDATA_URL, params=params, timeout=REQUEST_TIMEOUT)
+        except requests.RequestException as e:
+            log_warn(f"Twelve Data request error for {td_symbol} "
+                     f"(attempt {attempt}/{MAX_RETRIES}): {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF * attempt)
+                continue
+            return {}
+        # 429 means the pacer and the plan disagree (a shared runner, or a
+        # tighter plan than assumed); back off rather than burning the run.
+        if resp.status_code == 429:
+            log_warn(f"Twelve Data rate limit hit for {td_symbol} "
+                     f"(attempt {attempt}/{MAX_RETRIES}).")
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF * attempt * 5)
+                continue
+            return {}
+        if resp.status_code != 200:
+            log_warn(f"Twelve Data returned {resp.status_code} for {td_symbol}.")
+            return {}
+        try:
+            payload = resp.json()
+        except ValueError:
+            log_warn(f"Twelve Data sent a non-JSON body for {td_symbol}.")
+            return {}
+        return _parse_twelvedata(payload, td_symbol)
+    return {}
+
+
 def fetch_prices(symbol, start, end):
     """
-    Daily closes for `symbol` from Stooq as {date: close}. Returns {} on any
-    failure (logged, never raises); the caller just skips those assets.
+    Daily closes for `symbol` as {date: close}, from Twelve Data when a key is
+    configured and Stooq otherwise. Returns {} on any failure (logged, never
+    raises); the caller just skips those assets.
+
+    Stooq is the keyless legacy path and has been unusable server-side since
+    2026-08-17 (see STOOQ_HEADERS) — without a Twelve Data key this returns
+    nothing, which market_pulse.fetch_latest_prices reports as one loud line.
     """
+    api_key = twelvedata_key()
+    if api_key:
+        return fetch_prices_twelvedata(symbol, start, end, api_key)
+    return fetch_prices_stooq(symbol, start, end)
+
+
+def fetch_prices_stooq(symbol, start, end):
+    """Daily closes for `symbol` from Stooq as {date: close}; {} on failure."""
     url = STOOQ_URL.format(
         symbol=symbol, d1=start.strftime("%Y%m%d"), d2=end.strftime("%Y%m%d")
     )

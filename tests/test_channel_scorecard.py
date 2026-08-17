@@ -2,6 +2,8 @@
 import json
 from datetime import date, timedelta
 
+import pytest
+
 import channel_scorecard as cs
 
 
@@ -131,3 +133,92 @@ def test_symbol_for_scores_ticker_less_calls_via_alias():
     assert cs.symbol_for({"ticker": None, "name": "Bitcoin", "type": "crypto"}) == "btcusd"
     # No alias and no ticker -> still honestly unpriceable.
     assert cs.symbol_for({"ticker": None, "name": "SpaceX", "type": "stock"}) is None
+
+
+# --- Twelve Data price source -------------------------------------------------
+
+class _Resp:
+    def __init__(self, status_code=200, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+
+def test_twelvedata_symbol_translation():
+    assert cs.twelvedata_symbol("nvda.us") == "NVDA"
+    assert cs.twelvedata_symbol("btcusd") == "BTC/USD"
+    assert cs.twelvedata_symbol("^spx") is None  # indices stay unpriceable
+
+
+def test_twelvedata_key_accepts_both_names(monkeypatch):
+    monkeypatch.delenv("TWELVEDATA_API_KEY", raising=False)
+    monkeypatch.setenv("TWELVEDATA_API", " abc ")
+    assert cs.twelvedata_key() == "abc"
+    monkeypatch.delenv("TWELVEDATA_API", raising=False)
+    monkeypatch.setenv("TWELVEDATA_API_KEY", "def")
+    assert cs.twelvedata_key() == "def"
+
+
+def test_fetch_prices_uses_twelvedata_when_key_set(monkeypatch):
+    monkeypatch.setenv("TWELVEDATA_API", "tok")
+    monkeypatch.setattr(cs.time, "sleep", lambda s: None)
+    seen = {}
+
+    def fake_get(url, params=None, timeout=None):
+        seen.update({"url": url, "params": params})
+        return _Resp(payload={"status": "ok", "values": [
+            {"datetime": "2026-08-14", "close": "180.5"},
+            {"datetime": "2026-08-15", "close": "182.25"},
+        ]})
+
+    monkeypatch.setattr(cs.requests, "get", fake_get)
+    monkeypatch.setattr(cs, "fetch_prices_stooq",
+                        lambda *a: pytest.fail("Stooq must not be called with a key set"))
+    prices = cs.fetch_prices("nvda.us", date(2026, 8, 10), date(2026, 8, 16))
+    assert prices == {date(2026, 8, 14): 180.5, date(2026, 8, 15): 182.25}
+    assert seen["params"]["symbol"] == "NVDA"
+    assert seen["params"]["apikey"] == "tok"
+
+
+def test_fetch_prices_falls_back_to_stooq_without_key(monkeypatch):
+    monkeypatch.delenv("TWELVEDATA_API", raising=False)
+    monkeypatch.delenv("TWELVEDATA_API_KEY", raising=False)
+    monkeypatch.setattr(cs, "fetch_prices_stooq",
+                        lambda symbol, start, end: {date(2026, 8, 14): 1.0})
+    assert cs.fetch_prices("nvda.us", date(2026, 8, 10), date(2026, 8, 16))
+
+
+def test_twelvedata_reports_error_body_and_yields_nothing(monkeypatch):
+    """The API answers 200 with status=error; that must not parse as prices."""
+    monkeypatch.setenv("TWELVEDATA_API", "tok")
+    monkeypatch.setattr(cs.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cs.requests, "get", lambda *a, **k: _Resp(
+        payload={"status": "error", "code": 404, "message": "symbol not found"}))
+    assert cs.fetch_prices("zzzz.us", date(2026, 8, 10), date(2026, 8, 16)) == {}
+
+
+def test_twelvedata_retries_then_gives_up_on_rate_limit(monkeypatch):
+    monkeypatch.setenv("TWELVEDATA_API", "tok")
+    slept, calls = [], []
+    monkeypatch.setattr(cs.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(cs.requests, "get",
+                        lambda *a, **k: (calls.append(1), _Resp(status_code=429))[1])
+    assert cs.fetch_prices("nvda.us", date(2026, 8, 10), date(2026, 8, 16)) == {}
+    assert len(calls) == cs.MAX_RETRIES  # retried, then gave up quietly
+    assert slept  # backed off between attempts
+
+
+def test_twelvedata_pacer_only_sleeps_once_the_budget_is_spent(monkeypatch):
+    slept = []
+    monkeypatch.setattr(cs.time, "sleep", lambda s: slept.append(s))
+    window = []
+    for i in range(cs.TWELVEDATA_PER_MINUTE):
+        cs._twelvedata_pace(now=100.0 + i, _calls=window)
+    assert not slept  # under the per-minute budget, no waiting
+    cs._twelvedata_pace(now=100.0 + cs.TWELVEDATA_PER_MINUTE, _calls=window)
+    assert slept and slept[0] > 0  # budget spent -> waits for the window to roll

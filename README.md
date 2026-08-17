@@ -155,6 +155,7 @@ least want to miss first — the ones at the bottom absorb whatever is left.
 | `SUPADATA_CREDITS_PER_KEY` | `100` | Monthly credits each key contributes to the budget. |
 | `SUPADATA_MONTHLY_BUDGET` | keys × credits | Explicit override for the whole cycle's budget. |
 | `SUPADATA_DAILY_PACING` | `false` | Ration the cycle's credits across its remaining days instead of spending what's needed each run. Off means a day's videos are all processed that day. |
+| `TWELVEDATA_API` (secret) | — | Price data for implied upside, the accuracy scorecard and the price-target chart ([twelvedata.com](https://twelvedata.com), free tier: 800 requests/day, 8/min). Without it prices are unavailable: the legacy Stooq source sits behind a browser check and returns no data to a server (verified 2026-08-17). |
 | `SUPADATA_RESET_DAY` | `1` | Day of the month the plan's credits reset. Supadata resets on the plan's anniversary, not the 1st — the dashboard shows it ("Credits reset on 08/17" → set `17`). Only consulted when pacing is enabled: it makes the pacing think the cycle ends sooner than it does; a per-day ceiling of budget ÷ 28 limits the damage, but set it correctly. |
 
 ### Market signals (on by default):
@@ -179,14 +180,17 @@ assets newly on the radar. Weeks with no data are skipped silently. Once the
 Friday scorecard has enough history (5+ evaluated calls for a channel), the
 pulse's consensus becomes **accuracy-weighted** — each channel's stance counts
 at 0.5 + its 7-day hit rate, shown in a report footer — and price targets are
-annotated with the **implied move** versus the latest close (via Stooq,
-best-effort).
+annotated with the **implied move** versus the latest close (best-effort).
+The text pulse is followed by a **photo album of six charts** built for
+non-technical reading — each carries a plain-English headline and a "how to
+read" line on the image itself. Charts are best-effort: any that fails, or has
+too little history to mean anything, is skipped and never blocks the text.
 
 Every Friday, `.github/workflows/weekly-scorecard.yml` sends a **per-channel
 accuracy scorecard** (`python channel_scorecard.py --dry-run` locally): each
-channel's directional calls are checked against free daily prices from Stooq —
-was the price higher after a bullish call, lower after a bearish one — at 7-
-and 30-day horizons, with hit rates and average move in the called direction.
+channel's directional calls are checked against free daily prices — was the
+price higher after a bullish call, lower after a bearish one — at 7- and
+30-day horizons, with hit rates and average move in the called direction.
 It waits automatically until the dataset spans at least a week, and always
 shows sample sizes (small samples are noise, not skill).
 

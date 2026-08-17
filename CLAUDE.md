@@ -38,13 +38,17 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   (`MIN_SPREAD_WEEKS`) or labels itself as early days (`MATURE_SPREAD_WEEKS`).
 - `channel_scorecard.py` — Friday per-channel accuracy scorecard: directional
   calls vs Stooq daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
-  **Stooq is currently unusable server-side** (verified 2026-08-17): the default
-  UA gets 404, a browser UA gets a JavaScript challenge page instead of CSV.
-  Every price lookup has failed since the first scheduled run (2026-07-27),
-  silently disabling implied upside, track-record weighting, the scorecard and
-  the price-target chart. Restoring them needs a different price provider;
-  `market_pulse.fetch_latest_prices` logs one loud "no prices for any ticker"
-  line when the source is down, which is the first thing to check.
+  Prices come from **Twelve Data** when `TWELVEDATA_API` is set (free tier: 800
+  requests/day, 8/min — `_twelvedata_pace` respects the per-minute budget so a
+  scorecard run doesn't turn into 429s). Internal symbols stay Stooq-shaped
+  (`nvda.us`, `btcusd`) and are translated per provider by `twelvedata_symbol`.
+  **Stooq is the keyless legacy path and is unusable server-side** (verified
+  2026-08-17): the default UA gets 404, a browser UA gets a JavaScript challenge
+  instead of CSV. That block silently disabled implied upside, track-record
+  weighting, the scorecard and the price-target chart from the first scheduled
+  run (2026-07-27) until Twelve Data replaced it. `market_pulse.fetch_latest_prices`
+  logs one loud "no prices for any ticker" line when the source is down — the
+  first thing to check when prices look wrong.
 - `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback); digest builder.
 - `helpers.py` — channel file parsing (`<id|@handle> [digest] [max=N] [only=a,b]` per
   line; handles resolved at run time by `scraper.resolve_channel_handle`; `only=`
