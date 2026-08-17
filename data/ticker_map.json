@@ -1,0 +1,285 @@
+{
+ "tickers": {
+  "AEROSPACE": {
+   "checked": "2026-08-17",
+   "company": "Honeywell Aerospace Inc.",
+   "exchange": "NASDAQ",
+   "ticker": "HONAV",
+   "via": "search"
+  },
+  "AGNICO EAGLE MINES": {
+   "checked": "2026-08-17",
+   "company": "Agnico Eagle Mines Limited",
+   "exchange": "NYSE",
+   "ticker": "AEM",
+   "via": "search"
+  },
+  "AIRBNB": {
+   "checked": "2026-08-17",
+   "company": "Airbnb, Inc.",
+   "exchange": "NASDAQ",
+   "ticker": "ABNB",
+   "via": "search"
+  },
+  "ALBEMARLE CORPORATION": {
+   "checked": "2026-08-17",
+   "company": "Albemarle Corporation",
+   "exchange": "NYSE",
+   "ticker": "ALB",
+   "via": "search"
+  },
+  "ALCON": {
+   "checked": "2026-08-17",
+   "company": "Alcon Inc.",
+   "exchange": "NYSE",
+   "ticker": "ALC",
+   "via": "search"
+  },
+  "ALTCOINS": {
+   "checked": "2026-08-17",
+   "company": "CoinShares Altcoins ETF",
+   "exchange": "NASDAQ",
+   "ticker": "DIME",
+   "via": "search"
+  },
+  "ANTHROPIC": {
+   "checked": "2026-08-17",
+   "company": "Harbor Anthropic AI Lab Ecosystem ETF",
+   "exchange": "NYSE",
+   "ticker": "ANTW",
+   "via": "search"
+  },
+  "APOLLO": {
+   "checked": "2026-08-17",
+   "company": null,
+   "exchange": null,
+   "ticker": null,
+   "via": "unresolved"
+  },
+  "ARCHER AVIATION": {
+   "checked": "2026-08-17",
+   "company": "Archer Aviation Inc.",
+   "exchange": "NYSE",
+   "ticker": "ACHR",
+   "via": "search"
+  },
+  "BASF": {
+   "checked": "2026-08-17",
+   "company": "BASF SE Sponsored ADR",
+   "exchange": "OTC",
+   "ticker": "BASFY",
+   "via": "search"
+  },
+  "BLACKROCK": {
+   "checked": "2026-08-17",
+   "company": "BlackRock, Inc.",
+   "exchange": "NYSE",
+   "ticker": "BLK",
+   "via": "search"
+  },
+  "CLOUDFLARE": {
+   "checked": "2026-08-17",
+   "company": "Cloudflare Inc.",
+   "exchange": "NYSE",
+   "ticker": "NET",
+   "via": "search"
+  },
+  "COREWEAVE": {
+   "checked": "2026-08-17",
+   "company": "CoreWeave, Inc.",
+   "exchange": "NASDAQ",
+   "ticker": "CRWV",
+   "via": "search"
+  },
+  "CXMT": {
+   "checked": "2026-08-17",
+   "company": null,
+   "exchange": null,
+   "ticker": null,
+   "via": "unresolved"
+  },
+  "EATON": {
+   "checked": "2026-08-17",
+   "company": "Eaton Corporation plc",
+   "exchange": "NYSE",
+   "ticker": "ETN",
+   "via": "search"
+  },
+  "ELI LILLY": {
+   "checked": "2026-08-17",
+   "company": "Eli Lilly and Company",
+   "exchange": "NYSE",
+   "ticker": "LLY",
+   "via": "search"
+  },
+  "ENDEAVOUR SILVER": {
+   "checked": "2026-08-17",
+   "company": "Endeavour Silver Corp.",
+   "exchange": "NYSE",
+   "ticker": "EXK",
+   "via": "search"
+  },
+  "FIRST MAJESTIC SILVER": {
+   "checked": "2026-08-17",
+   "company": "First Majestic Silver Corp.",
+   "exchange": "NYSE",
+   "ticker": "AG",
+   "via": "search"
+  },
+  "GOLD MINERS": {
+   "checked": "2026-08-17",
+   "company": "VanEck Gold Miners ETF",
+   "exchange": "NYSE",
+   "ticker": "GDX",
+   "via": "search"
+  },
+  "GOLDMAN SACHS": {
+   "checked": "2026-08-17",
+   "company": "The Goldman Sachs Group, Inc.",
+   "exchange": "NYSE",
+   "ticker": "GS",
+   "via": "search"
+  },
+  "INTERCONTINENTAL EXCHANGE": {
+   "checked": "2026-08-17",
+   "company": "Intercontinental Exchange, Inc.",
+   "exchange": "NYSE",
+   "ticker": "ICE",
+   "via": "search"
+  },
+  "IREN": {
+   "checked": "2026-08-17",
+   "company": "IREN Limited",
+   "exchange": "NASDAQ",
+   "ticker": "IREN",
+   "via": "search"
+  },
+  "JPMORGAN": {
+   "checked": "2026-08-17",
+   "company": "JPMorgan Chase & Co.",
+   "exchange": "NYSE",
+   "ticker": "JPM",
+   "via": "search"
+  },
+  "KKR": {
+   "checked": "2026-08-17",
+   "company": "KKR & Co. Inc.",
+   "exchange": "NYSE",
+   "ticker": "KKR",
+   "via": "search"
+  },
+  "MASTERCARD": {
+   "checked": "2026-08-17",
+   "company": "Mastercard Incorporated",
+   "exchange": "NYSE",
+   "ticker": "MA",
+   "via": "search"
+  },
+  "MCDONALD'S": {
+   "checked": "2026-08-17",
+   "company": "McDonald's Holdings Company (Japan), Ltd.",
+   "exchange": "OTC",
+   "ticker": "MDNDF",
+   "via": "search"
+  },
+  "OPENAI": {
+   "checked": "2026-08-17",
+   "company": "OpenAI Lab Ecosystem ETF",
+   "exchange": "NYSE",
+   "ticker": "OAIW",
+   "via": "search"
+  },
+  "PAN AMERICAN SILVER": {
+   "checked": "2026-08-17",
+   "company": "Pan American Silver Corp.",
+   "exchange": "NYSE",
+   "ticker": "PAAS",
+   "via": "search"
+  },
+  "ROCKET LAB": {
+   "checked": "2026-08-17",
+   "company": "Rocket Lab Corporation",
+   "exchange": "NASDAQ",
+   "ticker": "RKLB",
+   "via": "search"
+  },
+  "ROYAL GOLD": {
+   "checked": "2026-08-17",
+   "company": "Royal Gold, Inc.",
+   "exchange": "NASDAQ",
+   "ticker": "RGLD",
+   "via": "search"
+  },
+  "S&P GLOBAL": {
+   "checked": "2026-08-17",
+   "company": "S&P Global Inc.",
+   "exchange": "NYSE",
+   "ticker": "SPGI",
+   "via": "search"
+  },
+  "SAMSUNG": {
+   "checked": "2026-08-17",
+   "company": null,
+   "exchange": null,
+   "ticker": null,
+   "via": "unresolved"
+  },
+  "SANDISK": {
+   "checked": "2026-08-17",
+   "company": "SanDisk Corporation",
+   "exchange": "NASDAQ",
+   "ticker": "SNDK",
+   "via": "search"
+  },
+  "SEMICONDUCTORS": {
+   "checked": "2026-08-17",
+   "company": "ProShares Ultra Semiconductors",
+   "exchange": "NYSE",
+   "ticker": "USD",
+   "via": "search"
+  },
+  "SK HYNIX": {
+   "checked": "2026-08-17",
+   "company": null,
+   "exchange": null,
+   "ticker": null,
+   "via": "unresolved"
+  },
+  "SOFTWARE": {
+   "checked": "2026-08-17",
+   "company": "Unity Software Inc.",
+   "exchange": "NYSE",
+   "ticker": "U",
+   "via": "search"
+  },
+  "SPACEX": {
+   "checked": "2026-08-17",
+   "company": null,
+   "exchange": null,
+   "ticker": null,
+   "via": "unresolved"
+  },
+  "TRANE TECHNOLOGIES": {
+   "checked": "2026-08-17",
+   "company": "Trane Technologies plc",
+   "exchange": "NYSE",
+   "ticker": "TT",
+   "via": "search"
+  },
+  "VISA": {
+   "checked": "2026-08-17",
+   "company": null,
+   "exchange": null,
+   "ticker": null,
+   "via": "unresolved"
+  },
+  "WAYMO": {
+   "checked": "2026-08-17",
+   "company": null,
+   "exchange": null,
+   "ticker": null,
+   "via": "unresolved"
+  }
+ },
+ "version": 1
+}
