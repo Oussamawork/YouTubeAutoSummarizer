@@ -292,3 +292,11 @@ def test_us_symbols_disambiguate_by_country(monkeypatch):
     seen.clear()
     cs.fetch_prices_live("btcusd", date(2026, 8, 10), date(2026, 8, 16))
     assert "country" not in seen  # crypto is not exchange-listed
+
+
+def test_quotes_in_usd_by_venue():
+    assert cs.quotes_in_usd("nvda.us")
+    assert cs.quotes_in_usd("btcusd")       # crypto pairs are explicitly /USD
+    assert not cs.quotes_in_usd("000660.krx")   # KRW
+    assert not cs.quotes_in_usd("bas.xetra")    # EUR
+    assert not cs.quotes_in_usd("688825.sse")   # CNY
