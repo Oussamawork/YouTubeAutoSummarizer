@@ -269,8 +269,15 @@ def test_name_recorded_as_ticker_folds_to_the_real_one():
 
 
 def test_unpriceable_tickers_are_skipped_before_any_request():
-    for ticker in ("SPACEX", "CXMT", "SK HYNIX", "BASF"):
+    for ticker in ("OPENAI", "ANTHROPIC", "CXMT", "WAYMO"):
         assert cs.symbol_for({"name": ticker, "ticker": ticker, "type": "stock"}) is None
+
+
+def test_spacex_is_priceable_via_the_curated_ticker():
+    """Verified live 2026-08-17: spcx.us returns closes, so SpaceX is no
+    longer written off as private."""
+    assert cs.symbol_for({"name": "SpaceX", "ticker": "SPACEX",
+                          "type": "stock"}) == "spcx.us"
 
 
 def test_us_symbols_disambiguate_by_country(monkeypatch):
