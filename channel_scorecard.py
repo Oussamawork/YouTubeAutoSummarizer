@@ -173,7 +173,26 @@ def search_symbols(query, api_key, limit=8):
     search. This is how a wrong ticker gets corrected with evidence instead of
     a guess: it returns the real symbol, exchange, currency and instrument
     name. Returns [] on any failure (logged, never raises).
+
+    Paced and retried like the price endpoint, and for a sharper reason: an
+    empty result here reads downstream as "this company has no listing", so a
+    rate-limited search would quietly record a real company as unlisted. A 429
+    must never be mistaken for an answer.
     """
+    for attempt in range(1, MAX_RETRIES + 1):
+        _twelvedata_pace()
+        rows = _search_once(query, api_key, limit)
+        if rows is not None:
+            return rows
+        if attempt < MAX_RETRIES:
+            time.sleep(TWELVEDATA_RATE_LIMIT_COOLDOWN)
+    log_warn(f"Symbol search for {query!r} gave up after {MAX_RETRIES} rate-limited attempts.")
+    return []
+
+
+def _search_once(query, api_key, limit):
+    """One symbol-search call. Returns the rows, or None when the answer was
+    'rate limited' — which the caller must retry rather than treat as empty."""
     try:
         resp = requests.get(TWELVEDATA_SEARCH_URL,
                             params={"symbol": query, "outputsize": limit,
@@ -182,6 +201,9 @@ def search_symbols(query, api_key, limit=8):
     except requests.RequestException as e:
         log_warn(f"Twelve Data symbol search failed for {query!r}: {e}")
         return []
+    if resp.status_code == 429:
+        log_warn(f"Twelve Data symbol search rate-limited for {query!r}.")
+        return None  # retryable: not an answer
     if resp.status_code != 200:
         log_warn(f"Twelve Data symbol search returned {resp.status_code} for {query!r}.")
         return []

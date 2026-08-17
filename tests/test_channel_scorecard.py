@@ -300,3 +300,21 @@ def test_quotes_in_usd_by_venue():
     assert not cs.quotes_in_usd("000660.krx")   # KRW
     assert not cs.quotes_in_usd("bas.xetra")    # EUR
     assert not cs.quotes_in_usd("688825.sse")   # CNY
+
+
+def test_symbol_search_retries_rate_limits_instead_of_reporting_no_listings(monkeypatch):
+    """An empty search result reads downstream as 'this company has no
+    listing', so a 429 must be retried, never returned as an answer."""
+    monkeypatch.setattr(cs.time, "sleep", lambda s: None)
+    responses = [_Resp(status_code=429),
+                 _Resp(payload={"data": [{"symbol": "RBRK",
+                                          "instrument_name": "Rubrik Inc"}]})]
+    monkeypatch.setattr(cs.requests, "get", lambda *a, **k: responses.pop(0))
+    rows = cs.search_symbols("Rubrik", "tok")
+    assert [r["symbol"] for r in rows] == ["RBRK"]  # the retry won
+
+
+def test_symbol_search_gives_up_after_persistent_rate_limits(monkeypatch):
+    monkeypatch.setattr(cs.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cs.requests, "get", lambda *a, **k: _Resp(status_code=429))
+    assert cs.search_symbols("Rubrik", "tok") == []
