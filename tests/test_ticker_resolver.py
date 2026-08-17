@@ -236,3 +236,27 @@ def test_primary_listing_beats_a_foreign_franchise_entity():
 def test_warrants_are_never_usable():
     assert not tr._usable_listing(_row("57MS28", "Korea Warrant 2026 on SK hynix",
                                        itype="Warrant"))
+
+
+def test_franchise_entity_in_another_country_is_not_the_company():
+    """Measured 2026-08-17: a search for "McDonald's" returns the Japan
+    holding company on OTC and never MCD, so rejecting the geography is the
+    only thing standing between a call on McDonald's and the wrong security."""
+    assert not tr.names_match("McDonald's", "McDonald's Holdings Company (Japan), Ltd.")
+    assert not tr.names_match("BASF", "BASF India Ltd.")
+    assert tr.names_match("McDonald's", "McDonald's Corporation")
+    # A geography the speaker did say is not a mismatch.
+    assert tr.names_match("Pan American Silver", "Pan American Silver Corp.")
+
+
+def test_assets_marked_unpriceable_are_never_resolved():
+    """A curated 'private company' decision must outrank the resolver."""
+    import warm_prices
+
+    records = [{"date": "2026-08-10", "channel_name": "A", "signals": {
+        "assets": [{"name": "OpenAI", "ticker": "OPENAI", "stance": "bullish",
+                    "action": "none", "price_target": None, "catalysts": [],
+                    "type": "stock", "conviction": "high",
+                    "horizon": "unspecified"}],
+        "market_sentiment": "bullish", "topics": []}}]
+    assert warm_prices.resolvable_assets(records, cache={}, learned={}) == []

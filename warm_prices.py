@@ -63,6 +63,14 @@ def resolvable_assets(records, cache, learned):
             continue
         if asset.get("type") not in ("stock", "etf", "crypto"):
             continue
+        # A hand-curated "no US listing" decision outranks anything the
+        # resolver might find. Without this, OpenAI — deliberately marked
+        # unpriceable — would resolve to a pre-IPO tracking instrument the
+        # catalogue happens to carry, and the learned entry would then
+        # override the curated one downstream.
+        if (recorded in mp.UNPRICEABLE_TICKERS
+                or name.upper() in mp.UNPRICEABLE_TICKERS):
+            continue
         target = asset.get("price_target")
         stake = (asset.get("stance") in ("bullish", "bearish")
                  or (isinstance(target, (int, float)) and not isinstance(target, bool)))
