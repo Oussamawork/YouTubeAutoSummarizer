@@ -25,12 +25,18 @@ from sendToTelegram import send_telegram_text
 load_dotenv('.env')
 
 STOOQ_URL = "https://stooq.com/q/d/l/?s={symbol}&d1={d1}&d2={d2}&i=d"
-# Stooq rejects the default python-requests user agent, answering 404 for every
-# symbol — indistinguishable from "no such ticker" in the logs, which is how it
-# went unnoticed from the first scheduled run (2026-07-27) onward: every price
-# lookup failed, so implied-upside annotations, track-record weighting and the
-# scorecard all silently degraded to "unavailable". A browser UA is what the
-# endpoint expects from a CSV client.
+# Stooq is behind a JavaScript browser check and is NOT usable server-side as
+# of 2026-08-17, measured directly:
+#   - default python-requests UA  -> 404 for every symbol
+#   - browser UA (these headers)  -> 200 whose body is the JS challenge page,
+#                                    not CSV, so the parser still yields nothing
+# The 404 masqueraded as "no such ticker" in the logs, which is how this went
+# unnoticed from the first scheduled run (2026-07-27) onward: every price lookup
+# has failed since, silently disabling implied-upside annotations, track-record
+# weighting, the scorecard and the price-target chart. These headers are kept
+# because they are correct for a CSV client and cost nothing if Stooq drops the
+# challenge, but restoring prices needs a different provider — do not read their
+# presence as "prices work".
 STOOQ_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
