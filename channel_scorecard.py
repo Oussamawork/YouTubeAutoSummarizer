@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from dotenv import load_dotenv
 
+import price_cache
 from log import log_info, log_warn, log_error
 from market_pulse import (
     SIGNALS_FILE, load_signals, _parse_date, _iter_assets, canonical_ticker,
@@ -50,7 +51,15 @@ RETRY_BACKOFF = 2
 # is built for server-side use, and its free tier (800 requests/day, 8 per
 # minute) comfortably covers a weekly pulse and scorecard.
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
-TWELVEDATA_PER_MINUTE = 8
+# The plan allows 8 credits/minute; we pace below it on purpose. Measured
+# 2026-08-17: pacing at exactly 8 tripped 429s, because the limit is enforced
+# on the provider's rolling minute across *all* our runs while the pacer below
+# only knows about this process — back-to-back runs start out already spent.
+TWELVEDATA_PER_MINUTE = 6
+# A 429 means "this minute is spent", so the only useful wait is the rest of
+# the window. Short exponential backoffs just burned paced slots and collapsed
+# throughput to ~1.5 symbols/minute in the same measurement.
+TWELVEDATA_RATE_LIMIT_COOLDOWN = 62
 # A per-run ceiling on price requests. At 8/minute an unbounded run is a
 # wall-clock problem, not a quota one: the dataset already spans ~180 distinct
 # symbols, which would pace out to ~27 minutes and blow the workflow timeout.
@@ -195,13 +204,13 @@ def fetch_prices_twelvedata(symbol, start, end, api_key):
                 time.sleep(RETRY_BACKOFF * attempt)
                 continue
             return {}
-        # 429 means the pacer and the plan disagree (a shared runner, or a
-        # tighter plan than assumed); back off rather than burning the run.
+        # 429 means the provider's rolling minute is spent — wait it out rather
+        # than retrying into the same closed window.
         if resp.status_code == 429:
             log_warn(f"Twelve Data rate limit hit for {td_symbol} "
-                     f"(attempt {attempt}/{MAX_RETRIES}).")
+                     f"(attempt {attempt}/{MAX_RETRIES}); waiting for the window.")
             if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF * attempt * 5)
+                time.sleep(TWELVEDATA_RATE_LIMIT_COOLDOWN)
                 continue
             return {}
         if resp.status_code != 200:
@@ -216,11 +225,11 @@ def fetch_prices_twelvedata(symbol, start, end, api_key):
     return {}
 
 
-def fetch_prices(symbol, start, end):
+def fetch_prices_live(symbol, start, end):
     """
-    Daily closes for `symbol` as {date: close}, from Twelve Data when a key is
-    configured and Stooq otherwise. Returns {} on any failure (logged, never
-    raises); the caller just skips those assets.
+    Daily closes straight from the provider: Twelve Data when a key is
+    configured, Stooq otherwise. Returns {} on any failure (logged, never
+    raises).
 
     Stooq is the keyless legacy path and has been unusable server-side since
     2026-08-17 (see STOOQ_HEADERS) — without a Twelve Data key this returns
@@ -230,6 +239,30 @@ def fetch_prices(symbol, start, end):
     if api_key:
         return fetch_prices_twelvedata(symbol, start, end, api_key)
     return fetch_prices_stooq(symbol, start, end)
+
+
+def fetch_prices(symbol, start, end, cache=None):
+    """
+    Daily closes for `symbol` as {date: close}, served from the persistent
+    cache when it already covers the range and fetched live otherwise.
+
+    Closes are immutable history, so a covered range never needs the network
+    again — which is the whole reason the weekly jobs fit their timeouts at 8
+    requests/minute. A live fetch widens the cache in memory; only the warm job
+    (price_cache.save) persists it. When a live fetch fails but the cache holds
+    part of the range, the partial data is returned: some history scores more
+    calls than none.
+    """
+    cache = price_cache.active() if cache is None else cache
+    entry = cache.get(symbol)
+    if price_cache.covered(entry, start, end):
+        return price_cache.slice_range(entry, start, end)
+
+    prices = fetch_prices_live(symbol, start, end)
+    if prices:
+        price_cache.remember(cache, symbol, start, end, prices)
+        return price_cache.slice_range(cache[symbol], start, end)
+    return price_cache.slice_range(entry, start, end)
 
 
 def fetch_prices_stooq(symbol, start, end):
