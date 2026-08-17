@@ -354,16 +354,30 @@ def fetch_latest_prices(entries, price_fetcher=None, today=None):
         fetcher = price_fetcher or cs.fetch_prices
         today = today or datetime.now(timezone.utc).date()
         prices = {}
+        attempted = 0
         for key, entry in entries.items():
             if not entry["targets"] or not entry.get("ticker"):
                 continue
             symbol = cs.symbol_for({"ticker": entry["ticker"], "type": entry["type"]})
             if not symbol:
                 continue
+            attempted += 1
             series = fetcher(symbol, today - timedelta(days=10), today)
             latest = _latest_price(series)
             if latest:
                 prices[key] = latest
+        # A single unpriceable ticker is routine; every one failing means the
+        # price source itself is down or blocking us. That distinction was
+        # invisible while each failure only logged its own per-symbol warning,
+        # so it gets one loud line — it silently disables implied upside,
+        # track-record weighting and the target chart.
+        if attempted and not prices:
+            log_warn(
+                f"No prices returned for any of the {attempted} tickers tried — "
+                "the price source looks unreachable or is blocking this runner. "
+                "Implied-upside annotations and the price-target chart are off "
+                "until it recovers."
+            )
         return prices
     except Exception as e:
         log_warn(f"Latest-price lookup unavailable this week: {e}")

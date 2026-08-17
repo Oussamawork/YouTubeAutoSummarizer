@@ -30,12 +30,18 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `market_pulse.py` — weekly aggregation over `data/signals.jsonl` (top assets,
   consensus flips, new-on-radar) sent to Telegram by `weekly-pulse.yml`.
 - `pulse_charts.py` — the pulse's companion PNG charts (consensus board, flip
-  slope, weekly tone, agreement-vs-attention map, target-upside ladder), styled
-  for non-technical readers and sent as a Telegram photo album after the text
-  pulse. Data prep is pure/testable; matplotlib imports lazily and every chart
-  is best-effort — chart failures never block the text pulse.
+  slope, weekly tone, bull-bear spread line, agreement-vs-attention map,
+  target-upside ladder), styled for non-technical readers and sent as a Telegram
+  photo album after the text pulse. Data prep is pure/testable; matplotlib
+  imports lazily and every chart is best-effort — chart failures never block the
+  text pulse. A chart with too little history to mean anything is either skipped
+  (`MIN_SPREAD_WEEKS`) or labels itself as early days (`MATURE_SPREAD_WEEKS`).
 - `channel_scorecard.py` — Friday per-channel accuracy scorecard: directional
   calls vs Stooq daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
+  Stooq 404s every symbol unless a browser `User-Agent` is sent (`STOOQ_HEADERS`)
+  — that block silently disabled all price-dependent features from the first
+  scheduled run until it was found in the logs on 2026-08-17. When prices look
+  wrong, check the CI logs for the "no prices for any ticker" warning first.
 - `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback); digest builder.
 - `helpers.py` — channel file parsing (`<id|@handle> [digest] [max=N] [only=a,b]` per
   line; handles resolved at run time by `scraper.resolve_channel_handle`; `only=`

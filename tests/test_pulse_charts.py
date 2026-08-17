@@ -87,6 +87,44 @@ def test_tone_weeks_buckets_and_partial_flag():
     assert "2026" not in weeks[0]["label"]
 
 
+def test_spread_weeks_signed_percentage_points():
+    records = [
+        # Current week: 3 bullish, 1 bearish of 4 -> (75 - 25) = +50.
+        _rec("2026-08-14", assets=[], sentiment="bullish"),
+        _rec("2026-08-14", assets=[], sentiment="bullish"),
+        _rec("2026-08-15", assets=[], sentiment="bullish"),
+        _rec("2026-08-15", assets=[], sentiment="bearish"),
+        # Prior week: 1 bullish, 3 bearish of 4 -> -50.
+        _rec("2026-08-05", assets=[], sentiment="bullish"),
+        _rec("2026-08-05", assets=[], sentiment="bearish"),
+        _rec("2026-08-06", assets=[], sentiment="bearish"),
+        _rec("2026-08-06", assets=[], sentiment="bearish"),
+    ]
+    rows = pc.spread_weeks(records, date(2026, 8, 16))
+    assert [round(r["spread"]) for r in rows] == [-50, 50]  # oldest first
+    # weeks_ago lets the chart tell a skipped week from a consecutive one.
+    assert [r["weeks_ago"] for r in rows] == [1, 0]
+
+
+def test_spread_weeks_marks_gaps_by_weeks_ago():
+    records = [
+        _rec("2026-08-15", assets=[], sentiment="bullish"),   # current window
+        _rec("2026-07-27", assets=[], sentiment="bearish"),   # window two weeks back
+    ]
+    rows = pc.spread_weeks(records, date(2026, 8, 16))
+    # The silent week between is dropped, but the jump in weeks_ago (2 -> 0)
+    # is what tells the renderer to break the line instead of bridging it.
+    assert [r["weeks_ago"] for r in rows] == [2, 0]
+
+
+def test_spread_chart_skipped_until_three_weeks(tmp_path):
+    data = {"window": "Aug 10 - 16, 2026", "videos": 1, "channels": 1,
+            "consensus": [], "flips": [], "tone": [], "map": [], "upside": [],
+            "spread": [{"label": "Aug 10 - Aug 16", "short_label": "Aug 16",
+                        "weeks_ago": 0, "n": 5, "spread": 20.0, "partial": False}]}
+    assert pc.render_charts(data, str(tmp_path)) == []
+
+
 def test_conviction_points_threshold_and_bearish_kept_past_cap():
     records = []
     # 16 bullish assets with descending call counts crowd the cap...
@@ -127,6 +165,8 @@ def test_render_charts_writes_pngs(tmp_path):
         _rec("2026-08-12", "C", [_asset(stance="bearish")], "bearish"),
         _rec("2026-08-04", "A", [_asset(stance="bearish")], "bearish"),
         _rec("2026-08-05", "B", [_asset(stance="bearish")], "neutral"),
+        # A third week so the spread line clears MIN_SPREAD_WEEKS.
+        _rec("2026-07-28", "A", [_asset(stance="bullish")], "bullish"),
     ]
     window_start = date(2026, 8, 9)
     today = date(2026, 8, 16)
@@ -135,7 +175,7 @@ def test_render_charts_writes_pngs(tmp_path):
     data = pc.build_chart_data(records, current, previous, window_start, today)
     data["upside"] = pc.upside_rows(current, {"TSLA": 400.0})
     paths = pc.render_charts(data, str(tmp_path))
-    assert len(paths) == 5  # all five charts had data
+    assert len(paths) == 6  # all six charts had data
     for path in paths:
         assert path.endswith(".png")
         assert (tmp_path / path.split("/")[-1]).stat().st_size > 0
@@ -143,7 +183,8 @@ def test_render_charts_writes_pngs(tmp_path):
 
 def test_render_charts_skips_empty_sections(tmp_path):
     data = {"window": "Aug 10 - 16, 2026", "videos": 1, "channels": 1,
-            "consensus": [], "flips": [], "tone": [], "map": [], "upside": []}
+            "consensus": [], "flips": [], "tone": [], "spread": [], "map": [],
+            "upside": []}
     assert pc.render_charts(data, str(tmp_path)) == []
 
 

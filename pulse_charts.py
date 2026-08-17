@@ -12,6 +12,7 @@ lazily and every chart is best-effort — a failed chart is logged and skipped,
 never raised, so the text pulse always goes out.
 """
 import os
+import textwrap
 from datetime import timedelta
 
 from log import log_warn
@@ -49,6 +50,11 @@ MAX_MAP_POINTS = 15
 # below that the position is mostly noise.
 MIN_MAP_DIRECTIONAL = 3
 TONE_WEEKS = 4
+# The bull-bear spread runs over a rolling quarter — it is a trend line, and a
+# trend needs room. Below MATURE_SPREAD_WEEKS the chart says so on its face
+# rather than inviting the reader to over-read a three-point line.
+SPREAD_WEEKS = 12
+MATURE_SPREAD_WEEKS = 9  # ~2 months of weekly points
 
 
 # ---------------------------------------------------------------------------
@@ -117,23 +123,27 @@ def flip_rows(current, previous, limit=MAX_FLIP_ROWS):
 def tone_weeks(records, today, num_weeks=TONE_WEEKS):
     """Weekly market-sentiment buckets for the trailing `num_weeks` 7-day
     windows, oldest first. Windows with no records are dropped; a window the
-    dataset only partially covers is flagged so the chart can say so."""
+    dataset only partially covers is flagged so the chart can say so. Each
+    week carries `weeks_ago` (0 = the current window) so a chart plotting
+    weeks on a time axis can tell a skipped week from a consecutive one."""
     dates = sorted(d for d in (_parse_date(r.get("date")) for r in records) if d)
     if not dates:
         return []
     earliest = dates[0]
     weeks = []
     end = today
-    for _ in range(num_weeks):
+    for weeks_ago in range(num_weeks):
         start = end - timedelta(days=7)
         bucket = [r for r in records if _in_window(r, start, end)]
         if bucket:
             tone = _overall_tone(bucket)
-            # No year in the row label: it's a rolling four weeks, and the
+            # No year in the row label: it's a rolling window, and the
             # shorter text keeps the row labels inside the figure.
             first = start + timedelta(days=1)
             weeks.append({
                 "label": f"{first.strftime('%b %-d')} - {end.strftime('%b %-d')}",
+                "short_label": end.strftime("%b %-d"),
+                "weeks_ago": weeks_ago,
                 "n": len(bucket),
                 "bullish": tone.get("bullish", 0),
                 "bearish": tone.get("bearish", 0),
@@ -144,6 +154,34 @@ def tone_weeks(records, today, num_weeks=TONE_WEEKS):
         end = start
     weeks.reverse()
     return weeks
+
+
+def spread_weeks(records, today, num_weeks=SPREAD_WEEKS):
+    """
+    The bull-bear spread per week: share of videos expecting a rise minus the
+    share expecting a fall, in percentage points. This is the headline number
+    sentiment surveys (AAII's weekly investor survey being the reference) lead
+    with, because one signed line answers "is optimism building or fading?"
+    without the reader decoding a stack of shares.
+
+    Runs over a rolling quarter rather than the tone chart's four weeks: the
+    spread is a trend instrument and only says something once there is a trend
+    to see. With a handful of weeks it is honest but thin — expect it to earn
+    its place around the two-to-three-month mark, when seasonal noise starts
+    averaging out and a turn in the line is distinguishable from one loud week.
+    Until then the chart labels itself as early days (see MATURE_SPREAD_WEEKS).
+    """
+    return [
+        {
+            "label": week["label"],
+            "short_label": week["short_label"],
+            "weeks_ago": week["weeks_ago"],
+            "n": week["n"],
+            "spread": (week["bullish"] - week["bearish"]) / week["n"] * 100.0,
+            "partial": week["partial"],
+        }
+        for week in tone_weeks(records, today, num_weeks=num_weeks)
+    ]
 
 
 def conviction_points(current, limit=MAX_MAP_POINTS, min_directional=MIN_MAP_DIRECTIONAL):
@@ -205,6 +243,7 @@ def build_chart_data(records, current, previous, window_start, today):
         "consensus": consensus_rows(current),
         "flips": flip_rows(current, previous),
         "tone": tone_weeks(records, today),
+        "spread": spread_weeks(records, today),
         "map": conviction_points(current),
         "upside": [],  # filled by the caller once latest prices are known
     }
@@ -226,15 +265,22 @@ def _chrome(ax):
     ax.tick_params(colors=MUTED, labelsize=10, length=0)
 
 
+# Wrap widths in characters, measured for the 10in figure at each font size.
+# matplotlib's own `wrap=True` only breaks at the figure edge, which clips the
+# last word; wrapping here keeps every header inside the margin.
+META_WRAP = 118
+HOWTO_WRAP = 112
+
+
 def _finish(fig, path, title, meta, howto):
     """Shared header (headline + context + how-to-read) and footer, then save.
     The header lives on the figure, not the axes, so every chart carries the
     same reading aids in the same place."""
     fig.text(0.05, 0.965, title, fontsize=16, fontweight="bold", color=INK, va="top")
-    fig.text(0.05, 0.965 - 0.075 * (2.8 / fig.get_figheight()), meta,
-             fontsize=10.5, color=MUTED, va="top")
-    fig.text(0.05, 0.965 - 0.145 * (2.8 / fig.get_figheight()), howto,
-             fontsize=11, color=INK2, va="top", wrap=True)
+    fig.text(0.05, 0.965 - 0.075 * (2.8 / fig.get_figheight()),
+             textwrap.fill(meta, META_WRAP), fontsize=10.5, color=MUTED, va="top")
+    fig.text(0.05, 0.965 - 0.145 * (2.8 / fig.get_figheight()),
+             textwrap.fill(howto, HOWTO_WRAP), fontsize=11, color=INK2, va="top")
     fig.text(0.05, 0.012, DISCLAIMER, fontsize=8.5, color=MUTED)
     fig.savefig(path, dpi=180, facecolor=SURFACE)
 
@@ -400,6 +446,87 @@ def _render_tone(plt, data, path):
     plt.close(fig)
 
 
+def _render_spread(plt, data, path):
+    """The bull-bear spread as one signed line over a rolling quarter, filled
+    to the zero baseline (blue above = net optimism, red below = net
+    pessimism). Gaps in the dataset break the line rather than being drawn
+    through, so a quiet week never reads as a smooth trend."""
+    rows = data["spread"]
+    fig = _new_figure(plt, 5.4)
+    ax = fig.add_axes([0.12, 0.17, 0.78, 0.53])
+    _chrome(ax)
+
+    # x is "weeks ago" negated, so the newest week sits at the right edge and
+    # a skipped week leaves a real gap on the axis.
+    xs = [-r["weeks_ago"] for r in rows]
+    ys = [r["spread"] for r in rows]
+    limit = max(60.0, max(abs(v) for v in ys) * 1.25)
+    ax.set_ylim(-limit, limit)
+    ax.set_xlim(min(xs) - 0.35, max(xs) + 0.35)
+
+    for level in (-50, -25, 25, 50):
+        if abs(level) < limit:
+            ax.axhline(level, color=GRID, lw=1, zorder=0)
+    ax.axhline(0, color=MUTED, lw=1.2, zorder=1)
+
+    # Split the series into runs of consecutive weeks; each run draws as its
+    # own filled line so missing weeks stay visible as breaks.
+    runs, run = [], [0]
+    for i in range(1, len(rows)):
+        if rows[i]["weeks_ago"] == rows[i - 1]["weeks_ago"] - 1:
+            run.append(i)
+        else:
+            runs.append(run)
+            run = [i]
+    runs.append(run)
+    for run in runs:
+        rx = [xs[i] for i in run]
+        ry = [ys[i] for i in run]
+        if len(run) > 1:
+            ax.fill_between(rx, ry, 0, where=[v >= 0 for v in ry],
+                            color=BULL, alpha=0.16, interpolate=True, zorder=1)
+            ax.fill_between(rx, ry, 0, where=[v <= 0 for v in ry],
+                            color=BEAR, alpha=0.16, interpolate=True, zorder=1)
+            ax.plot(rx, ry, color=BULL, lw=2.5, solid_capstyle="round", zorder=2)
+        for x, y in zip(rx, ry):
+            ax.plot(x, y, "o", ms=8, color=BULL if y >= 0 else BEAR,
+                    mec=SURFACE, mew=1.5, zorder=3)
+
+    # Only the latest point carries a number — the line carries the shape.
+    last_x, last_y = xs[-1], ys[-1]
+    ax.annotate(f"{last_y:+.0f}", (last_x, last_y),
+                textcoords="offset points", xytext=(0, 14 if last_y >= 0 else -22),
+                ha="center", fontsize=13, fontweight="bold",
+                color=BULL if last_y >= 0 else BEAR)
+
+    ax.set_xticks(xs, [r["short_label"] + ("*" if r["partial"] else "") for r in rows],
+                  fontsize=9.5, color=MUTED)
+    ax.set_yticks([-50, 0, 50], ["50 more\nexpect a fall", "even split",
+                                 "50 more\nexpect a rise"],
+                  fontsize=9.5, color=INK2)
+    ax.tick_params(colors=MUTED, labelsize=9.5, length=0)
+
+    notes = []
+    if any(r["partial"] for r in rows):
+        notes.append("* data collection started mid-week")
+    if len(rows) < MATURE_SPREAD_WEEKS:
+        notes.append(
+            f"Only {len(rows)} week{'s' if len(rows) != 1 else ''} of history so far — "
+            "this line starts telling a real story after about 2–3 months."
+        )
+    for i, note in enumerate(notes):
+        fig.text(0.05, 0.075 - i * 0.032, note, fontsize=9, color=MUTED)
+
+    _finish(
+        fig, path,
+        "Optimism minus pessimism",
+        "Bull-bear spread: share of videos expecting a rise, minus the share expecting a fall",
+        "How to read: one line for the whole market — above the middle means more "
+        "optimists than pessimists, and the direction it travels is the mood turning.",
+    )
+    plt.close(fig)
+
+
 def _render_map(plt, data, path):
     points = data["map"]
     fig = _new_figure(plt, 6.0)
@@ -525,12 +652,18 @@ CHARTS = [
     ("consensus", "1-consensus.png", _render_consensus),
     ("flips", "2-flips.png", _render_flips),
     ("tone", "3-tone.png", _render_tone),
-    ("map", "4-map.png", _render_map),
-    ("upside", "5-upside.png", _render_upside),
+    ("spread", "4-spread.png", _render_spread),
+    ("map", "5-map.png", _render_map),
+    ("upside", "6-upside.png", _render_upside),
 ]
 
 # The tone chart needs history to compare; a single week says nothing.
 MIN_TONE_WEEKS = 2
+# The spread line needs a third point before it reads as a direction rather
+# than a single hop. It stays deliberately low: the chart announces its own
+# immaturity below MATURE_SPREAD_WEEKS, which is friendlier than hiding it
+# for two months and is what makes shipping it this early honest.
+MIN_SPREAD_WEEKS = 3
 
 
 def render_charts(data, out_dir):
@@ -546,8 +679,9 @@ def render_charts(data, out_dir):
         return []
     os.makedirs(out_dir, exist_ok=True)
     paths = []
+    minimums = {"tone": MIN_TONE_WEEKS, "spread": MIN_SPREAD_WEEKS}
     for key, filename, renderer in CHARTS:
-        if not data.get(key) or (key == "tone" and len(data["tone"]) < MIN_TONE_WEEKS):
+        if not data.get(key) or len(data[key]) < minimums.get(key, 1):
             continue
         path = os.path.join(out_dir, filename)
         try:
