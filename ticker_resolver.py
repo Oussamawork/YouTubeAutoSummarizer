@@ -174,6 +174,9 @@ def resolve(asset_name, recorded_ticker, api_key, searcher=None, completer=None)
     Returns an entry dict recording the outcome and how it was reached.
     """
     stamp = datetime.now(timezone.utc).date().isoformat()
+    # "unchecked" is deliberately not "unresolved": a lookup that never
+    # completed must not be cached as a verdict, or one rate-limited run would
+    # permanently mark a real company as having no listing.
 
     def entry(ticker, listing, via):
         return {"ticker": ticker,
@@ -182,15 +185,30 @@ def resolve(asset_name, recorded_ticker, api_key, searcher=None, completer=None)
                 "via": via, "checked": stamp}
 
     # 1. Ask the catalogue directly, by name and by the recorded ticker.
-    for query in filter(None, (asset_name, recorded_ticker)):
-        for row in search_candidates(query, api_key, searcher=searcher):
-            if names_match(asset_name, row.get("instrument_name")):
-                return entry(row["symbol"].upper(), row, "search")
+    try:
+        for query in filter(None, (asset_name, recorded_ticker)):
+            for row in search_candidates(query, api_key, searcher=searcher):
+                if names_match(asset_name, row.get("instrument_name")):
+                    return entry(row["symbol"].upper(), row, "search")
+    except Exception as e:
+        if type(e).__name__ == "SearchUnavailable":
+            return entry(None, None, "unchecked")
+        raise
 
     # 2. Let the model propose, then verify each proposal against the
     #    catalogue — both that the ticker exists and that it is this company.
-    for candidate in llm_candidates(asset_name, recorded_ticker, completer=completer):
-        for row in search_candidates(candidate, api_key, searcher=searcher):
+    try:
+        candidates = llm_candidates(asset_name, recorded_ticker, completer=completer)
+    except Exception:
+        candidates = []
+    for candidate in candidates:
+        try:
+            rows = search_candidates(candidate, api_key, searcher=searcher)
+        except Exception as e:
+            if type(e).__name__ == "SearchUnavailable":
+                return entry(None, None, "unchecked")
+            raise
+        for row in rows:
             if row.get("symbol", "").upper() != candidate:
                 continue
             if names_match(asset_name, row.get("instrument_name")):

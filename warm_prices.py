@@ -11,6 +11,7 @@ whose calls have all elapsed is fetched once and never again; a steady week
 asks only for new tickers and for calls whose horizon is still open.
 """
 import argparse
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -34,6 +35,46 @@ HORIZON_SLACK_DAYS = max(cs.HORIZONS) + cs.MAX_PRICE_LAG_DAYS
 LATEST_PRICE_LOOKBACK_DAYS = 10
 # The pulse's window, mirrored here so the warm job covers what it will ask for.
 PULSE_WINDOW_DAYS = 7
+# How many assets one --resolve run will work through. Resolution is paced
+# (several catalogue lookups per asset at 6/minute), so an unbounded pass over
+# the backlog runs for hours and dies on the workflow timeout having saved
+# nothing. Bounded runs chip away at it instead, most-discussed first, and
+# results are cached so no asset is paid for twice.
+MAX_RESOLVE_PER_RUN = int(os.getenv("MAX_RESOLVE_PER_RUN", "40") or 40)
+
+
+def resolvable_assets(records, cache, learned):
+    """
+    Assets worth spending a lookup on, most-mentioned first.
+
+    Only two things make an asset scoreable: a directional call (which the
+    scorecard grades) or a price target (which the upside chart measures). A
+    neutral name-drop of a company nobody made a call on buys nothing, and the
+    dataset is full of them — 324 assets in all, against 166 with any stake and
+    far fewer that matter. Anything already priced, already looked up, or of a
+    type with no tradable symbol is skipped.
+    """
+    mentions, first_seen = {}, {}
+    for _, asset in mp._iter_assets(records):
+        name = (asset.get("name") or "").strip()
+        recorded = (asset.get("ticker") or "").strip().upper()
+        key = recorded or name.upper()
+        if not name or key in learned:
+            continue
+        if asset.get("type") not in ("stock", "etf", "crypto"):
+            continue
+        target = asset.get("price_target")
+        stake = (asset.get("stance") in ("bullish", "bearish")
+                 or (isinstance(target, (int, float)) and not isinstance(target, bool)))
+        if not stake:
+            continue
+        symbol = cs.symbol_for(asset)
+        if symbol and symbol in cache:
+            continue
+        mentions[key] = mentions.get(key, 0) + 1
+        first_seen.setdefault(key, (name, recorded))
+    ranked = sorted(mentions, key=lambda k: (-mentions[k], k))
+    return [(key, *first_seen[key]) for key in ranked]
 
 
 def needed_ranges(records, today):
@@ -138,27 +179,29 @@ def main():
         if not cache:
             log_warn("Price cache is empty, so every asset looks unresolved; "
                      "run a warm first to make this selective.")
-        unresolved = {}
-        for _, asset in mp._iter_assets(records):
-            name = (asset.get("name") or "").strip()
-            recorded = (asset.get("ticker") or "").strip().upper()
-            key_name = recorded or name.upper()
-            if not name or key_name in learned:
-                continue
-            symbol = cs.symbol_for(asset)
-            if symbol and symbol in cache:
-                continue  # already priced, nothing to learn
-            unresolved.setdefault(key_name, (name, recorded))
-        if not unresolved:
-            log_info("Every asset already resolves to a priceable ticker.")
+        backlog = resolvable_assets(records, cache, learned)
+        if not backlog:
+            log_info("Every scoreable asset already resolves to a priceable ticker.")
             return 0
-        log_info(f"Resolving {len(unresolved)} unpriceable asset(s).")
-        for key_name, (name, recorded) in sorted(unresolved.items()):
+        batch = backlog[:MAX_RESOLVE_PER_RUN]
+        log_info(f"Resolving {len(batch)} of {len(backlog)} unpriced asset(s) "
+                 f"with a call or a target, most-discussed first.")
+        saved = 0
+        for key_name, name, recorded in batch:
             entry = ticker_resolver.resolve(name, recorded, key)
+            if entry["via"] == "unchecked":
+                # The catalogue was unreachable, so this is not a verdict.
+                log_warn(f"  {name[:34]:36} could not be checked; leaving for next run.")
+                break
             learned[key_name] = entry
+            saved += 1
             status = entry["ticker"] or "no US listing"
             log_info(f"  {name[:34]:36} {recorded or '-':10} -> {status} ({entry['via']})")
-        ticker_resolver.save(learned, args.ticker_map)
+        if saved:
+            ticker_resolver.save(learned, args.ticker_map)
+        remaining = len(backlog) - saved
+        if remaining > 0:
+            log_info(f"{remaining} asset(s) left for the next run.")
         return 0
 
     if args.find:

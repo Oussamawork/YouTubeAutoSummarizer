@@ -167,6 +167,12 @@ def venue_params(symbol):
     return dict(VENUES.get(suffix, {}))
 
 
+class SearchUnavailable(Exception):
+    """The catalogue could not be consulted (rate-limited out). Distinct from
+    'the catalogue has no such listing' — callers must not record a company as
+    unlisted on the strength of a lookup that never happened."""
+
+
 def search_symbols(query, api_key, limit=8):
     """
     Candidate listings for a company name, from the provider's own symbol
@@ -186,8 +192,8 @@ def search_symbols(query, api_key, limit=8):
             return rows
         if attempt < MAX_RETRIES:
             time.sleep(TWELVEDATA_RATE_LIMIT_COOLDOWN)
-    log_warn(f"Symbol search for {query!r} gave up after {MAX_RETRIES} rate-limited attempts.")
-    return []
+    raise SearchUnavailable(
+        f"symbol search for {query!r} gave up after {MAX_RETRIES} rate-limited attempts")
 
 
 def _search_once(query, api_key, limit):

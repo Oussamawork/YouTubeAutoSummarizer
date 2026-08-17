@@ -314,7 +314,10 @@ def test_symbol_search_retries_rate_limits_instead_of_reporting_no_listings(monk
     assert [r["symbol"] for r in rows] == ["RBRK"]  # the retry won
 
 
-def test_symbol_search_gives_up_after_persistent_rate_limits(monkeypatch):
+def test_symbol_search_raises_rather_than_claiming_no_listings(monkeypatch):
+    """Giving up must be distinguishable from 'no such company', or a
+    rate-limited run would cache a real company as unlisted forever."""
     monkeypatch.setattr(cs.time, "sleep", lambda s: None)
     monkeypatch.setattr(cs.requests, "get", lambda *a, **k: _Resp(status_code=429))
-    assert cs.search_symbols("Rubrik", "tok") == []
+    with pytest.raises(cs.SearchUnavailable):
+        cs.search_symbols("Rubrik", "tok")
