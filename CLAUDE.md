@@ -38,10 +38,13 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   (`MIN_SPREAD_WEEKS`) or labels itself as early days (`MATURE_SPREAD_WEEKS`).
 - `channel_scorecard.py` — Friday per-channel accuracy scorecard: directional
   calls vs Stooq daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
-  Stooq 404s every symbol unless a browser `User-Agent` is sent (`STOOQ_HEADERS`)
-  — that block silently disabled all price-dependent features from the first
-  scheduled run until it was found in the logs on 2026-08-17. When prices look
-  wrong, check the CI logs for the "no prices for any ticker" warning first.
+  **Stooq is currently unusable server-side** (verified 2026-08-17): the default
+  UA gets 404, a browser UA gets a JavaScript challenge page instead of CSV.
+  Every price lookup has failed since the first scheduled run (2026-07-27),
+  silently disabling implied upside, track-record weighting, the scorecard and
+  the price-target chart. Restoring them needs a different price provider;
+  `market_pulse.fetch_latest_prices` logs one loud "no prices for any ticker"
+  line when the source is down, which is the first thing to check.
 - `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback); digest builder.
 - `helpers.py` — channel file parsing (`<id|@handle> [digest] [max=N] [only=a,b]` per
   line; handles resolved at run time by `scraper.resolve_channel_handle`; `only=`
