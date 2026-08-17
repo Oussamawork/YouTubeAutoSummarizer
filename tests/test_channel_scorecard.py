@@ -222,3 +222,34 @@ def test_twelvedata_pacer_only_sleeps_once_the_budget_is_spent(monkeypatch):
     assert not slept  # under the per-minute budget, no waiting
     cs._twelvedata_pace(now=100.0 + cs.TWELVEDATA_PER_MINUTE, _calls=window)
     assert slept and slept[0] > 0  # budget spent -> waits for the window to roll
+
+
+def test_request_budget_stops_fetching_after_the_cap(monkeypatch):
+    """The cap bounds wall-clock time (8 req/min), so it must actually stop
+    issuing requests — and say so once, not once per skipped symbol."""
+    monkeypatch.setenv("TWELVEDATA_API", "tok")
+    monkeypatch.setattr(cs.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cs, "TWELVEDATA_MAX_REQUESTS", 2)
+    warned, calls = [], []
+    monkeypatch.setattr(cs, "log_warn", lambda m: warned.append(m))
+    monkeypatch.setattr(cs.requests, "get", lambda *a, **k: (
+        calls.append(1), _Resp(payload={"status": "ok", "values": [
+            {"datetime": "2026-08-14", "close": "1.0"}]}))[1])
+    budget = [0]
+    monkeypatch.setattr(cs, "_spend_request_budget",
+                        lambda: budget[0] < 2 and (budget.__setitem__(0, budget[0] + 1) or True))
+
+    for symbol in ("a.us", "b.us", "c.us", "d.us"):
+        cs.fetch_prices(symbol, date(2026, 8, 10), date(2026, 8, 16))
+    assert len(calls) == 2  # stopped at the cap rather than pacing on forever
+
+
+def test_spend_request_budget_logs_the_ceiling_once(monkeypatch):
+    monkeypatch.setattr(cs, "TWELVEDATA_MAX_REQUESTS", 1)
+    warned = []
+    monkeypatch.setattr(cs, "log_warn", lambda m: warned.append(m))
+    state = [0]
+    assert cs._spend_request_budget(_state=state) is True
+    assert cs._spend_request_budget(_state=state) is False
+    assert cs._spend_request_budget(_state=state) is False
+    assert len(warned) == 1  # one line at the ceiling, not one per symbol

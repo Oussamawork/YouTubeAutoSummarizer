@@ -469,11 +469,16 @@ def _pulse_inputs(days, today, path, price_fetcher):
 
     weights, details, latest_prices = {}, {}, {}
     if current:
-        weights, details = channel_weights_from_track_record(
-            records, today, price_fetcher=price_fetcher
-        )
+        # Latest prices first, deliberately: the price source enforces a
+        # per-run request budget, and this is what readers actually see (the
+        # implied-move annotations and the price-target chart). Track-record
+        # weighting is a refinement that already degrades to unweighted, so it
+        # spends whatever budget is left rather than competing for it.
         latest_prices = fetch_latest_prices(
             aggregate_assets(current), price_fetcher=price_fetcher, today=today
+        )
+        weights, details = channel_weights_from_track_record(
+            records, today, price_fetcher=price_fetcher
         )
     return {
         "records": records, "window_start": window_start,

@@ -51,6 +51,13 @@ RETRY_BACKOFF = 2
 # minute) comfortably covers a weekly pulse and scorecard.
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 TWELVEDATA_PER_MINUTE = 8
+# A per-run ceiling on price requests. At 8/minute an unbounded run is a
+# wall-clock problem, not a quota one: the dataset already spans ~180 distinct
+# symbols, which would pace out to ~27 minutes and blow the workflow timeout.
+# The cap keeps a run bounded (120 -> ~15 minutes) and degrades the way the
+# rest of this module does — callers that get {} just skip those assets.
+# Callers spend it in priority order, so the visible features are funded first.
+TWELVEDATA_MAX_REQUESTS = int(os.getenv("TWELVEDATA_MAX_REQUESTS", "120") or 120)
 # A signal dated on a weekend/holiday uses the next trading day's close, up to
 # this many days later; beyond that the price point is treated as missing.
 MAX_PRICE_LAG_DAYS = 5
@@ -150,11 +157,27 @@ def _parse_twelvedata(payload, symbol):
     return prices
 
 
+def _spend_request_budget(_state=[0]):
+    """True while this run may still make a price request. Logs once at the
+    cap so a truncated run is visible rather than looking like missing data."""
+    if _state[0] >= TWELVEDATA_MAX_REQUESTS:
+        if _state[0] == TWELVEDATA_MAX_REQUESTS:
+            _state[0] += 1  # log the ceiling once, not once per skipped symbol
+            log_warn(f"Price request budget spent ({TWELVEDATA_MAX_REQUESTS} this "
+                     "run); remaining symbols go unpriced. Raise "
+                     "TWELVEDATA_MAX_REQUESTS if the workflow has time for more.")
+        return False
+    _state[0] += 1
+    return True
+
+
 def fetch_prices_twelvedata(symbol, start, end, api_key):
     """Daily closes for `symbol` from Twelve Data as {date: close}. Returns {}
     on any failure (logged, never raises), like every other fetcher here."""
     td_symbol = twelvedata_symbol(symbol)
     if not td_symbol:
+        return {}
+    if not _spend_request_budget():
         return {}
     params = {
         "symbol": td_symbol, "interval": "1day",
