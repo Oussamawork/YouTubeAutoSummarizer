@@ -147,3 +147,40 @@ def test_resolve_cli_runs_end_to_end(tmp_path, monkeypatch, capsys):
     assert warm_prices.main() == 0
     saved = jsonlib.loads(map_path.read_text(encoding="utf-8"))
     assert saved["tickers"]["RUBY"]["ticker"] == "RBRK"
+
+
+def test_unreachable_catalogue_is_unchecked_not_unresolved():
+    """A lookup that never happened must not be recorded as a verdict."""
+    import channel_scorecard as cs
+
+    def searcher(query, api_key):
+        raise cs.SearchUnavailable("rate limited")
+
+    entry = tr.resolve("Rubrik", None, "key", searcher=searcher,
+                       completer=lambda *a, **k: "")
+    assert entry["ticker"] is None and entry["via"] == "unchecked"
+
+
+def test_backlog_is_scoped_to_scoreable_assets_and_ranked(tmp_path):
+    """Only a directional call or a price target makes an asset worth a
+    lookup; a neutral name-drop buys nothing."""
+    import warm_prices
+
+    def rec(name, ticker, stance="neutral", target=None, atype="stock"):
+        return {"date": "2026-08-10", "channel_name": "A", "signals": {
+            "assets": [{"name": name, "ticker": ticker, "stance": stance,
+                        "action": "none", "price_target": target,
+                        "catalysts": [], "type": atype,
+                        "conviction": "medium", "horizon": "unspecified"}],
+            "market_sentiment": "neutral", "topics": []}}
+
+    records = [
+        rec("Loud Co", "LOUD", stance="bullish"),   # directional, twice
+        rec("Loud Co", "LOUD", stance="bullish"),
+        rec("Quiet Co", "QUIET"),                   # neutral only -> skipped
+        rec("Target Co", "TGTC", target=42.0),      # target -> kept
+        rec("WTI Crude Oil", None, stance="bullish", atype="commodity"),  # skipped
+    ]
+    backlog = warm_prices.resolvable_assets(records, cache={}, learned={})
+    names = [name for _, name, _ in backlog]
+    assert names == ["Loud Co", "Target Co"]        # ranked by mentions
