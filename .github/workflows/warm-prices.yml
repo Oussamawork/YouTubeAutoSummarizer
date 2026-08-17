@@ -15,6 +15,10 @@ on:
         description: 'Comma-separated symbols to check (e.g. nu.us,aapl.us) instead of warming the cache'
         type: string
         default: ''
+      probe_days:
+        description: 'Look-back windows for the probe, comma-separated days (e.g. 3,10,60)'
+        type: string
+        default: '10'
       find:
         description: 'Comma-separated company names to look up (prints real ticker, exchange, currency)'
         type: string
@@ -48,17 +52,24 @@ jobs:
           pip install -r requirements.txt
 
       - name: Warm the price cache
+        # Dispatch inputs are read from the environment, never interpolated
+        # into the script: `${{ inputs.find }}` expands before the shell sees
+        # it, so a value containing quotes would run as a command.
         run: |
-          if [ "${{ inputs.resolve }}" = "true" ]; then
+          if [ "${RESOLVE}" = "true" ]; then
             python warm_prices.py --resolve
-          elif [ -n "${{ inputs.find }}" ]; then
-            python warm_prices.py --find "${{ inputs.find }}"
-          elif [ -n "${{ inputs.probe }}" ]; then
-            python warm_prices.py --probe "${{ inputs.probe }}"
+          elif [ -n "${FIND}" ]; then
+            python warm_prices.py --find "${FIND}"
+          elif [ -n "${PROBE}" ]; then
+            python warm_prices.py --probe "${PROBE}" --probe-days "${PROBE_DAYS:-10}"
           else
             python warm_prices.py
           fi
         env:
+          RESOLVE: ${{ inputs.resolve }}
+          FIND: ${{ inputs.find }}
+          PROBE: ${{ inputs.probe }}
+          PROBE_DAYS: ${{ inputs.probe_days }}
           TWELVEDATA_API: ${{ secrets.TWELVEDATA_API }}
           # This job is the slow one by design, so it gets a far larger share
           # of the 800/day quota than the interactive weekly jobs.

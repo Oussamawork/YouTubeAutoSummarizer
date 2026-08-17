@@ -211,7 +211,8 @@ def _search_once(query, api_key, limit):
         log_warn(f"Twelve Data symbol search rate-limited for {query!r}.")
         return None  # retryable: not an answer
     if resp.status_code != 200:
-        log_warn(f"Twelve Data symbol search returned {resp.status_code} for {query!r}.")
+        log_warn(f"Twelve Data symbol search returned {resp.status_code} "
+                 f"for {query!r}: {_provider_detail(resp)}")
         return []
     try:
         payload = resp.json()
@@ -242,6 +243,28 @@ def _twelvedata_pace(now=None, _calls=[]):
             while _calls and _calls[0] <= cutoff:
                 _calls.pop(0)
     _calls.append(now)
+
+
+def _provider_detail(resp):
+    """
+    The provider's own explanation for a failed response, ready to log.
+
+    Twelve Data answers a bad request with a JSON body carrying a `message`
+    that names the actual problem — "**symbol** not found", "please specify
+    the exchange" — while the status code alone says only "400". Logging the
+    code and nothing else is what left QXO and ECG undiagnosable after a run:
+    the answer was in the body every time and we threw it away.
+    """
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        message = str(payload.get("message") or "").strip()
+        if message:
+            return message[:200]
+    body = (resp.text or "").strip().replace("\n", " ")
+    return body[:200] or "no detail in the response body"
 
 
 def _parse_twelvedata(payload, symbol):
@@ -322,7 +345,8 @@ def fetch_prices_twelvedata(symbol, start, end, api_key):
                 continue
             return {}
         if resp.status_code != 200:
-            log_warn(f"Twelve Data returned {resp.status_code} for {td_symbol}.")
+            log_warn(f"Twelve Data returned {resp.status_code} for {td_symbol}: "
+                     f"{_provider_detail(resp)}")
             return {}
         try:
             payload = resp.json()

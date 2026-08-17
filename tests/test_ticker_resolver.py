@@ -260,3 +260,15 @@ def test_assets_marked_unpriceable_are_never_resolved():
                     "horizon": "unspecified"}],
         "market_sentiment": "bullish", "topics": []}}]
     assert warm_prices.resolvable_assets(records, cache={}, learned={}) == []
+
+
+def test_probe_windows_parse_and_dedupe():
+    """--probe-days exists to tell 'this symbol never prices' apart from
+    'this symbol has no close in that particular week'."""
+    import warm_prices
+
+    assert warm_prices._probe_windows("3,10,60") == [3, 10, 60]
+    assert warm_prices._probe_windows("10, 10 ,3") == [10, 3]      # deduped
+    assert warm_prices._probe_windows("") == [warm_prices.PROBE_DAYS]
+    assert warm_prices._probe_windows(None) == [warm_prices.PROBE_DAYS]
+    assert warm_prices._probe_windows("0,-4,abc") == [warm_prices.PROBE_DAYS]

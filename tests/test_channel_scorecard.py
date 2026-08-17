@@ -328,3 +328,26 @@ def test_symbol_search_raises_rather_than_claiming_no_listings(monkeypatch):
     monkeypatch.setattr(cs.requests, "get", lambda *a, **k: _Resp(status_code=429))
     with pytest.raises(cs.SearchUnavailable):
         cs.search_symbols("Rubrik", "tok")
+
+
+def test_a_failed_request_logs_the_providers_own_explanation(monkeypatch):
+    """QXO and ECG failed with a bare '400' for a week because the reason was
+    in the response body and the log threw it away."""
+    monkeypatch.setenv("TWELVEDATA_API", "tok")
+    monkeypatch.setattr(cs.time, "sleep", lambda s: None)
+    warned = []
+    monkeypatch.setattr(cs, "log_warn", lambda m: warned.append(m))
+    monkeypatch.setattr(cs.requests, "get", lambda *a, **k: _Resp(
+        status_code=400,
+        payload={"code": 400, "message": "**symbol** parameter is ambiguous. "
+                                         "Please specify the exchange."}))
+    assert cs.fetch_prices_live("qxo.us", date(2026, 8, 15), date(2026, 8, 17)) == {}
+    assert any("ambiguous" in line for line in warned)
+
+
+def test_provider_detail_falls_back_to_the_raw_body():
+    """A non-JSON error page (a gateway, a WAF) must still say something."""
+    assert "gateway" in cs._provider_detail(_Resp(status_code=502, text="Bad gateway\n"))
+    assert cs._provider_detail(_Resp(status_code=500, text="")) != ""
+    # A JSON body with no message is no better than the raw text.
+    assert cs._provider_detail(_Resp(status_code=400, payload={"code": 400})) != ""

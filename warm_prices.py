@@ -41,6 +41,31 @@ PULSE_WINDOW_DAYS = 7
 # nothing. Bounded runs chip away at it instead, most-discussed first, and
 # results are cached so no asset is paid for twice.
 MAX_RESOLVE_PER_RUN = int(os.getenv("MAX_RESOLVE_PER_RUN", "40") or 40)
+# Default look-back for --probe.
+PROBE_DAYS = 10
+
+
+def _probe_windows(spec):
+    """Look-back windows for --probe, as a list of positive day counts.
+
+    A list rather than a number because the interesting question about a
+    symbol that fails is usually "does it fail on *every* range?" — probing
+    the same ticker over a short and a long window in one run answers that
+    directly instead of over two runs a week apart.
+    """
+    windows = []
+    for part in str(spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            days = int(part)
+        except ValueError:
+            log_warn(f"Ignoring non-numeric probe window {part!r}.")
+            continue
+        if days > 0 and days not in windows:
+            windows.append(days)
+    return windows or [PROBE_DAYS]
 
 
 def resolvable_assets(records, cache, learned):
@@ -166,6 +191,12 @@ def main():
                              "came back, without touching the cache. Answers 'is the "
                              "price provider working, and does this ticker resolve?' in "
                              "seconds instead of a full warm run.")
+    parser.add_argument("--probe-days", metavar="N", default=str(PROBE_DAYS),
+                        dest="probe_days",
+                        help="Comma-separated look-back windows for --probe (default "
+                             f"{PROBE_DAYS}). Each symbol is tried over every window, "
+                             "which is how a symbol that fails only on a short range is "
+                             "told apart from one the provider cannot price at all.")
     args = parser.parse_args()
 
     if args.resolve:
@@ -235,21 +266,25 @@ def main():
             return 1
         today = datetime.now(timezone.utc).date()
         symbols = [s.strip() for s in args.probe.split(",") if s.strip()]
+        windows = _probe_windows(args.probe_days)
         failed = []
         for symbol in symbols:
-            prices = cs.fetch_prices_live(symbol, today - timedelta(days=10), today)
-            if prices:
-                latest = max(prices)
-                log_info(f"Probe OK: {symbol} -> {len(prices)} closes, "
-                         f"latest {latest} = {prices[latest]}.")
-            else:
-                failed.append(symbol)
-                log_warn(f"Probe FAILED: {symbol} returned no closes.")
+            for days in windows:
+                prices = cs.fetch_prices_live(symbol, today - timedelta(days=days), today)
+                label = f"{symbol} over {days}d"
+                if prices:
+                    latest = max(prices)
+                    log_info(f"Probe OK: {label} -> {len(prices)} closes, "
+                             f"latest {latest} = {prices[latest]}.")
+                else:
+                    failed.append(label)
+                    log_warn(f"Probe FAILED: {label} returned no closes.")
+        attempts = len(symbols) * len(windows)
         if failed:
-            log_error(f"{len(failed)}/{len(symbols)} symbols unavailable: "
+            log_error(f"{len(failed)}/{attempts} probes unavailable: "
                       f"{', '.join(failed)}")
             return 1
-        log_info(f"All {len(symbols)} probed symbols resolved.")
+        log_info(f"All {attempts} probes resolved.")
         return 0
 
     records = load_signals(args.signals)
