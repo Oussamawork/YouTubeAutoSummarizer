@@ -29,6 +29,11 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   (opt-in via `MARKET_SIGNALS`; appends to `data/signals.jsonl`).
 - `market_pulse.py` — weekly aggregation over `data/signals.jsonl` (top assets,
   consensus flips, new-on-radar) sent to Telegram by `weekly-pulse.yml`.
+- `pulse_charts.py` — the pulse's companion PNG charts (consensus board, flip
+  slope, weekly tone, agreement-vs-attention map, target-upside ladder), styled
+  for non-technical readers and sent as a Telegram photo album after the text
+  pulse. Data prep is pure/testable; matplotlib imports lazily and every chart
+  is best-effort — chart failures never block the text pulse.
 - `channel_scorecard.py` — Friday per-channel accuracy scorecard: directional
   calls vs Stooq daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
 - `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback); digest builder.

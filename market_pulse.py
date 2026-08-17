@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 from log import log_info, log_warn, log_error
-from sendToTelegram import send_telegram_text
+from sendToTelegram import send_telegram_text, send_telegram_photo_album
 
 # Weekly market pulse: aggregates the per-video signals accumulated in
 # data/signals.jsonl (see signals.py) into one Telegram report — top mentioned
@@ -439,11 +439,11 @@ def build_pulse(current_records, previous_records, older_records, start, end,
     return "\n".join(lines)
 
 
-def generate_pulse(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None):
-    """Load the dataset and build the pulse text for the trailing `days` window.
-    Track-record weighting and implied-upside annotations are best-effort and
-    switch on automatically once enough scorecard history exists."""
-    today = today or datetime.now(timezone.utc).date()
+def _pulse_inputs(days, today, path, price_fetcher):
+    """Load the dataset, slice the windows, and compute the best-effort extras
+    (track-record weights, latest prices) that both the text pulse and the
+    charts consume — shared so the price lookups run once per pulse, not once
+    per output."""
     records = load_signals(path)
     window_start = today - timedelta(days=days)
     prev_start = window_start - timedelta(days=days)
@@ -453,33 +453,98 @@ def generate_pulse(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None):
     previous = [r for r in records if _in_window(r, prev_start, window_start)]
     older = [r for r in records if _in_window(r, lookback_start, window_start)]
 
-    if not current:
+    weights, details, latest_prices = {}, {}, {}
+    if current:
+        weights, details = channel_weights_from_track_record(
+            records, today, price_fetcher=price_fetcher
+        )
+        latest_prices = fetch_latest_prices(
+            aggregate_assets(current), price_fetcher=price_fetcher, today=today
+        )
+    return {
+        "records": records, "window_start": window_start,
+        "current": current, "previous": previous, "older": older,
+        "weights": weights, "weight_details": details,
+        "latest_prices": latest_prices,
+    }
+
+
+def generate_pulse(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None,
+                   inputs=None):
+    """Build the pulse text for the trailing `days` window. Track-record
+    weighting and implied-upside annotations are best-effort and switch on
+    automatically once enough scorecard history exists. `inputs` accepts a
+    precomputed _pulse_inputs() result so main() can share it with the
+    charts."""
+    today = today or datetime.now(timezone.utc).date()
+    inputs = inputs or _pulse_inputs(days, today, path, price_fetcher)
+    if not inputs["current"]:
         return ""
-    weights, details = channel_weights_from_track_record(
-        records, today, price_fetcher=price_fetcher
-    )
-    latest_prices = fetch_latest_prices(
-        aggregate_assets(current), price_fetcher=price_fetcher, today=today
-    )
     return build_pulse(
-        current, previous, older, window_start, today,
-        channel_weights=weights, weight_details=details, latest_prices=latest_prices,
+        inputs["current"], inputs["previous"], inputs["older"],
+        inputs["window_start"], today,
+        channel_weights=inputs["weights"], weight_details=inputs["weight_details"],
+        latest_prices=inputs["latest_prices"],
     )
+
+
+def generate_charts(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None,
+                    inputs=None, out_dir="charts"):
+    """Render the pulse's companion charts as PNGs; returns their paths in
+    album order. Entirely best-effort: any failure (matplotlib missing, bad
+    data, rendering error) logs a warning and returns [] so the text pulse is
+    never blocked by its illustrations."""
+    try:
+        from pulse_charts import build_chart_data, render_charts, upside_rows
+
+        today = today or datetime.now(timezone.utc).date()
+        inputs = inputs or _pulse_inputs(days, today, path, price_fetcher)
+        if not inputs["current"]:
+            return []
+        current = aggregate_assets(inputs["current"], inputs["weights"])
+        previous = aggregate_assets(inputs["previous"], inputs["weights"])
+        data = build_chart_data(
+            inputs["records"], current, previous, inputs["window_start"], today
+        )
+        data["upside"] = upside_rows(current, inputs["latest_prices"])
+        return render_charts(data, out_dir)
+    except Exception as e:
+        log_warn(f"Pulse charts unavailable this week: {e}")
+        return []
+
+
+CHART_ALBUM_CAPTION = (
+    "This week in charts - how to read each one is written on the image."
+)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Weekly market pulse from data/signals.jsonl")
     parser.add_argument("--days", type=int, default=7, help="Window size in days (default 7)")
-    parser.add_argument("--dry-run", action="store_true", help="Print the pulse instead of sending it")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print the pulse and write charts locally instead of sending them")
+    parser.add_argument("--no-charts", action="store_true",
+                        help="Send the text pulse only, without the chart album")
+    parser.add_argument("--charts-dir", default="charts",
+                        help="Directory the chart PNGs are written to (default: charts/)")
     args = parser.parse_args()
 
-    pulse = generate_pulse(days=args.days)
+    today = datetime.now(timezone.utc).date()
+    inputs = _pulse_inputs(args.days, today, SIGNALS_FILE, None)
+    pulse = generate_pulse(days=args.days, today=today, inputs=inputs)
     if not pulse:
         log_info("No signal records in the window; skipping the pulse this week.")
         return 0
 
+    chart_paths = []
+    if not args.no_charts:
+        chart_paths = generate_charts(days=args.days, today=today, inputs=inputs,
+                                      out_dir=args.charts_dir)
+
     if args.dry_run:
         print(pulse)
+        if chart_paths:
+            log_info(f"Charts written: {', '.join(chart_paths)}")
         return 0
 
     token = os.getenv("TELEGRAM_TOKEN")
@@ -488,10 +553,16 @@ def main():
         log_error("TELEGRAM_TOKEN and TELEGRAM_CHANNEL_ID must be set to send the pulse.")
         return 1
 
-    if send_telegram_text(token, chat_id, pulse):
-        log_info("Weekly market pulse sent.")
-        return 0
-    return 1
+    if not send_telegram_text(token, chat_id, pulse):
+        return 1
+    log_info("Weekly market pulse sent.")
+    # The charts illustrate the pulse; failing to send them shouldn't fail the
+    # run once the text is out.
+    if chart_paths and not send_telegram_photo_album(
+        token, chat_id, chart_paths, caption=CHART_ALBUM_CAPTION
+    ):
+        log_warn("Chart album failed to send; the text pulse went out without it.")
+    return 0
 
 
 if __name__ == "__main__":

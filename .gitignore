@@ -11,3 +11,6 @@ video_details*
 # Virtual environments
 venv*/
 .venv/
+
+# Weekly pulse chart PNGs (regenerated each run)
+charts/

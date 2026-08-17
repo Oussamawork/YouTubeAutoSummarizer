@@ -227,3 +227,74 @@ def test_send_text_empty_skips(monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not post")),
     )
     assert tg.send_telegram_text("tok", "chat", "  ") is False
+
+
+def _photo(tmp_path, name):
+    path = tmp_path / name
+    path.write_bytes(b"\x89PNG fake image bytes")
+    return str(path)
+
+
+def test_photo_album_uses_media_group_with_single_caption(tmp_path, monkeypatch):
+    import json as jsonlib
+    calls = []
+
+    def fake_post(url, data=None, files=None, timeout=None):
+        calls.append((url, data, dict(files)))
+
+        class R:
+            status_code = 200
+            text = ""
+        return R()
+
+    monkeypatch.setattr(tg.requests, "post", fake_post)
+    paths = [_photo(tmp_path, f"{i}.png") for i in range(3)]
+    assert tg.send_telegram_photo_album("tok", "chat", paths, caption="Weekly charts") is True
+    assert len(calls) == 1
+    url, data, files = calls[0]
+    assert "sendMediaGroup" in url
+    media = jsonlib.loads(data["media"])
+    assert len(media) == 3 and len(files) == 3
+    assert media[0]["caption"] == "Weekly charts"
+    assert all("caption" not in item for item in media[1:])
+    assert all(item["media"].startswith("attach://") for item in media)
+
+
+def test_photo_album_single_photo_uses_send_photo(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_post(url, data=None, files=None, timeout=None):
+        calls.append((url, data))
+
+        class R:
+            status_code = 200
+            text = ""
+        return R()
+
+    monkeypatch.setattr(tg.requests, "post", fake_post)
+    assert tg.send_telegram_photo_album("tok", "chat", [_photo(tmp_path, "a.png")],
+                                        caption="One chart") is True
+    url, data = calls[0]
+    assert "sendPhoto" in url
+    assert data["caption"] == "One chart"
+
+
+def test_photo_album_skips_missing_files_and_fails_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        tg.requests, "post",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not post")),
+    )
+    assert tg.send_telegram_photo_album("tok", "chat", [str(tmp_path / "gone.png")]) is False
+    assert tg.send_telegram_photo_album("tok", "chat", []) is False
+
+
+def test_photo_album_reports_rejection(tmp_path, monkeypatch):
+    def fake_post(url, data=None, files=None, timeout=None):
+        class R:
+            status_code = 400
+            text = "bad request"
+        return R()
+
+    monkeypatch.setattr(tg.requests, "post", fake_post)
+    paths = [_photo(tmp_path, f"{i}.png") for i in range(2)]
+    assert tg.send_telegram_photo_album("tok", "chat", paths) is False
