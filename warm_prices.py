@@ -100,12 +100,33 @@ def main():
     parser.add_argument("--cache", default=price_cache.CACHE_FILE)
     parser.add_argument("--dry-run", action="store_true",
                         help="Report what would be fetched without calling the provider")
+    parser.add_argument("--find", metavar="NAMES",
+                        help="Look up company names in the provider's symbol search and "
+                             "print the real ticker, exchange and currency for each. Use "
+                             "this to correct a ticker with evidence instead of a guess.")
     parser.add_argument("--probe", metavar="SYMBOLS", nargs="?", const="nvda.us",
                         help="Fetch these comma-separated symbols live and report what "
                              "came back, without touching the cache. Answers 'is the "
                              "price provider working, and does this ticker resolve?' in "
                              "seconds instead of a full warm run.")
     args = parser.parse_args()
+
+    if args.find:
+        if not cs.twelvedata_key():
+            log_error("No price API key configured (TWELVEDATA_API).")
+            return 1
+        key = cs.twelvedata_key()
+        for name in [n.strip() for n in args.find.split(",") if n.strip()]:
+            rows = cs.search_symbols(name, key)
+            if not rows:
+                log_warn(f"{name}: no listings found.")
+                continue
+            log_info(f"{name}:")
+            for row in rows:
+                log_info(f"    {row.get('symbol','?'):12} {row.get('exchange','?'):10} "
+                         f"{row.get('mic_code','?'):6} {row.get('currency','?'):4} "
+                         f"{row.get('country','?'):16} {row.get('instrument_name','?')[:44]}")
+        return 0
 
     if args.probe:
         if not cs.twelvedata_key():

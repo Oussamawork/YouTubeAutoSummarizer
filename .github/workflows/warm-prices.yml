@@ -15,6 +15,10 @@ on:
         description: 'Comma-separated symbols to check (e.g. nu.us,aapl.us) instead of warming the cache'
         type: string
         default: ''
+      find:
+        description: 'Comma-separated company names to look up (prints real ticker, exchange, currency)'
+        type: string
+        default: ''
 
 permissions:
   contents: write  # commits the refreshed data/prices.json
@@ -41,7 +45,9 @@ jobs:
 
       - name: Warm the price cache
         run: |
-          if [ -n "${{ inputs.probe }}" ]; then
+          if [ -n "${{ inputs.find }}" ]; then
+            python warm_prices.py --find "${{ inputs.find }}"
+          elif [ -n "${{ inputs.probe }}" ]; then
             python warm_prices.py --probe "${{ inputs.probe }}"
           else
             python warm_prices.py
@@ -53,7 +59,7 @@ jobs:
           TWELVEDATA_MAX_REQUESTS: '600'
 
       - name: Persist the price cache
-        if: ${{ inputs.probe == '' }}
+        if: ${{ inputs.probe == '' && inputs.find == '' }}
         run: |
           if git status --porcelain data/prices.json | grep -q .; then
             git config user.name "github-actions[bot]"
