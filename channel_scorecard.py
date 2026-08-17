@@ -51,7 +51,15 @@ RETRY_BACKOFF = 2
 # is built for server-side use, and its free tier (800 requests/day, 8 per
 # minute) comfortably covers a weekly pulse and scorecard.
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
-TWELVEDATA_PER_MINUTE = 8
+# The plan allows 8 credits/minute; we pace below it on purpose. Measured
+# 2026-08-17: pacing at exactly 8 tripped 429s, because the limit is enforced
+# on the provider's rolling minute across *all* our runs while the pacer below
+# only knows about this process — back-to-back runs start out already spent.
+TWELVEDATA_PER_MINUTE = 6
+# A 429 means "this minute is spent", so the only useful wait is the rest of
+# the window. Short exponential backoffs just burned paced slots and collapsed
+# throughput to ~1.5 symbols/minute in the same measurement.
+TWELVEDATA_RATE_LIMIT_COOLDOWN = 62
 # A per-run ceiling on price requests. At 8/minute an unbounded run is a
 # wall-clock problem, not a quota one: the dataset already spans ~180 distinct
 # symbols, which would pace out to ~27 minutes and blow the workflow timeout.
@@ -196,13 +204,13 @@ def fetch_prices_twelvedata(symbol, start, end, api_key):
                 time.sleep(RETRY_BACKOFF * attempt)
                 continue
             return {}
-        # 429 means the pacer and the plan disagree (a shared runner, or a
-        # tighter plan than assumed); back off rather than burning the run.
+        # 429 means the provider's rolling minute is spent — wait it out rather
+        # than retrying into the same closed window.
         if resp.status_code == 429:
             log_warn(f"Twelve Data rate limit hit for {td_symbol} "
-                     f"(attempt {attempt}/{MAX_RETRIES}).")
+                     f"(attempt {attempt}/{MAX_RETRIES}); waiting for the window.")
             if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF * attempt * 5)
+                time.sleep(TWELVEDATA_RATE_LIMIT_COOLDOWN)
                 continue
             return {}
         if resp.status_code != 200:

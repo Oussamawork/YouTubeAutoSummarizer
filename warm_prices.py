@@ -100,7 +100,25 @@ def main():
     parser.add_argument("--cache", default=price_cache.CACHE_FILE)
     parser.add_argument("--dry-run", action="store_true",
                         help="Report what would be fetched without calling the provider")
+    parser.add_argument("--probe", metavar="SYMBOL", nargs="?", const="nvda.us",
+                        help="Fetch one symbol live and report what came back, without "
+                             "touching the cache. Answers 'is the price provider "
+                             "actually working?' in seconds instead of a full warm run.")
     args = parser.parse_args()
+
+    if args.probe:
+        if not cs.twelvedata_key():
+            log_error("No price API key configured (TWELVEDATA_API).")
+            return 1
+        today = datetime.now(timezone.utc).date()
+        prices = cs.fetch_prices_live(args.probe, today - timedelta(days=10), today)
+        if not prices:
+            log_error(f"Probe failed: no closes returned for {args.probe}.")
+            return 1
+        latest = max(prices)
+        log_info(f"Probe OK: {args.probe} returned {len(prices)} closes, "
+                 f"latest {latest} = {prices[latest]}.")
+        return 0
 
     records = load_signals(args.signals)
     if not records:

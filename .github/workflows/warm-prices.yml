@@ -10,6 +10,11 @@ on:
   schedule:
     - cron: '0 6 * * 0'  # Sundays at 06:00 UTC, ahead of the Monday pulse
   workflow_dispatch:      # Allows manual triggering from GitHub UI
+    inputs:
+      probe:
+        description: 'Check the price provider with one symbol instead of warming the cache'
+        type: boolean
+        default: false
 
 permissions:
   contents: write  # commits the refreshed data/prices.json
@@ -35,7 +40,12 @@ jobs:
           pip install -r requirements.txt
 
       - name: Warm the price cache
-        run: python warm_prices.py
+        run: |
+          if [ "${{ inputs.probe }}" = "true" ]; then
+            python warm_prices.py --probe
+          else
+            python warm_prices.py
+          fi
         env:
           TWELVEDATA_API: ${{ secrets.TWELVEDATA_API }}
           # This job is the slow one by design, so it gets a far larger share
@@ -43,6 +53,7 @@ jobs:
           TWELVEDATA_MAX_REQUESTS: '600'
 
       - name: Persist the price cache
+        if: ${{ inputs.probe != true }}
         run: |
           if git status --porcelain data/prices.json | grep -q .; then
             git config user.name "github-actions[bot]"

@@ -210,7 +210,9 @@ def test_twelvedata_retries_then_gives_up_on_rate_limit(monkeypatch):
                         lambda *a, **k: (calls.append(1), _Resp(status_code=429))[1])
     assert cs.fetch_prices("nvda.us", date(2026, 8, 10), date(2026, 8, 16)) == {}
     assert len(calls) == cs.MAX_RETRIES  # retried, then gave up quietly
-    assert slept  # backed off between attempts
+    # A 429 means the provider's minute is spent, so the wait is the rest of
+    # that window — short backoffs would just retry into a closed window.
+    assert slept == [cs.TWELVEDATA_RATE_LIMIT_COOLDOWN] * (cs.MAX_RETRIES - 1)
 
 
 def test_twelvedata_pacer_only_sleeps_once_the_budget_is_spent(monkeypatch):
