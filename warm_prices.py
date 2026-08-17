@@ -17,7 +17,9 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 import channel_scorecard as cs
+import market_pulse as mp
 import price_cache
+import ticker_resolver
 from log import log_info, log_warn, log_error
 from market_pulse import (
     SIGNALS_FILE, load_signals, aggregate_assets, _in_window,
@@ -100,6 +102,10 @@ def main():
     parser.add_argument("--cache", default=price_cache.CACHE_FILE)
     parser.add_argument("--dry-run", action="store_true",
                         help="Report what would be fetched without calling the provider")
+    parser.add_argument("--resolve", action="store_true",
+                        help="Find assets whose ticker does not price, work out the real "
+                             "one (provider search first, LLM suggestion verified against "
+                             "the catalogue second) and save data/ticker_map.json.")
     parser.add_argument("--find", metavar="NAMES",
                         help="Look up company names in the provider's symbol search and "
                              "print the real ticker, exchange and currency for each. Use "
@@ -110,6 +116,38 @@ def main():
                              "price provider working, and does this ticker resolve?' in "
                              "seconds instead of a full warm run.")
     args = parser.parse_args()
+
+    if args.resolve:
+        if not cs.twelvedata_key():
+            log_error("No price API key configured (TWELVEDATA_API).")
+            return 1
+        key = cs.twelvedata_key()
+        learned = ticker_resolver.load()
+        # One entry per (name, recorded ticker) that currently prices as
+        # nothing. Already-resolved keys are skipped, so this is cheap to
+        # re-run and only pays for genuinely new names.
+        unresolved = {}
+        for _, asset in mp._iter_assets(records):
+            name = (asset.get("name") or "").strip()
+            recorded = (asset.get("ticker") or "").strip().upper()
+            ticker = mp.canonical_ticker(asset)
+            key_name = recorded or name.upper()
+            if not name or key_name in learned:
+                continue
+            if ticker and cs.symbol_for(asset):
+                continue  # already priceable
+            unresolved.setdefault(key_name, (name, recorded))
+        if not unresolved:
+            log_info("Every asset already resolves to a priceable ticker.")
+            return 0
+        log_info(f"Resolving {len(unresolved)} unpriceable asset(s).")
+        for key_name, (name, recorded) in sorted(unresolved.items()):
+            entry = ticker_resolver.resolve(name, recorded, key)
+            learned[key_name] = entry
+            status = entry["ticker"] or "no US listing"
+            log_info(f"  {name[:34]:36} {recorded or '-':10} -> {status} ({entry['via']})")
+        ticker_resolver.save(learned)
+        return 0
 
     if args.find:
         if not cs.twelvedata_key():

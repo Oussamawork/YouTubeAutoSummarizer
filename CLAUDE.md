@@ -36,6 +36,16 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   imports lazily and every chart is best-effort — chart failures never block the
   text pulse. A chart with too little history to mean anything is either skipped
   (`MIN_SPREAD_WEEKS`) or labels itself as early days (`MATURE_SPREAD_WEEKS`).
+- `ticker_resolver.py` — learns the real ticker for assets the transcript named
+  badly, into `data/ticker_map.json` (filled by `warm_prices.py --resolve`).
+  The provider's catalogue is tried first; only when it can't match the spelling
+  does an LLM propose candidates, and **every suggestion is verified against the
+  catalogue before it is kept** — the ticker must exist *and* the listing's
+  company name must match the asset. This is deliberately narrower than the
+  LLM-supplied tickers the extractor still forbids (see `ASSET_ALIASES`): a model
+  guess alone never enters the data, and each entry records how it was resolved.
+  `canonical_ticker` consults the curated tables first, so a learned entry can
+  never override a hand-checked one.
 - `price_cache.py` / `warm_prices.py` — the daily-close cache (`data/prices.json`)
   and the Sunday job that fills it (`warm-prices.yml`). Closes are immutable
   history, so a covered range is never refetched; this is what lets the weekly
