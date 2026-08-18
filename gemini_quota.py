@@ -23,6 +23,18 @@ GEMINI_USAGE_FILE = os.getenv("GEMINI_USAGE_FILE") or "data/gemini_usage.json"
 # Requests per model per day on the free tier. Measured from AI Studio for this
 # project on 2026-08-13; published third-party figures (1,500/day) are wrong.
 GEMINI_REQUESTS_PER_DAY = env_int("GEMINI_REQUESTS_PER_DAY", 20)
+# How long the API's "your daily quota is gone" verdict is believed when our own
+# tally says the model still has requests left. The two disagreed badly in
+# production: on 2026-08-18 gemini-3.7-flash was written off at 00:41 Pacific
+# after 3 recorded requests and then sat idle all day with 17 of its 20 free
+# requests unspent, which is what pushed that evening's videos onto the deferral
+# path. A rejected request costs no quota, so re-probing a flagged model once a
+# run is nearly free; believing a premature verdict costs a whole day of the
+# best summary model.
+GEMINI_SPENT_RECHECK_MINUTES = env_int("GEMINI_SPENT_RECHECK_MINUTES", 45)
+# Every repeat of the verdict doubles the wait, so a model that really is out
+# for the day is left alone instead of being probed by every two-hourly run.
+GEMINI_SPENT_RECHECK_MAX_MINUTES = env_int("GEMINI_SPENT_RECHECK_MAX_MINUTES", 360)
 
 try:  # tzdata is present on the CI runners and on most dev machines
     from zoneinfo import ZoneInfo
@@ -59,6 +71,13 @@ _PER_MINUTE_MARKER = re.compile(r"per[_\s-]?minute", re.IGNORECASE)
 # `"retryDelay": "27s"` inside google.rpc.RetryInfo. The REST API sends this in
 # the body, not in a Retry-After header, so a header-only reader never sees it.
 _RETRY_DELAY = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
+# The quota Google actually names inside a 429. Its `message` is generic ("You
+# exceeded your current quota"), so the id is the only thing that says whether
+# the limit counts requests or tokens — and a fixed-length body preview in the
+# log always cut off before the violation list, which is why a model written off
+# after 3 requests could not be explained from the logs alone.
+_QUOTA_ID = re.compile(r'"quota(?:Id|_id|Metric|_metric)"\s*:\s*"([^"]+)"')
+_QUOTA_VALUE = re.compile(r'"quotaValue"\s*:\s*"?(\d+)"?')
 
 
 def classify_429(body):
@@ -87,6 +106,27 @@ def retry_delay_seconds(body):
         return None
 
 
+def violation_summary(body):
+    """
+    One line naming the quota(s) a 429 blames, for the log. "" when the body
+    carries no violation details.
+
+    Worth extracting rather than leaning on a body preview: the ids sit at the
+    end of the payload, past the generic message, so the preview never reached
+    them — and the id is what distinguishes "20 requests a day" from a
+    token-per-day limit that a handful of long transcripts can exhaust.
+    """
+    body = body or ""
+    parts = []
+    ids = list(dict.fromkeys(_QUOTA_ID.findall(body)))
+    if ids:
+        parts.append("quota=" + ",".join(ids))
+    values = list(dict.fromkeys(_QUOTA_VALUE.findall(body)))
+    if values:
+        parts.append("limit=" + ",".join(values))
+    return "; ".join(parts)
+
+
 def load_usage(now=None):
     """Today's per-model counts, resetting when the Pacific day has rolled."""
     day = quota_day(now).isoformat()
@@ -101,9 +141,69 @@ def load_usage(now=None):
         data = {"day": day, "models": {}}
     models = data.get("models")
     data["models"] = models if isinstance(models, dict) else {}
-    spent = data.get("spent")
-    data["spent"] = sorted(m for m in spent if isinstance(m, str)) if isinstance(spent, list) else []
+    data["spent"] = _normalize_spent(data.get("spent"))
     return data
+
+
+def _normalize_spent(spent):
+    """
+    Today's API write-offs as `{model: {"at", "used", "confirmations"}}`.
+
+    The v1 shape — a plain list of model names — is still accepted, because the
+    counter file is committed by one run and read by the next, so a deploy
+    always meets a file written by the previous version. A migrated entry has no
+    timestamp, which reads as "due for a recheck": the safe direction, since the
+    worst case is one rejected request.
+    """
+    if isinstance(spent, dict):
+        items = list(spent.items())
+    elif isinstance(spent, list):
+        items = [(model, {}) for model in spent]
+    else:
+        return {}
+    normalized = {}
+    for model, entry in items:
+        if not isinstance(model, str):
+            continue
+        entry = entry if isinstance(entry, dict) else {}
+        at = entry.get("at")
+        count = entry.get("used")
+        confirmations = entry.get("confirmations")
+        normalized[model] = {
+            "at": at if isinstance(at, str) else None,
+            "used": count if isinstance(count, int) else 0,
+            "confirmations": confirmations if isinstance(confirmations, int) and confirmations > 0 else 1,
+        }
+    return normalized
+
+
+def _parse_iso(value):
+    """A stored timestamp as an aware datetime, or None when unusable."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def recheck_delay_minutes(entry):
+    """How long a write-off is honored before the model is tried again."""
+    confirmations = max(1, (entry or {}).get("confirmations") or 1)
+    # Doubling per repeat, so the first (and usually wrong) verdict costs the
+    # model one run rather than a day, while a model that keeps refusing is
+    # asked less and less often.
+    delay = GEMINI_SPENT_RECHECK_MINUTES * (2 ** (confirmations - 1))
+    return min(delay, GEMINI_SPENT_RECHECK_MAX_MINUTES)
+
+
+def _recheck_due(entry, now=None):
+    """True once a written-off model has rested long enough to be re-probed."""
+    at = _parse_iso((entry or {}).get("at"))
+    if at is None:  # migrated or corrupt flag: nothing says how long it has sat
+        return True
+    return (now or datetime.now(timezone.utc)) >= at + timedelta(
+        minutes=recheck_delay_minutes(entry)
+    )
 
 
 def save_usage(usage):
@@ -126,16 +226,36 @@ def used(model, usage=None):
     return count if isinstance(count, int) else 0
 
 
-def is_exhausted(model, usage=None):
-    """True when `model` has no free requests left today."""
+def is_exhausted(model, usage=None, now=None):
+    """
+    True when `model` cannot serve another request right now.
+
+    Two sources say so, and they are not equally final. Our own tally reaching
+    the daily cap is: those requests were served and cannot be unserved. The
+    API's 429 verdict is not — it has written a model off after three requests,
+    a limit whose shape we cannot see from here — so it is honored for a
+    cooling-off period and then re-tested, instead of costing the model the rest
+    of its day. Skipping it for the remainder of the *current* run is the
+    caller's job (`summarizer._EXHAUSTED_PROVIDERS`); this decides whether a
+    later run may try again.
+    """
     usage = usage if usage is not None else load_usage()
-    return model in usage["spent"] or used(model, usage) >= GEMINI_REQUESTS_PER_DAY
+    if used(model, usage) >= GEMINI_REQUESTS_PER_DAY:
+        return True
+    entry = usage["spent"].get(model)
+    return bool(entry) and not _recheck_due(entry, now)
 
 
 def record(model, usage=None):
     """Count one served request against `model`'s daily budget."""
     usage = usage if usage is not None else load_usage()
     usage["models"][model] = used(model, usage) + 1
+    if usage["spent"].pop(model, None) is not None:
+        # The API just served a request it had refused earlier today, so that
+        # verdict is stale. Clearing the flag puts the model back at its proper
+        # place in the chain for the rest of the day instead of leaving the
+        # preferred model skipped on the strength of one old 429.
+        log_info(f"Gemini {model} answered again; clearing today's spent flag.")
     save_usage(usage)
     return usage
 
@@ -149,14 +269,25 @@ def mark_exhausted(model):
     API said stop after 3" — so the file could not answer how much budget a run
     actually used, which is the one question it exists to answer. The flag
     carries the "stop asking" decision; the count stays a true tally.
+
+    The decision is provisional, not final: the flag records when it was set and
+    how many verdicts the API has now given, so `is_exhausted` can re-probe the
+    model later instead of surrendering the rest of its day (see
+    `GEMINI_SPENT_RECHECK_MINUTES`).
     """
     usage = load_usage()
-    if model not in usage["spent"]:
-        usage["spent"] = sorted(usage["spent"] + [model])
+    confirmations = ((usage["spent"].get(model) or {}).get("confirmations") or 0) + 1
+    entry = {
+        "at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "used": used(model, usage),
+        "confirmations": confirmations,
+    }
+    usage["spent"][model] = entry
     save_usage(usage)
     log_info(
         f"Gemini {model} marked spent for today ({quota_day().isoformat()}) "
-        f"after {used(model, usage)} recorded request(s)."
+        f"after {entry['used']} recorded request(s); skipped for the next "
+        f"{recheck_delay_minutes(entry)} min (verdict #{confirmations})."
     )
     return usage
 
@@ -173,6 +304,22 @@ def report():
         return ""
     return ", ".join(
         f"{model}={max(0, GEMINI_REQUESTS_PER_DAY - count)}/{GEMINI_REQUESTS_PER_DAY} left"
-        + (" (capped by API)" if model in usage["spent"] else "")
+        + _capped_note(usage["spent"].get(model))
         for model, count in sorted(models.items())
     )
+
+
+def _capped_note(entry):
+    """
+    How a written-off model is annotated in the end-of-run budget line.
+
+    The remaining-requests figure is what exposed the bug this guards against —
+    "gemini-3.7-flash=17/20 left (capped by API)" was the whole day's loss in
+    one line — so the note now also says when the model comes back, which is the
+    next question that line raises.
+    """
+    if not entry:
+        return ""
+    if _recheck_due(entry):
+        return " (capped by API, due for a retry)"
+    return f" (capped by API, retried after {recheck_delay_minutes(entry)} min)"
