@@ -1,28 +1,28 @@
 {
   "channels": {
     "UC3AdN1bEmEonuSwXNS8LixQ": {
-      "last_published": "2026-08-14T16:00:05+00:00",
-      "last_video_id": "bgGH9H4ByGg"
+      "last_published": "2026-08-17T16:00:03+00:00",
+      "last_video_id": "0W_wFs0m7Fk"
     },
     "UCTPm4y283GIygUCq4a_T96Q": {
-      "last_published": "2026-08-14T04:39:47+00:00",
-      "last_video_id": "ShRsZfyCk0k"
+      "last_published": "2026-08-18T03:19:31+00:00",
+      "last_video_id": "gVJRaD_nbds"
     },
     "UC_niVs5ITmD-qgnxph8CohA": {
-      "last_published": "2026-08-16T16:30:35+00:00",
-      "last_video_id": "HZAEJGhp5c4"
+      "last_published": "2026-08-17T17:00:20+00:00",
+      "last_video_id": "hyk4npMqFn0"
     },
     "UCfCT7SSFEWyG4th9ZmaGYqQ": {
-      "last_published": "2026-08-13T21:14:43+00:00",
-      "last_video_id": "v00MJumOVRk"
+      "last_published": "2026-08-17T21:47:08+00:00",
+      "last_video_id": "sAjItQLVQyY"
     },
     "UCngIhBkikUe6e7tZTjpKK7Q": {
-      "last_published": "2026-08-17T00:58:22+00:00",
-      "last_video_id": "z9MBQVV2TIQ"
+      "last_published": "2026-08-18T00:18:54+00:00",
+      "last_video_id": "-40fQMkF_rc"
     },
     "UCp6aBHRM6ZS_kLeC57HV4kg": {
-      "last_published": "2026-08-14T18:00:32+00:00",
-      "last_video_id": "I4aXAZ4FZIw"
+      "last_published": "2026-08-17T17:58:46+00:00",
+      "last_video_id": "l_exgacPg18"
     },
     "UCrGLm-Drgv0vbbemwwHeXJw": {
       "last_published": "2026-08-17T13:01:29+00:00",
@@ -33,38 +33,9 @@
       "last_video_id": "ctJEDyIxZHQ"
     },
     "UCwKB_00dPL3x5XmHF9IJCrg": {
-      "last_published": "2026-08-17T15:45:02+00:00",
-      "last_video_id": "2jlN5pTtLE8"
+      "last_published": "2026-08-17T16:45:16+00:00",
+      "last_video_id": "j7vHALxtLhg"
     }
   },
-  "pending": {
-    "-40fQMkF_rc": {
-      "attempts": 0,
-      "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
-    },
-    "0W_wFs0m7Fk": {
-      "attempts": 0,
-      "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ"
-    },
-    "hyk4npMqFn0": {
-      "attempts": 0,
-      "channel_id": "UC_niVs5ITmD-qgnxph8CohA"
-    },
-    "j7vHALxtLhg": {
-      "attempts": 0,
-      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
-    },
-    "l_exgacPg18": {
-      "attempts": 0,
-      "channel_id": "UCp6aBHRM6ZS_kLeC57HV4kg"
-    },
-    "sAjItQLVQyY": {
-      "attempts": 0,
-      "channel_id": "UCfCT7SSFEWyG4th9ZmaGYqQ"
-    },
-    "ucrXJlTbB_w": {
-      "attempts": 0,
-      "channel_id": "UCrGLm-Drgv0vbbemwwHeXJw"
-    }
-  }
+  "pending": {}
 }
