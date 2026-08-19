@@ -139,16 +139,32 @@ jobs:
             # and fail loudly if it never lands (so dedup drift / re-sends are visible).
             pushed=false
             for attempt in 1 2 3; do
-              git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
-              if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              # A conflicted rebase must never fall through to the push. `|| true`
+              # swallowed the conflict, leaving the run's commit stranded on a
+              # detached HEAD; `git push` then printed "Everything up-to-date"
+              # and exited 0, so this step reported success while discarding the
+              # whole run — watermarks, counters and signals — and the next run
+              # re-sent summaries it had already delivered. Abort and retry.
+              if ! git pull --rebase --autostash origin "${GITHUB_REF_NAME}"; then
+                echo "Rebase onto ${GITHUB_REF_NAME} failed; aborting it rather than pushing a stranded HEAD."
+                git rebase --abort || true
+                sleep $((attempt * 5))
+                continue
+              fi
+              local_head="$(git rev-parse HEAD)"
+              # Trust the ref, not the exit code: `git push` also exits 0 when it
+              # has nothing to push, which is exactly the case above.
+              if git push origin "HEAD:${GITHUB_REF_NAME}" \
+                && git fetch origin "${GITHUB_REF_NAME}" \
+                && git merge-base --is-ancestor "${local_head}" FETCH_HEAD; then
                 pushed=true
                 break
               fi
-              echo "Push attempt ${attempt} failed; retrying in $((attempt * 5))s..."
+              echo "Push attempt ${attempt} did not land; retrying in $((attempt * 5))s..."
               sleep $((attempt * 5))
             done
             if [ "${pushed}" != "true" ]; then
-              echo "::error::Failed to persist seen_videos.json after 3 attempts; dedup state may drift (risk of re-sends)."
+              echo "::error::Failed to persist run state after 3 attempts; seen_videos.json, the Gemini/Supadata counters and signals were not saved (risk of re-sends)."
               exit 1
             fi
           else
