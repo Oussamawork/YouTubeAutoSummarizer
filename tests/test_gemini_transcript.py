@@ -8,6 +8,7 @@ transcript (which would eventually write it off).
 """
 import pytest
 
+import gemini_quota
 import transcript
 
 
@@ -135,6 +136,63 @@ class TestFetchGeminiTranscript:
         assert first == second == ("", True, "gemini_quota")
         # Every model asked once on the first video, none on the second.
         assert len(calls) == len(transcript._gemini_transcript_models())
+
+    def _lapsed_write_offs(self):
+        """
+        Every transcript model written off by the API, with the verdict aged out
+        so this run re-probes it. This is the state the committed counter file
+        migrates into, so it is what the first run after a deploy actually sees.
+        """
+        for model in transcript._gemini_transcript_models():
+            gemini_quota.mark_exhausted(model)
+        usage = gemini_quota.load_usage()
+        for entry in usage["spent"].values():
+            entry["at"] = None
+        gemini_quota.save_usage(usage)
+
+    def test_a_lapsed_write_off_whose_re_probe_fails_still_defers(self, monkeypatch, gemini_key):
+        # The models are out of budget; the video is fine. If the re-probe
+        # failing for an unrelated reason made this look like "no transcript",
+        # scraper.py would spend one of the video's give-up attempts on a quota
+        # outage — and eight of those write a good video off for good.
+        self._lapsed_write_offs()
+        monkeypatch.setattr(
+            transcript.requests, "post",
+            lambda url, **kwargs: FakeResponse(status_code=400, text="bad request"),
+        )
+        text, exhausted, reason = transcript._fetch_gemini_transcript("vid00000001")
+        assert (text, exhausted, reason) == ("", True, "gemini_quota")
+
+    def test_a_failed_re_probe_is_not_repeated_for_every_video(self, monkeypatch, gemini_key):
+        # One lapsed verdict must cost one probe per run, not one per video:
+        # a failed probe leaves the persisted flag untouched, so without an
+        # in-run guard the whole rotation is re-asked for every video.
+        self._lapsed_write_offs()
+        calls = []
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+            return FakeResponse(status_code=400, text="bad request")
+
+        monkeypatch.setattr(transcript.requests, "post", fake_post)
+        first = transcript._fetch_gemini_transcript("vid00000001")
+        second = transcript._fetch_gemini_transcript("vid00000002")
+        assert first == second == ("", True, "gemini_quota")
+        assert len(calls) == len(transcript._gemini_transcript_models())
+
+    def test_a_re_probe_that_succeeds_clears_the_verdict(self, monkeypatch, gemini_key):
+        # The other direction: the API answering is proof the verdict lapsed,
+        # so the model must go back to serving rather than stay written off.
+        self._lapsed_write_offs()
+        monkeypatch.setattr(
+            transcript.requests, "post",
+            lambda url, **kwargs: FakeResponse(payload=_payload(LONG)),
+        )
+        text, exhausted, reason = transcript._fetch_gemini_transcript("vid00000001")
+        assert text and exhausted is False and reason == "gemini_ok"
+        first = transcript._gemini_transcript_models()[0]
+        assert gemini_quota.written_off(first) is False
+        assert gemini_quota.used(first) == 1
 
     def test_no_key_is_skipped_quietly(self, monkeypatch):
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)

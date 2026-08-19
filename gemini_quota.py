@@ -246,6 +246,20 @@ def is_exhausted(model, usage=None, now=None):
     return bool(entry) and not _recheck_due(entry, now)
 
 
+def written_off(model, usage=None):
+    """
+    True when the API's "out of requests" verdict for `model` is on file today,
+    whether or not it is still being honored.
+
+    `is_exhausted` answers "may I call this model right now?", which goes False
+    the moment the cooling-off period lapses. Callers that need to know the
+    verdict *exists* — to keep treating a re-probe that fails as a budget
+    problem rather than a broken video — have to ask separately.
+    """
+    usage = usage if usage is not None else load_usage()
+    return model in usage["spent"]
+
+
 def record(model, usage=None):
     """Count one served request against `model`'s daily budget."""
     usage = usage if usage is not None else load_usage()
