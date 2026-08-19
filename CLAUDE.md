@@ -24,7 +24,11 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `gemini_quota.py` — per-model daily free-tier accounting in
   `data/gemini_usage.json` (20 requests/day per model, resets midnight Pacific);
   also classifies a 429 as a per-day or per-minute limit, which decides whether
-  a model is retired for the day or merely retried.
+  a model is retired for the day or merely retried. A per-day verdict is
+  **provisional**: it is honored for `GEMINI_SPENT_RECHECK_MINUTES` (doubling on
+  each repeat) and then re-probed, because the API has written a model off after
+  three requests — see `docs/tdd-gemini-transcripts.md` § 9. Only the locally
+  counted cap is final.
 - `signals.py` — LLM extraction of structured market signals from summaries
   (opt-in via `MARKET_SIGNALS`; appends to `data/signals.jsonl`).
 - `market_pulse.py` — weekly aggregation over `data/signals.jsonl` (top assets,

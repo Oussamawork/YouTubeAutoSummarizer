@@ -5,7 +5,8 @@ The counter's job is to stop a run from spending requests it doesn't have, and
 failure modes matter as much as the happy path: a corrupt or unwritable counter
 file must fail open, not block.
 """
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 
 import gemini_quota
 
@@ -160,3 +161,143 @@ class TestRetryDelay:
     def test_absent(self):
         assert gemini_quota.retry_delay_seconds(PER_DAY_BODY) is None
         assert gemini_quota.retry_delay_seconds("") is None
+
+
+class TestProvisionalWriteOff:
+    """
+    A 429 that names a per-day quota is the API's verdict, not a fact we can
+    verify. On 2026-08-18 it retired gemini-3.7-flash at 00:41 Pacific after 3
+    recorded requests; the model then sat idle for the rest of the day with 17
+    of its 20 free requests unspent, and the evening's videos were deferred for
+    "LLM quota reached" while the best model had budget left. So the verdict
+    buys a cooling-off period, not the day.
+    """
+
+    def _later(self, minutes):
+        return datetime.now(timezone.utc) + timedelta(minutes=minutes)
+
+    def test_honored_immediately_after_the_verdict(self):
+        gemini_quota.mark_exhausted("gemini-3.7-flash")
+        assert gemini_quota.is_exhausted("gemini-3.7-flash") is True
+
+    def test_retried_once_the_cooling_off_period_passes(self):
+        gemini_quota.mark_exhausted("gemini-3.7-flash")
+        later = self._later(gemini_quota.GEMINI_SPENT_RECHECK_MINUTES + 1)
+        assert gemini_quota.is_exhausted("gemini-3.7-flash", now=later) is False
+
+    def test_a_repeated_verdict_doubles_the_wait(self):
+        # A model that really is out for the day should be left alone, not
+        # probed by every two-hourly run for the next twenty hours.
+        gemini_quota.mark_exhausted("gemini-3.6-flash")
+        gemini_quota.mark_exhausted("gemini-3.6-flash")
+        base = gemini_quota.GEMINI_SPENT_RECHECK_MINUTES
+        assert gemini_quota.is_exhausted("gemini-3.6-flash", now=self._later(base + 1)) is True
+        assert gemini_quota.is_exhausted("gemini-3.6-flash", now=self._later(base * 2 + 1)) is False
+
+    def test_the_wait_is_capped(self):
+        for _ in range(20):
+            gemini_quota.mark_exhausted("gemini-3.6-flash")
+        entry = gemini_quota.load_usage()["spent"]["gemini-3.6-flash"]
+        assert gemini_quota.recheck_delay_minutes(entry) == (
+            gemini_quota.GEMINI_SPENT_RECHECK_MAX_MINUTES
+        )
+
+    def test_a_served_request_clears_the_verdict(self):
+        # The API answering is proof the write-off no longer holds, so the
+        # model goes back into the chain instead of staying skipped.
+        gemini_quota.mark_exhausted("gemini-3.7-flash")
+        gemini_quota.record("gemini-3.7-flash")
+        assert gemini_quota.is_exhausted("gemini-3.7-flash") is False
+        assert "gemini-3.7-flash" not in gemini_quota.load_usage()["spent"]
+
+    def test_the_counted_cap_is_never_provisional(self):
+        # Requests we watched being served cannot be un-served: no amount of
+        # waiting brings them back before the Pacific reset.
+        for _ in range(gemini_quota.GEMINI_REQUESTS_PER_DAY):
+            gemini_quota.record("gemini-3.5-flash")
+        gemini_quota.mark_exhausted("gemini-3.5-flash")
+        assert gemini_quota.is_exhausted("gemini-3.5-flash", now=self._later(10000)) is True
+
+    def test_the_verdict_records_what_it_overruled(self):
+        # "Written off after 3 of 20" is the whole diagnosis; the tally alone
+        # cannot say it, because later models keep incrementing the file.
+        gemini_quota.record("gemini-3.7-flash")
+        gemini_quota.record("gemini-3.7-flash")
+        gemini_quota.mark_exhausted("gemini-3.7-flash")
+        assert gemini_quota.load_usage()["spent"]["gemini-3.7-flash"]["used"] == 2
+
+    def test_report_says_when_a_capped_model_comes_back(self):
+        gemini_quota.mark_exhausted("gemini-3.7-flash")
+        line = gemini_quota.report()
+        assert "capped by API" in line and "retried after" in line
+
+
+class TestSpentSchemaMigration:
+    """
+    One run writes the counter file and the next run reads it, so a deploy
+    always meets a file written by the previous version.
+    """
+
+    def test_v1_list_is_read_as_a_write_off_due_for_a_recheck(self, tmp_path, monkeypatch):
+        path = tmp_path / "usage.json"
+        path.write_text(json.dumps({
+            "day": gemini_quota.quota_day().isoformat(),
+            "models": {"gemini-3.7-flash": 3},
+            "spent": ["gemini-3.7-flash"],
+        }))
+        monkeypatch.setattr(gemini_quota, "GEMINI_USAGE_FILE", str(path))
+        # No timestamp survives the migration, and a flag of unknown age is
+        # worth one rejected request to re-test — not a day of the best model.
+        assert gemini_quota.is_exhausted("gemini-3.7-flash") is False
+        assert gemini_quota.used("gemini-3.7-flash") == 3
+
+    def test_a_junk_spent_value_does_not_block_the_model(self, tmp_path, monkeypatch):
+        path = tmp_path / "usage.json"
+        path.write_text(json.dumps({
+            "day": gemini_quota.quota_day().isoformat(),
+            "models": {},
+            "spent": "gemini-3.7-flash",
+        }))
+        monkeypatch.setattr(gemini_quota, "GEMINI_USAGE_FILE", str(path))
+        assert gemini_quota.is_exhausted("gemini-3.7-flash") is False
+
+
+class TestViolationSummary:
+    """
+    The logged 429 preview stops at 200 characters, which lands inside Google's
+    generic "You exceeded your current quota" sentence — so the logs could not
+    say whether a model was written off for requests-per-day or something else
+    entirely. The named quota is pulled out and logged separately.
+    """
+
+    def test_names_the_quota(self):
+        assert gemini_quota.violation_summary(PER_DAY_BODY) == (
+            "quota=GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+        )
+
+    def test_includes_the_limit_when_given(self):
+        body = (
+            '{"violations":[{"quotaMetric":"generativelanguage.googleapis.com/'
+            'generate_content_free_tier_requests","quotaId":'
+            '"GenerateRequestsPerDayPerProjectPerModel-FreeTier","quotaValue":"20"}]}'
+        )
+        summary = gemini_quota.violation_summary(body)
+        assert "GenerateRequestsPerDayPerProjectPerModel-FreeTier" in summary
+        assert "limit=20" in summary
+
+    def test_empty_when_the_body_names_nothing(self):
+        assert gemini_quota.violation_summary('{"error":"Too Many Requests"}') == ""
+        assert gemini_quota.violation_summary(None) == ""
+
+
+def test_report_marks_a_verdict_that_is_already_due_for_a_retry(tmp_path, monkeypatch):
+    # A migrated flag has no timestamp, so it is retried on sight. Saying
+    # "retried after 45 min" there would describe a wait that is not happening.
+    path = tmp_path / "usage.json"
+    path.write_text(json.dumps({
+        "day": gemini_quota.quota_day().isoformat(),
+        "models": {"gemini-3.7-flash": 3},
+        "spent": ["gemini-3.7-flash"],
+    }))
+    monkeypatch.setattr(gemini_quota, "GEMINI_USAGE_FILE", str(path))
+    assert "due for a retry" in gemini_quota.report()

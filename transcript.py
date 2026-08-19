@@ -313,7 +313,15 @@ def _fetch_gemini_with_model(vid, model, api_key):
         if resp.status_code == 429:
             body = resp.text or ""
             kind = gemini_quota.classify_429(body)
-            log_warn(f"Gemini {model} rate-limited (429, {kind} quota): {body[:200]}")
+            # Same reason as in summarizer.py: the quota id is the only part of
+            # the body that says which limit was hit, and it sits past the
+            # preview.
+            detail = gemini_quota.violation_summary(body)
+            log_warn(
+                f"Gemini {model} rate-limited (429, {kind} quota"
+                + (f", {detail}" if detail else "")
+                + f"): {body[:200]}"
+            )
             return "", f"quota_{kind}"
 
         if resp.status_code in GEMINI_TRANSCRIPT_RETRY_STATUS and attempt < GEMINI_TRANSCRIPT_MAX_RETRIES:

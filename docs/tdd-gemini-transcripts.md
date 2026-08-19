@@ -195,3 +195,75 @@ was never updated when the Gemini source was added — so every Gemini success w
 counted and reported as a failure. The set now lives in `transcript.py` beside
 the code that produces the reasons, and the scraper imports it, so it cannot
 drift again.
+
+## 9. A per-day 429 is a verdict, not a fact (2026-08-18)
+
+Two videos on the evening of 2026-08-18 went out as
+
+> ⏳ Summary deferred — the LLM provider quota/rate limit was reached.
+
+with the run's own budget line saying why:
+
+```
+22:29:52 [INFO] Skipping gemini-3.7-flash (quota exhausted earlier this run).
+22:29:52 [INFO] Skipping gemini-3.6-flash (quota exhausted earlier this run).
+22:29:53 [INFO] Gemini daily budget: gemini-3.6-flash=2/20 left (capped by API),
+                gemini-3.7-flash=17/20 left (capped by API)
+```
+
+The chain was out of budget with **17 of 3.7-flash's 20 free requests unspent**.
+The write-off happened in the 07:41 UTC run — 00:41 Pacific, forty-one minutes
+into the new quota day, after three recorded requests:
+
+```
+07:46:16 [WARN] gemini-3.7-flash rate-limited (429, day quota): [{
+           "message": "You exceeded your current quota, please check your plan…
+07:46:16 [INFO] Gemini gemini-3.7-flash marked spent for today (2026-08-18)
+                after 3 recorded request(s).
+```
+
+The same shape recurs daily: 3.7-flash was written off after 8 recorded requests
+on 08-16 and after **0** on 08-17. A limit that binds at 0, 3 and 8 requests is
+not the 20-requests-per-day quota this project measured, so the code's inference
+— "the API said per-day, therefore this model is finished until the Pacific
+reset" — did not hold, and it was costing the *best* summary model most of every
+day. 3.6-flash then absorbed the whole workload, hit its own real cap at 18, and
+the day's last videos deferred.
+
+Which limit Google actually meant is still unknown, and that is the second
+finding: the log printed `body[:200]`, which stops inside the generic
+`"You exceeded your current quota"` sentence, while the `quotaId` that names the
+limit sits after it. Three days of logs cannot say whether the ceiling was
+requests-per-day, tokens-per-day, or a stale count from before the reset.
+
+### Design
+
+- **The write-off is provisional.** `spent` grows from a list of model names to
+  `{model: {"at", "used", "confirmations"}}`. `is_exhausted` honors a verdict for
+  `GEMINI_SPENT_RECHECK_MINUTES` (45) and then lets the model be tried again. A
+  rejected request costs no quota, so a re-probe is worth about a second of
+  wall clock; believing a wrong verdict costs a day of the better model.
+- **Repeats back off.** Each further verdict doubles the wait (capped at
+  `GEMINI_SPENT_RECHECK_MAX_MINUTES`, 6h), so a model that genuinely is out for
+  the day is left alone instead of being probed by every two-hourly run.
+- **A served request clears the flag.** If the API answers a model it refused
+  earlier, the verdict is stale by definition and `record()` drops it.
+- **The counted cap stays final.** Requests we watched being served cannot be
+  un-served: at 20 recorded, the model is done until the Pacific reset, and no
+  waiting changes that. Only the API's *claim* is provisional.
+- **The named quota is logged.** `gemini_quota.violation_summary` pulls the
+  `quotaId`/`quotaValue` out of the body and logs them beside the classification,
+  so the next occurrence says which ceiling was hit instead of leaving it to be
+  reconstructed from committed counter files.
+- **The skip line stopped lying.** "Skipping X (quota exhausted earlier this
+  run)" was printed for both a limit hit minutes ago and a verdict inherited
+  from a run hours earlier. The two are now distinguished, because the second
+  reads as routine when it is the thing worth investigating.
+
+### Not built
+
+- **Raising `LLM_COMBINED_MAX_TOKENS` (3000).** Escalation does spend a second
+  request, but it fired once in ten summaries in the 07:41 run — ~10% overhead
+  against a chain that had 17 requests sitting idle. Not the binding constraint.
+- **Widening the summary chain.** The model list is a quality decision
+  (§ `summarizer.py`), and the budget it already has was not being spent.

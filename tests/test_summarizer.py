@@ -1,5 +1,9 @@
 """Tests for the summarizer's pure logic and provider-orchestration routing."""
+from datetime import datetime, timedelta, timezone
+
 import pytest
+
+import gemini_quota
 
 import summarizer
 
@@ -628,3 +632,46 @@ class TestRateLimitHandling:
         summarizer._call_provider(self._gemini(), "transcript text")
 
         assert waits and max(waits) == summarizer.LLM_RETRY_AFTER_CAP
+
+
+def _gemini_provider():
+    return [{
+        "name": "gemini-3.7-flash",
+        "model": "gemini-3.7-flash",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "api_key": "k",
+    }]
+
+
+def test_a_write_off_from_an_earlier_run_does_not_cost_the_whole_day(monkeypatch):
+    # The failure this guards: gemini-3.7-flash 429'd once at 00:41 Pacific and
+    # every later run of the day skipped it on that verdict, with 17 of its 20
+    # free requests unspent — until summaries fell off the end of the chain and
+    # videos were deferred for "quota reached".
+    monkeypatch.setattr(summarizer, "_provider_configs", _gemini_provider)
+    monkeypatch.setattr(summarizer, "_call_provider", lambda p, t, title=None, **kw: "SUMMARY")
+    gemini_quota.mark_exhausted("gemini-3.7-flash")
+
+    # A fresh verdict is still honored — the cooling-off period is the point.
+    assert summarizer.summarize_transcript("text") == summarizer.QUOTA_EXHAUSTED_SENTINEL
+
+    # Once it has passed, a later run tries the model again rather than
+    # inheriting a decision made hours ago.
+    usage = gemini_quota.load_usage()
+    entry = usage["spent"]["gemini-3.7-flash"]
+    aged = datetime.now(timezone.utc) - timedelta(
+        minutes=gemini_quota.recheck_delay_minutes(entry) + 1
+    )
+    entry["at"] = aged.isoformat()
+    gemini_quota.save_usage(usage)
+    assert summarizer.summarize_transcript("text") == "SUMMARY"
+
+
+def test_skip_reason_distinguishes_this_run_from_an_older_verdict():
+    # Both cases used to log "quota exhausted earlier this run", which read as
+    # normal traffic shaping and hid a model idling on a stale verdict.
+    provider = _gemini_provider()[0]
+    gemini_quota.mark_exhausted("gemini-3.7-flash")
+    assert "budget spent" in summarizer._skip_reason(provider)
+    summarizer._EXHAUSTED_PROVIDERS.add(provider["name"])
+    assert "earlier this run" in summarizer._skip_reason(provider)
