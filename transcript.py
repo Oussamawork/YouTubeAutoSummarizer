@@ -378,6 +378,10 @@ def _fetch_gemini_transcript(vid):
             log_info(f"Skipping Gemini {model} (rate-limited or out of daily quota).")
             quota_hit, reason = quota_hit + 1, "quota"
             continue
+        # A model carrying the API's write-off is being re-probed on the chance
+        # the verdict has lapsed. Remember that, because how the probe turns out
+        # decides whether this is a budget problem or a broken video.
+        reprobe = gemini_quota.written_off(model)
         text, reason = _fetch_gemini_with_model(vid, model, api_key)
         if text:
             gemini_quota.record(model)
@@ -401,6 +405,17 @@ def _fetch_gemini_transcript(vid):
                 gemini_quota.mark_exhausted(model)
             else:
                 _RATE_LIMITED_THIS_RUN.add(model)
+            quota_hit += 1
+        elif reprobe:
+            # The re-probe failed for some other reason. It is still a model the
+            # API has written off today, so it must keep counting as "out of
+            # budget": otherwise `quota_hit` falls short of the model count, the
+            # caller gets budget_exhausted=False, and scraper.py spends one of
+            # the video's give-up attempts on what is really a quota outage —
+            # eight of those and a perfectly good video is written off as having
+            # no transcript. Skipping it for the rest of the run also stops one
+            # lapsed verdict from being re-probed once per video.
+            _RATE_LIMITED_THIS_RUN.add(model)
             quota_hit += 1
         if index + 1 < len(models):
             log_warn(f"Gemini {model} failed ({reason}); trying {models[index + 1]}.")
