@@ -316,11 +316,18 @@ def test_unpriceable_tickers_are_skipped_before_any_request():
         assert cs.symbol_for({"name": ticker, "ticker": ticker, "type": "stock"}) is None
 
 
-def test_spacex_is_priceable_via_the_curated_ticker():
-    """Verified live 2026-08-17: spcx.us returns closes, so SpaceX is no
-    longer written off as private."""
+def test_spacex_is_not_priced_against_an_unrelated_listing():
+    """SpaceX is private and has no listed equity, so no symbol can be right.
+
+    It was aliased to SPCX because "spcx.us returns closes" — but a ticker that
+    prices *something* is not a ticker that prices the asset. That series moves
+    108 -> 146 in 12 sessions with ±10% days, i.e. a leveraged ETP, and three
+    real calls were scored against it with amplified returns.
+    """
     assert cs.symbol_for({"name": "SpaceX", "ticker": "SPACEX",
-                          "type": "stock"}) == "spcx.us"
+                          "type": "stock"}) is None
+    assert cs.symbol_for({"name": "SpaceX", "ticker": "SPCX",
+                          "type": "stock"}) is None
 
 
 def test_us_symbols_disambiguate_by_country(monkeypatch):

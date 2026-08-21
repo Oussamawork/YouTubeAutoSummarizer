@@ -140,9 +140,6 @@ TICKER_ALIASES = {
     "SALESFORCE": "CRM", "WESTERN DIGITAL": "WDC", "MASTEC": "MTZ",
     "NCINO": "NCNO", "BLOCK": "XYZ", "PALANTIR": "PLTR", "BROADCOM": "AVGO",
     # Tickers the transcript got wrong outright.
-    "SPACEX": "SPCX",  # verified live 2026-08-17: spcx.us returns closes,
-                       # while symbol search only surfaces Thai DRs and 3x
-                       # leveraged ETPs, which are the wrong instrument
     "NEBL": "NBIS",    # Nebius is NBIS
     "RUBY": "RBRK",    # "Rubric" mis-transcribed; the company is Rubrik
     "PAS": "PAAS",     # Pan American Silver
@@ -155,9 +152,18 @@ TICKER_ALIASES = {
 # only the price lookup is suppressed.
 UNPRICEABLE_TICKERS = {
     "OPENAI", "STRIPE", "BYTEDANCE", "ANTHROPIC", "WAYMO", "ANDURIL",  # private
+    "SPACEX", "SPCX",                           # private; see below
     "CXMT", "YMTC",                             # unlisted Chinese memory makers
     "SK HYNIX", "BASF", "VOW", "P911", "ADYEN",  # non-US listings
 }
+# SPACEX was aliased to SPCX on the evidence that "spcx.us returns closes".
+# That is not evidence of the right instrument: SpaceX is private and has no
+# listed equity, and the same note recorded that symbol search surfaced only
+# Thai DRs and 3x leveraged ETPs. The series bears that out — 12 sessions from
+# 108.27 to 146.15 with ±10% days, the signature of a leveraged ETP — so three
+# real calls were being scored, with amplified returns, against an unrelated
+# security. A ticker that prices *something* is not a ticker that prices the
+# asset; when the instrument cannot be verified, no price is the honest answer.
 
 
 def _normalized_name(asset):
