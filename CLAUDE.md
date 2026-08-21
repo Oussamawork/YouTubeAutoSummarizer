@@ -59,6 +59,18 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   fixture in `tests/conftest.py`, or one test's lookup answers another's mock.
 - `channel_scorecard.py` — Friday per-channel accuracy scorecard: directional
   calls vs daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
+  Scoring rules that are easy to break by accident: the horizon clock starts at
+  the video's `published_at`, **not** the `date` field (which is stamped when the
+  summariser ran, up to a week later); repeat mentions of one
+  (channel, symbol, stance) collapse to a single call while the earlier one's
+  window is open, so `total` is positions, not mentions; a day carrying both
+  stances on one symbol is dropped rather than scored as a guaranteed hit plus
+  miss; a dead-flat move is a push, not a miss, and a series whose close never
+  changes is treated as unpriceable. `score_calls` returns the stats and the
+  baseline rise rate from **one** price pass — a second pass would spend the
+  rationed request budget twice. Report the baseline next to any hit rate: two
+  thirds of 7-day windows rose in the first month of data, so a 63% hit rate
+  was worse than calling "up" on everything.
   Prices come from **Twelve Data** when `TWELVEDATA_API` is set (free tier: 800
   requests/day, 8/min — `_twelvedata_pace` respects the per-minute budget so a
   run doesn't turn into 429s), served through the `price_cache` (see below).
