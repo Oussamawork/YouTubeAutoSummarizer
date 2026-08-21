@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -65,7 +66,110 @@ def load_signals(path=SIGNALS_FILE):
     except OSError as e:
         log_error(f"Could not read {path}: {e}")
         return []
+    # Normalise at the single point every consumer loads through, so the pulse,
+    # the scorecard and the price warmer all key one company the same way.
+    unify_asset_tickers(records)
     return records
+
+
+# Words that are part of a company's legal name but never part of how a speaker
+# says it, stripped only when matching one asset entry against another.
+_LEGAL_SUFFIXES = re.compile(
+    r"\b(INC|INCORPORATED|CORP|CORPORATION|COMPANY|CO|PLC|LTD|LIMITED|HOLDINGS"
+    r"|HOLDING|GROUP|TECHNOLOGIES|TECHNOLOGY|SYSTEMS|COMMUNICATIONS|INDUSTRIES"
+    r"|INTERNATIONAL|SA|NV|AG|SE)\b"
+)
+# How many separate entries must agree on a ticker before a ticker-less entry
+# for the same name inherits it. One is not enough: a single mis-transcription
+# ("Rivian" as RVN, "CoreWeave" as CRWE) would then be copied onto every other
+# mention of that company instead of staying the one-off it is.
+MIN_TICKER_CORROBORATION = 2
+
+
+def _merge_name(name):
+    """
+    A company name reduced to what two entries must share to be the same asset:
+    upper case, punctuation and legal suffixes gone. "Micron Technology" and
+    "Micron" collapse together; "Moody's Corporation" and "Moodys" do too.
+
+    Deliberately *not* _normalized_name: that one keys the curated alias table
+    and the learned ticker map, whose keys were written in the un-stripped form
+    ("ALBEMARLE CORPORATION"), so changing it would break those lookups.
+    """
+    # Apostrophes are removed, not spaced out: "Moody's" must reduce to the same
+    # thing as "Moodys", and " ".join would otherwise leave a stray "S" token.
+    text = re.sub(r"[\u2019']", "", (name or "").upper())
+    text = re.sub(r"[^A-Z0-9 ]", " ", text)
+    return " ".join(_LEGAL_SUFFIXES.sub(" ", text).split())
+
+
+def dataset_tickers(records):
+    """
+    {merge-name: ticker} learned from the dataset's own entries.
+
+    The extractor records a ticker only when the speaker said one, so the same
+    company arrives as {"name": "Visa", "ticker": "V"} in one video and
+    {"name": "Visa", "ticker": null} in the next. Those key differently
+    (_asset_key falls back to the name), so one company becomes two buckets:
+    mention counts split, consensus dilutes, flips go undetected, and every
+    ticker-less directional call is invisible to the scorecard.
+
+    This is evidence the dataset already contains, not a new guess — the same
+    extractor wrote both entries, and only tickers it recorded at least
+    MIN_TICKER_CORROBORATION times, consistently, are taken. Two guards keep it
+    honest:
+      - a "ticker" that is just the name again (SpaceX -> "SPACEX", Intel ->
+        "INTEL") is not a ticker and is ignored;
+      - a name whose entries disagree resolves to the majority spelling, and a
+        tie is left alone.
+    Curated decisions still win: names in ASSET_ALIASES or UNPRICEABLE_TICKERS
+    are resolved (or refused) before this is ever consulted.
+    """
+    votes = {}
+    for _, asset in _iter_assets(records):
+        ticker = canonical_ticker(asset)
+        name = _merge_name(asset.get("name"))
+        if not ticker or not name or _merge_name(ticker) == name:
+            continue
+        if ticker in UNPRICEABLE_TICKERS or name in UNPRICEABLE_TICKERS:
+            continue
+        votes.setdefault(name, Counter())[ticker] += 1
+
+    learned = {}
+    for name, counter in votes.items():
+        ranked = counter.most_common()
+        best, count = ranked[0]
+        if count < MIN_TICKER_CORROBORATION:
+            continue
+        if len(ranked) > 1 and ranked[1][1] == count:
+            continue  # a tie is not evidence
+        learned[name] = best
+    return learned
+
+
+def unify_asset_tickers(records):
+    """
+    Fill in each ticker-less asset from dataset_tickers, in place, so one
+    company keys one way everywhere. Returns the number of entries filled.
+
+    Only blanks are filled: an entry that already carries a ticker keeps it,
+    because two companies can share a spoken name and the recorded value is the
+    only per-entry evidence of which one was meant.
+    """
+    learned = dataset_tickers(records)
+    if not learned:
+        return 0
+    filled = 0
+    for _, asset in _iter_assets(records):
+        if canonical_ticker(asset):
+            continue
+        ticker = learned.get(_merge_name(asset.get("name")))
+        if ticker:
+            asset["ticker"] = ticker
+            filled += 1
+    if filled:
+        log_info(f"Merged {filled} ticker-less asset entries onto known tickers.")
+    return filled
 
 
 def _parse_date(value):

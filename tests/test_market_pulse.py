@@ -339,3 +339,85 @@ def test_latest_prices_skip_non_usd_listings(monkeypatch):
     prices = mp.fetch_latest_prices(entries, price_fetcher=fetcher,
                                     today=date(2026, 8, 16))
     assert prices == {} and asked == []  # never even requested
+
+
+def _a(name, ticker=None, stance="bullish"):
+    return {"name": name, "ticker": ticker, "stance": stance, "action": "none",
+            "price_target": None, "catalysts": [], "type": "stock",
+            "conviction": "medium", "horizon": "unspecified"}
+
+
+def test_merge_name_strips_legal_suffixes():
+    assert mp._merge_name("Micron Technology") == mp._merge_name("Micron")
+    assert mp._merge_name("Moody's Corporation") == mp._merge_name("Moodys")
+    assert mp._merge_name("Cisco Systems, Inc.") == mp._merge_name("Cisco")
+    assert mp._merge_name("Fresnillo PLC") == "FRESNILLO"
+
+
+def test_dataset_tickers_learns_from_corroborated_entries():
+    records = [
+        _rec("2026-07-20", "A", [_a("Visa", "V")]),
+        _rec("2026-07-21", "B", [_a("Visa", "V")]),
+        _rec("2026-07-22", "C", [_a("Visa")]),
+    ]
+    assert mp.dataset_tickers(records)["VISA"] == "V"
+
+
+def test_dataset_tickers_ignores_a_single_uncorroborated_ticker():
+    # One mis-transcription must stay a one-off, not be copied onto every
+    # other mention of the company.
+    records = [
+        _rec("2026-07-20", "A", [_a("Rivian", "RVN")]),
+        _rec("2026-07-21", "B", [_a("Rivian")]),
+    ]
+    assert "RIVIAN" not in mp.dataset_tickers(records)
+
+
+def test_dataset_tickers_ignores_the_name_repeated_as_a_ticker():
+    # The extractor sometimes puts the name in the ticker field.
+    records = [_rec(f"2026-07-2{i}", "A", [_a("SpaceX", "SPACEX")]) for i in range(3)]
+    assert "SPACEX" not in mp.dataset_tickers(records)
+
+
+def test_dataset_tickers_leaves_a_tie_alone():
+    records = [
+        _rec("2026-07-20", "A", [_a("Acme Widgets", "ACME")]),
+        _rec("2026-07-21", "B", [_a("Acme Widgets", "ACME")]),
+        _rec("2026-07-22", "C", [_a("Acme Widgets", "ACMW")]),
+        _rec("2026-07-23", "D", [_a("Acme Widgets", "ACMW")]),
+    ]
+    assert "ACME WIDGETS" not in mp.dataset_tickers(records)
+
+
+def test_unify_merges_split_buckets_into_one():
+    # A company the curated table does not cover, so this exercises the
+    # dataset-learned path rather than ASSET_ALIASES.
+    records = [
+        _rec("2026-07-20", "A", [_a("Vertiv Holdings", "VRT")]),
+        _rec("2026-07-21", "B", [_a("Vertiv Holdings", "VRT")]),
+        _rec("2026-07-22", "C", [_a("Vertiv")]),          # no ticker, suffix-less
+    ]
+    assert mp.unify_asset_tickers(records) == 1
+    keys = {mp._asset_key(a) for _, a in mp._iter_assets(records)}
+    assert keys == {"VRT"}
+    # Idempotent: a second pass has nothing left to fill.
+    assert mp.unify_asset_tickers(records) == 0
+
+
+def test_unify_never_overwrites_a_recorded_ticker():
+    records = [
+        _rec("2026-07-20", "A", [_a("Block", "SQ")]),
+        _rec("2026-07-21", "B", [_a("Block", "SQ")]),
+        _rec("2026-07-22", "C", [_a("Block", "XYZ")]),
+    ]
+    mp.unify_asset_tickers(records)
+    tickers = [a["ticker"] for _, a in mp._iter_assets(records)]
+    assert tickers == ["SQ", "SQ", "XYZ"]
+
+
+def test_unify_respects_curated_decisions():
+    # A private company stays name-keyed however often a ticker is recorded.
+    records = [_rec(f"2026-07-2{i}", "A", [_a("SpaceX", "SPCX")]) for i in range(3)]
+    records.append(_rec("2026-07-24", "B", [_a("SpaceX")]))
+    mp.unify_asset_tickers(records)
+    assert records[-1]["signals"]["assets"][0]["ticker"] is None

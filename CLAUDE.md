@@ -33,6 +33,15 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   (opt-in via `MARKET_SIGNALS`; appends to `data/signals.jsonl`).
 - `market_pulse.py` — weekly aggregation over `data/signals.jsonl` (top assets,
   consensus flips, new-on-radar) sent to Telegram by `weekly-pulse.yml`.
+  `load_signals` runs `unify_asset_tickers` before returning, so every consumer
+  keys one company one way: the extractor records a ticker only when the
+  speaker says one, which otherwise splits "Visa" from "V" into two buckets and
+  hides the ticker-less half from the scorecard. It fills blanks only, from
+  tickers the dataset itself records at least `MIN_TICKER_CORROBORATION` times
+  (a single mis-transcription must not propagate), ignores a "ticker" that is
+  just the name again, and never outranks `ASSET_ALIASES` or
+  `UNPRICEABLE_TICKERS`. Names it cannot resolve stay for `warm_prices
+  --resolve`, which verifies against the provider catalogue.
 - `pulse_charts.py` — the pulse's companion PNG charts (consensus board, flip
   slope, weekly tone, bull-bear spread line, agreement-vs-attention map,
   target-upside ladder), styled for non-technical readers and sent as a Telegram
