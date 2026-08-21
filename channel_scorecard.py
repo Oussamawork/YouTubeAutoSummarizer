@@ -81,6 +81,28 @@ DISCLAIMER = (
     "Research input, not investment advice."
 )
 
+# Human labels for the horizons, so a reader never has to decode "7d". Any
+# horizon without an entry falls back to "after N days".
+HORIZON_LABELS = {7: "after 1 week", 30: "after 1 month"}
+# Below this many scored calls a hit rate says more about luck than about the
+# channel, so the report labels it rather than letting the ranking imply skill.
+# Ranking is unchanged — a flagged channel is not demoted, only qualified.
+SMALL_SAMPLE_CALLS = 10
+# The report is sent as plain text (send_telegram_text uses no parse mode), so
+# Telegram renders it in a proportional font: space-padded columns would not
+# line up. Every number is therefore introduced by a word on its own line.
+LEGEND = (
+    "How to read it: \"right\" means the price moved the way the channel "
+    "called it — up after a bullish call, down after a bearish one. \"avg\" is "
+    "the average size of the move in the called direction, so a negative avg "
+    "means the calls went the wrong way on average."
+)
+
+
+def horizon_label(horizon):
+    """A reader-facing name for a horizon in days."""
+    return HORIZON_LABELS.get(horizon, f"after {horizon} days")
+
 
 def symbol_for(asset):
     """
@@ -480,45 +502,75 @@ def evaluate(records, today, price_fetcher=fetch_prices):
     return {channel: dict(h) for channel, h in stats.items()}
 
 
-def _format_channel_line(channel, horizons):
-    parts = [f"• {channel}"]
+def _scored_calls(horizons):
+    """Total calls scored for a channel at the ranking horizon (HORIZONS[0])."""
+    return horizons.get(HORIZONS[0], {}).get("total", 0)
+
+
+def _format_channel_block(rank, channel, horizons):
+    """
+    A channel's entry as a list of lines: a numbered name, then one line per
+    horizon that has scored calls. Returns [] when nothing scored.
+    """
+    rows = []
     for horizon in HORIZONS:
-        bucket = horizons.get(horizon, {"total": 0})
-        if bucket["total"]:
-            pct = 100.0 * bucket["hits"] / bucket["total"]
-            avg = 100.0 * bucket["dir_return_sum"] / bucket["total"]
-            parts.append(
-                f"{horizon}d: {bucket['hits']}/{bucket['total']} ({pct:.0f}%) avg {avg:+.1f}%"
-            )
-    return " — ".join(parts) if len(parts) > 1 else ""
+        bucket = horizons.get(horizon) or {}
+        total = bucket.get("total", 0)
+        if not total:
+            continue
+        hits = bucket.get("hits", 0)
+        pct = 100.0 * hits / total
+        avg = 100.0 * bucket.get("dir_return_sum", 0.0) / total
+        rows.append(
+            f"   {horizon_label(horizon)}: {hits} of {total} right "
+            f"({pct:.0f}%) · avg {avg:+.1f}%"
+        )
+    if not rows:
+        return []
+
+    name = f"{rank}. {channel}"
+    if _scored_calls(horizons) < SMALL_SAMPLE_CALLS:
+        name += "  (small sample)"
+    return [name] + rows
 
 
 def build_scorecard(stats, today):
     """Plain-text report; "" when nothing was evaluable."""
-    lines_by_channel = {
-        channel: line
-        for channel, horizons in stats.items()
-        if (line := _format_channel_line(channel, horizons))
-    }
-    if not lines_by_channel:
+    # Rank by hit rate at the first horizon, most active first on ties. A small
+    # sample is flagged in the block rather than demoted: 8/10 is still a better
+    # showing than 3/12, and pretending otherwise would be its own distortion.
+    def rank_key(channel):
+        bucket = stats[channel].get(HORIZONS[0], {"hits": 0, "total": 0})
+        total = bucket.get("total", 0)
+        rate = bucket.get("hits", 0) / total if total else 0.0
+        return (-rate, -total, channel)
+
+    blocks = []
+    for channel in sorted(stats, key=rank_key):
+        block = _format_channel_block(len(blocks) + 1, channel, stats[channel])
+        if block:
+            blocks.append(block)
+    if not blocks:
         return ""
 
-    total_calls = sum(
-        bucket["total"] for horizons in stats.values() for bucket in horizons.values()
-    )
-    lines = [
-        f"🎯 Channel Scorecard — as of {today.isoformat()}",
-        f"Directional calls evaluated: {total_calls} (across {len(HORIZONS)} horizons)",
-        "",
-    ]
-    # Rank by 7-day hit rate, most active first on ties.
-    def rank(channel):
-        bucket = stats[channel].get(HORIZONS[0], {"hits": 0, "total": 0})
-        rate = bucket["hits"] / bucket["total"] if bucket["total"] else 0.0
-        return (-rate, -bucket["total"])
+    # Per-horizon counts, not one double-counted total: a call scored at 30 days
+    # was already scored at 7, so summing across horizons overstates the sample.
+    counted = []
+    for horizon in HORIZONS:
+        total = sum(h.get(horizon, {}).get("total", 0) for h in stats.values())
+        if total:
+            counted.append(f"{total} {horizon_label(horizon)}")
 
-    for channel in sorted(lines_by_channel, key=rank):
-        lines.append(lines_by_channel[channel])
+    lines = [
+        f"🎯 Channel Scorecard · {today.day} {today:%b %Y}",
+    ]
+    if counted:
+        lines.append("Calls scored: " + ", ".join(counted))
+    lines.append("")
+    for block in blocks:
+        lines.extend(block)
+        lines.append("")
+    lines.append(LEGEND)
     lines.append("")
     lines.append(DISCLAIMER)
     return "\n".join(lines)

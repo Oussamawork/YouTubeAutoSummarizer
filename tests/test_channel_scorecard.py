@@ -96,11 +96,51 @@ def test_build_scorecard_report():
     }
     text = cs.build_scorecard(stats, date(2026, 7, 24))
     assert "Channel Scorecard" in text
-    assert "Couch Investor — 7d: 2/3 (67%) avg +2.0% — 30d: 1/1 (100%) avg +20.0%" in text
-    assert "More Crypto Online — 7d: 0/2 (0%) avg -2.0%" in text
+    assert "1. Couch Investor" in text
+    assert "   after 1 week: 2 of 3 right (67%) · avg +2.0%" in text
+    assert "   after 1 month: 1 of 1 right (100%) · avg +20.0%" in text
+    assert "2. More Crypto Online" in text
+    assert "   after 1 week: 0 of 2 right (0%) · avg -2.0%" in text
+    # A horizon with nothing scored is omitted rather than shown as 0 of 0.
+    assert text.count("   after 1 month") == 1
+    assert cs.LEGEND in text
     assert cs.DISCLAIMER in text
     # Ranked: Couch Investor (67%) above More Crypto Online (0%)
     assert text.index("Couch Investor") < text.index("More Crypto Online")
+
+
+def test_build_scorecard_counts_calls_per_horizon_not_doubled():
+    stats = {
+        "A": {7: {"hits": 2, "total": 4, "dir_return_sum": 0.0},
+              30: {"hits": 1, "total": 2, "dir_return_sum": 0.0}},
+        "B": {7: {"hits": 1, "total": 3, "dir_return_sum": 0.0},
+              30: {"hits": 0, "total": 1, "dir_return_sum": 0.0}},
+    }
+    text = cs.build_scorecard(stats, date(2026, 7, 24))
+    # 7 calls reached the 1-week mark and 3 of those also reached 1 month;
+    # the header must not report their sum (10) as if they were distinct calls.
+    assert "Calls scored: 7 after 1 week, 3 after 1 month" in text
+    assert "10" not in text.splitlines()[1]
+
+
+def test_build_scorecard_flags_small_samples():
+    stats = {
+        "Thin": {7: {"hits": 3, "total": 4, "dir_return_sum": 0.1},
+                 30: {"hits": 0, "total": 0, "dir_return_sum": 0.0}},
+        "Thick": {7: {"hits": 6, "total": 12, "dir_return_sum": 0.1},
+                  30: {"hits": 0, "total": 0, "dir_return_sum": 0.0}},
+    }
+    text = cs.build_scorecard(stats, date(2026, 7, 24))
+    assert "1. Thin  (small sample)" in text
+    assert "2. Thick\n" in text
+    # Flagged, not demoted: 75% on 4 calls still outranks 50% on 12.
+    assert text.index("Thin") < text.index("Thick")
+
+
+def test_horizon_label_falls_back_for_unknown_horizons():
+    assert cs.horizon_label(7) == "after 1 week"
+    assert cs.horizon_label(30) == "after 1 month"
+    assert cs.horizon_label(90) == "after 90 days"
 
 
 def test_build_scorecard_empty():
@@ -123,7 +163,8 @@ def test_generate_scorecard_end_to_end(tmp_path):
     series = {"tsla.us": {d0: 100.0, d0 + timedelta(days=7): 105.0}}
     out = cs.generate_scorecard(today=date(2026, 7, 24), path=str(path),
                                 price_fetcher=_fetcher(series))
-    assert "Chan — 7d: 1/1 (100%) avg +5.0%" in out
+    assert "1. Chan  (small sample)" in out
+    assert "   after 1 week: 1 of 1 right (100%) · avg +5.0%" in out
 
 
 def test_symbol_for_scores_ticker_less_calls_via_alias():
