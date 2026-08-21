@@ -57,10 +57,11 @@ def test_evaluate_bullish_hit_and_bearish_hit():
         _rec("2026-07-10", "Bears", [_asset("BTC", "bearish", "crypto")]),
     ]
     stats = cs.evaluate(records, today, price_fetcher=_fetcher(series))
-    assert stats["Bulls"][7] == {"hits": 1, "total": 1, "dir_return_sum": 0.1}
+    assert stats["Bulls"][7]["hits"] == 1 and stats["Bulls"][7]["total"] == 1
+    assert stats["Bulls"][7]["returns"] == pytest.approx([0.1])
     bears = stats["Bears"][7]
     assert bears["hits"] == 1 and bears["total"] == 1
-    assert bears["dir_return_sum"] > 0  # bearish call, price fell -> positive directional return
+    assert bears["returns"][0] > 0  # bearish call, price fell -> positive directional return
     # 30-day horizon has not elapsed -> no entries
     assert stats["Bulls"][30]["total"] == 0
 
@@ -74,7 +75,8 @@ def test_evaluate_miss_and_unelapsed_horizon():
         _rec("2026-07-23", "Chan", [_asset("TSLA", "bullish")]),  # 7d not elapsed
     ]
     stats = cs.evaluate(records, today, price_fetcher=_fetcher(series))
-    assert stats["Chan"][7] == {"hits": 0, "total": 1, "dir_return_sum": -0.1}
+    assert stats["Chan"][7]["hits"] == 0 and stats["Chan"][7]["total"] == 1
+    assert stats["Chan"][7]["returns"] == pytest.approx([-0.1])
 
 
 def test_evaluate_skips_neutral_and_missing_prices():
@@ -89,18 +91,18 @@ def test_evaluate_skips_neutral_and_missing_prices():
 
 def test_build_scorecard_report():
     stats = {
-        "Couch Investor": {7: {"hits": 2, "total": 3, "dir_return_sum": 0.06},
-                           30: {"hits": 1, "total": 1, "dir_return_sum": 0.2}},
-        "More Crypto Online": {7: {"hits": 0, "total": 2, "dir_return_sum": -0.04},
-                               30: {"hits": 0, "total": 0, "dir_return_sum": 0.0}},
+        "Couch Investor": {7: {"hits": 2, "total": 3, "returns": [0.05, 0.02, -0.01]},
+                           30: {"hits": 1, "total": 1, "returns": [0.2]}},
+        "More Crypto Online": {7: {"hits": 0, "total": 2, "returns": [-0.02, -0.02]},
+                               30: {"hits": 0, "total": 0, "returns": []}},
     }
     text = cs.build_scorecard(stats, date(2026, 7, 24))
     assert "Channel Scorecard" in text
     assert "1. Couch Investor" in text
-    assert "   after 1 week: 2 of 3 right (67%) · avg +2.0%" in text
-    assert "   after 1 month: 1 of 1 right (100%) · avg +20.0%" in text
+    assert "   after 1 week: 2 of 3 right (67%) · typical move +2.0%" in text
+    assert "   after 1 month: 1 of 1 right (100%) · typical move +20.0%" in text
     assert "2. More Crypto Online" in text
-    assert "   after 1 week: 0 of 2 right (0%) · avg -2.0%" in text
+    assert "   after 1 week: 0 of 2 right (0%) · typical move -2.0%" in text
     # A horizon with nothing scored is omitted rather than shown as 0 of 0.
     assert text.count("   after 1 month") == 1
     assert cs.LEGEND in text
@@ -111,10 +113,10 @@ def test_build_scorecard_report():
 
 def test_build_scorecard_counts_calls_per_horizon_not_doubled():
     stats = {
-        "A": {7: {"hits": 2, "total": 4, "dir_return_sum": 0.0},
-              30: {"hits": 1, "total": 2, "dir_return_sum": 0.0}},
-        "B": {7: {"hits": 1, "total": 3, "dir_return_sum": 0.0},
-              30: {"hits": 0, "total": 1, "dir_return_sum": 0.0}},
+        "A": {7: {"hits": 2, "total": 4, "returns": [0.1, 0.1, -0.1, -0.1]},
+              30: {"hits": 1, "total": 2, "returns": [0.1, -0.1]}},
+        "B": {7: {"hits": 1, "total": 3, "returns": [0.1, -0.1, -0.1]},
+              30: {"hits": 0, "total": 1, "returns": [-0.1]}},
     }
     text = cs.build_scorecard(stats, date(2026, 7, 24))
     # 7 calls reached the 1-week mark and 3 of those also reached 1 month;
@@ -125,10 +127,10 @@ def test_build_scorecard_counts_calls_per_horizon_not_doubled():
 
 def test_build_scorecard_flags_small_samples():
     stats = {
-        "Thin": {7: {"hits": 3, "total": 4, "dir_return_sum": 0.1},
-                 30: {"hits": 0, "total": 0, "dir_return_sum": 0.0}},
-        "Thick": {7: {"hits": 6, "total": 12, "dir_return_sum": 0.1},
-                  30: {"hits": 0, "total": 0, "dir_return_sum": 0.0}},
+        "Thin": {7: {"hits": 3, "total": 4, "returns": [0.1, 0.1, 0.1, -0.1]},
+                 30: {"hits": 0, "total": 0, "returns": []}},
+        "Thick": {7: {"hits": 6, "total": 12, "returns": [0.1] * 6 + [-0.1] * 6},
+                  30: {"hits": 0, "total": 0, "returns": []}},
     }
     text = cs.build_scorecard(stats, date(2026, 7, 24))
     assert "1. Thin  (small sample)" in text
@@ -164,7 +166,7 @@ def test_generate_scorecard_end_to_end(tmp_path):
     out = cs.generate_scorecard(today=date(2026, 7, 24), path=str(path),
                                 price_fetcher=_fetcher(series))
     assert "1. Chan  (small sample)" in out
-    assert "   after 1 week: 1 of 1 right (100%) · avg +5.0%" in out
+    assert "   after 1 week: 1 of 1 right (100%) · typical move +5.0%" in out
 
 
 def test_symbol_for_scores_ticker_less_calls_via_alias():
@@ -369,3 +371,131 @@ def test_symbol_search_raises_rather_than_claiming_no_listings(monkeypatch):
     monkeypatch.setattr(cs.requests, "get", lambda *a, **k: _Resp(status_code=429))
     with pytest.raises(cs.SearchUnavailable):
         cs.search_symbols("Rubrik", "tok")
+
+
+def test_call_date_prefers_publish_time_over_run_date():
+    # `date` is stamped when the summariser ran, up to a week after publication.
+    assert cs._call_date({"date": "2026-08-18",
+                          "published_at": "2026-08-11T22:28:04+00:00"}) == date(2026, 8, 11)
+    # Both shapes the scraper writes.
+    assert cs._call_date({"date": "2026-08-18",
+                          "published_at": "2026-08-11T22:28:04Z"}) == date(2026, 8, 11)
+    # Falls back to the run date when absent or unparseable.
+    assert cs._call_date({"date": "2026-08-18"}) == date(2026, 8, 18)
+    assert cs._call_date({"date": "2026-08-18", "published_at": "nonsense"}) == date(2026, 8, 18)
+
+
+def test_horizon_starts_at_publication_not_at_the_run():
+    today = date(2026, 7, 24)
+    d_pub, d_run = date(2026, 7, 10), date(2026, 7, 13)
+    # Flat after the run date, so a call scores only if it starts at publication.
+    series = {"tsla.us": {d_pub: 100.0, d_run: 120.0,
+                          d_pub + timedelta(days=7): 110.0,
+                          d_run + timedelta(days=7): 120.0}}
+    rec = _rec("2026-07-13", "Chan", [_asset("TSLA", "bullish")])
+    rec["published_at"] = "2026-07-10T09:00:00+00:00"
+    stats = cs.evaluate([rec], today, price_fetcher=_fetcher(series))
+    assert stats["Chan"][7]["returns"] == pytest.approx([0.1])  # 100 -> 110, not 120 -> 120
+
+
+def test_repeat_mentions_of_one_position_score_once():
+    today = date(2026, 7, 24)
+    d0 = date(2026, 7, 10)
+    series = {"tsla.us": {d0: 100.0, d0 + timedelta(days=7): 110.0}}
+    # The same channel repeating the same view is not three predictions.
+    records = [_rec("2026-07-10", "Chan", [_asset("TSLA", "bullish")]) for _ in range(3)]
+    stats = cs.evaluate(records, today, price_fetcher=_fetcher(series))
+    assert stats["Chan"][7]["total"] == 1
+    # A different channel's identical call is still its own call.
+    records.append(_rec("2026-07-10", "Other", [_asset("TSLA", "bullish")]))
+    stats = cs.evaluate(records, today, price_fetcher=_fetcher(series))
+    assert stats["Chan"][7]["total"] == 1 and stats["Other"][7]["total"] == 1
+
+
+def test_a_reopened_position_counts_again():
+    calls = [
+        (date(2026, 7, 1), "Chan", "TSLA", "tsla.us", "bullish"),
+        (date(2026, 7, 5), "Chan", "TSLA", "tsla.us", "bullish"),   # still open
+        (date(2026, 8, 20), "Chan", "TSLA", "tsla.us", "bullish"),  # window closed
+    ]
+    kept = cs._dedupe_calls(calls)
+    assert [c[0] for c in kept] == [date(2026, 7, 1), date(2026, 8, 20)]
+    # The opposite stance is a separate position, not a repeat.
+    calls.append((date(2026, 7, 1), "Chan", "NVDA", "nvda.us", "bearish"))
+    assert len(cs._dedupe_calls(calls)) == 3
+
+
+def test_same_day_contradiction_is_not_a_call():
+    today = date(2026, 7, 24)
+    d0 = date(2026, 7, 10)
+    series = {"tsla.us": {d0: 100.0, d0 + timedelta(days=7): 110.0}}
+    # Saying both things on one day guarantees one hit and one miss, which drags
+    # every hit rate toward 50% while looking like two real calls.
+    records = [
+        _rec("2026-07-10", "Chan", [_asset("TSLA", "bullish")]),
+        _rec("2026-07-10", "Chan", [_asset("TSLA", "bearish")]),
+    ]
+    stats = cs.evaluate(records, today, price_fetcher=_fetcher(series))
+    assert stats == {} or stats["Chan"][7]["total"] == 0
+
+
+def test_todays_horizon_is_not_scored_against_an_open_bar():
+    # The job runs at 16:00 UTC Friday, hours before the US close, so a bar
+    # dated today is still in progress.
+    today = date(2026, 7, 17)
+    d0 = date(2026, 7, 10)
+    series = {"tsla.us": {d0: 100.0, today: 110.0}}
+    records = [_rec("2026-07-10", "Chan", [_asset("TSLA", "bullish")])]
+    stats = cs.evaluate(records, today, price_fetcher=_fetcher(series))
+    assert stats == {} or stats["Chan"][7]["total"] == 0
+    # One day later the bar is closed and the call scores.
+    stats = cs.evaluate(records, date(2026, 7, 18), price_fetcher=_fetcher(series))
+    assert stats["Chan"][7]["total"] == 1
+
+
+def test_frozen_series_is_unscored_rather_than_a_miss():
+    today = date(2026, 7, 24)
+    d0 = date(2026, 7, 10)
+    # A delisted/frozen listing never moves; every call on it would return 0.0
+    # and be counted as a miss.
+    series = {"tsla.us": {d0: 0.862, d0 + timedelta(days=7): 0.862}}
+    records = [_rec("2026-07-10", "Chan", [_asset("TSLA", "bullish")])]
+    stats = cs.evaluate(records, today, price_fetcher=_fetcher(series))
+    assert stats == {} or stats["Chan"][7]["total"] == 0
+
+
+def test_baseline_counts_each_symbol_day_once():
+    today = date(2026, 7, 24)
+    d0 = date(2026, 7, 10)
+    later = d0 + timedelta(days=7)
+    series = {"tsla.us": {d0: 100.0, later: 110.0},   # rose
+              "nvda.us": {d0: 100.0, later: 90.0}}    # fell
+    records = [
+        # Three channels on the same rising name must not make the market look
+        # like it rose three times.
+        _rec("2026-07-10", "A", [_asset("TSLA", "bullish")]),
+        _rec("2026-07-10", "B", [_asset("TSLA", "bullish")]),
+        _rec("2026-07-10", "C", [_asset("TSLA", "bearish")]),
+        _rec("2026-07-10", "D", [_asset("NVDA", "bullish")]),
+    ]
+    _, baseline = cs.score_calls(records, today, price_fetcher=_fetcher(series))
+    assert baseline == (0.5, 2)
+
+
+def test_scorecard_shows_the_baseline_line():
+    stats = {"A": {7: {"hits": 6, "total": 10, "returns": [0.01] * 6 + [-0.01] * 4},
+                   30: {"hits": 0, "total": 0, "returns": []}}}
+    text = cs.build_scorecard(stats, date(2026, 7, 24), baseline=(0.669, 228))
+    assert "For scale: 67% of these 7-day windows rose on their own" in text
+    assert "(228 windows)" in text
+    # Absent baseline simply omits the line.
+    assert "For scale" not in cs.build_scorecard(stats, date(2026, 7, 24))
+
+
+def test_typical_move_is_the_median_not_the_mean():
+    # One outlier must not set the headline number: mean here is +10.9%.
+    stats = {"A": {7: {"hits": 4, "total": 5,
+                       "returns": [0.02, 0.03, 0.01, -0.01, 0.49]},
+                   30: {"hits": 0, "total": 0, "returns": []}}}
+    text = cs.build_scorecard(stats, date(2026, 7, 24))
+    assert "typical move +2.0%" in text

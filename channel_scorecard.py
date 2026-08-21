@@ -1,5 +1,6 @@
 import argparse
 import os
+import statistics
 import sys
 import time
 from collections import defaultdict
@@ -93,9 +94,11 @@ SMALL_SAMPLE_CALLS = 10
 # line up. Every number is therefore introduced by a word on its own line.
 LEGEND = (
     "How to read it: \"right\" means the price moved the way the channel "
-    "called it — up after a bullish call, down after a bearish one. \"avg\" is "
-    "the average size of the move in the called direction, so a negative avg "
-    "means the calls went the wrong way on average."
+    "called it — up after a bullish call, down after a bearish one. "
+    "\"typical move\" is the middle result of those calls, so half did better "
+    "and half did worse; a negative one means the calls went the wrong way. "
+    "Repeat mentions of the same position count once, and a hit rate only "
+    "means something next to the line above it."
 )
 
 
@@ -445,61 +448,179 @@ def price_on_or_after(prices, day, max_lag=MAX_PRICE_LAG_DAYS):
     return None
 
 
+def _call_date(record):
+    """
+    The day the call was made. `date` is stamped when the summariser *ran*,
+    which is 1-7 days after publication for 27% of records, so the horizon
+    clock would start late — and by a channel-dependent amount, which is worse
+    than a uniform lag because it puts channels on different clocks. Prefer the
+    video's own `published_at`; fall back to `date` when it is missing or
+    unparseable.
+    """
+    stamp = (record.get("published_at") or "").strip()
+    if stamp:
+        try:
+            # Both shapes the scraper writes: "...+00:00" (RSS) and "...Z" (API).
+            return datetime.fromisoformat(stamp.replace("Z", "+00:00")).date()
+        except ValueError:
+            log_warn(f"Unparseable published_at {stamp!r}; falling back to run date.")
+    return _parse_date(record.get("date"))
+
+
 def _directional_calls(records):
-    """Yield evaluable calls: (date, channel, ticker, symbol, stance)."""
+    """
+    Yield evaluable calls: (date, channel, ticker, symbol, stance), one per
+    distinct position rather than per mention — see _dedupe_calls.
+    """
+    raw = []
     for record, asset in _iter_assets(records):
         stance = asset.get("stance")
         if stance not in ("bullish", "bearish"):
             continue
         symbol = symbol_for(asset)
-        signal_date = _parse_date(record.get("date"))
+        signal_date = _call_date(record)
         channel = record.get("channel_name")
         if symbol and signal_date and channel:
-            yield signal_date, channel, asset.get("ticker"), symbol, stance
+            raw.append((signal_date, channel, asset.get("ticker"), symbol, stance))
+    return _dedupe_calls(raw)
 
 
-def evaluate(records, today, price_fetcher=fetch_prices):
+def _dedupe_calls(calls, window=max(HORIZONS)):
     """
-    Score every directional call whose horizon has elapsed. Returns
-    {channel: {horizon: {"hits": int, "total": int, "dir_return_sum": float}}}
-    where dir_return is the price move in the called direction (positive =
-    the call was right by that much).
+    Collapse repeated mentions of one position into a single call.
+
+    A channel that repeats the same view daily is not making a new prediction
+    each time, but the scorecard counted every mention: 947 mentions in the
+    committed dataset are only 380 distinct (channel, symbol, stance) positions,
+    and 91 are same-day repeats with an identical entry and exit price. Counting
+    them separately inflates the sample a reader judges confidence by, and turns
+    `avg` into a mention-weighted mean where re-posting a winner banks its return
+    again.
+
+    Two rules, both conservative:
+      - A repeat is dropped while an earlier call on the same position is still
+        open (its longest horizon has not elapsed). Once that window closes, the
+        next mention is a genuinely new observation and is kept.
+      - A day on which a channel says both bullish and bearish on one symbol is
+        no call at all, and every mention of that symbol on that day is dropped
+        rather than scored as a guaranteed one hit + one miss.
+    """
+    # Drop whole (day, channel, symbol) groups that contradict themselves.
+    stances = defaultdict(set)
+    for signal_date, channel, _, symbol, stance in calls:
+        stances[(signal_date, channel, symbol)].add(stance)
+    contradictory = {k for k, v in stances.items() if len(v) > 1}
+    if contradictory:
+        log_info(f"Dropped {len(contradictory)} self-contradicting same-day call(s).")
+
+    kept, last_kept = [], {}
+    for call in sorted(calls, key=lambda c: (c[0], c[1], c[3], c[4])):
+        signal_date, channel, _, symbol, stance = call
+        if (signal_date, channel, symbol) in contradictory:
+            continue
+        position = (channel, symbol, stance)
+        previous = last_kept.get(position)
+        if previous is not None and (signal_date - previous).days < window:
+            continue  # the earlier call on this position is still open
+        last_kept[position] = signal_date
+        kept.append(call)
+    if len(kept) < len(calls):
+        log_info(f"Scoring {len(kept)} distinct calls from {len(calls)} mentions.")
+    return kept
+
+
+def score_calls(records, today, price_fetcher=fetch_prices):
+    """
+    One scoring pass over the dataset, returning (stats, baseline).
+
+    stats is {channel: {horizon: {"hits": int, "total": int,
+    "returns": [float, ...]}}}, where each return is the price move in the
+    called direction (positive = the call was right by that much). baseline is
+    the (rate, sample) share of those same windows that simply rose — see
+    baseline_rise_rate.
+
+    Both come out of a single fetch on purpose: prices are rationed
+    (TWELVEDATA_MAX_REQUESTS), so a second pass over the same symbols would
+    either spend the budget twice or silently return less than the first.
     """
     calls = list(_directional_calls(records))
     if not calls:
-        return {}
+        return {}, None
 
-    # One price fetch per symbol, covering its full needed range.
-    ranges = {}
+    # One price fetch per symbol, from its earliest call to today. The `today`
+    # bound is load-bearing, not cosmetic: it is what stops price_on_or_after
+    # reaching past today and scoring a call against a future close.
+    starts = {}
     for signal_date, _, _, symbol, _ in calls:
-        start, end = ranges.get(symbol, (signal_date, signal_date))
-        ranges[symbol] = (min(start, signal_date), max(end, signal_date))
+        starts[symbol] = min(starts.get(symbol, signal_date), signal_date)
     prices = {
         symbol: price_fetcher(symbol, start, today)
-        for symbol, (start, _) in ranges.items()
+        for symbol, start in starts.items()
     }
 
-    stats = defaultdict(lambda: {h: {"hits": 0, "total": 0, "dir_return_sum": 0.0} for h in HORIZONS})
+    stats = defaultdict(lambda: {h: {"hits": 0, "total": 0, "returns": []} for h in HORIZONS})
+    rises = windows = unscored = 0
+    counted_windows = set()
     for signal_date, channel, ticker, symbol, stance in calls:
         series = prices.get(symbol) or {}
+        # A series whose close never moves is not a price, it is a dead symbol
+        # (a delisted or frozen listing). Every call on it would return exactly
+        # 0.0 and score as a miss, so drop it rather than penalise the channel.
+        if len({round(p, 10) for p in series.values()}) < 2:
+            unscored += 1
+            continue
         entry = price_on_or_after(series, signal_date)
         if entry is None or entry == 0:
+            unscored += 1
             continue
         for horizon in HORIZONS:
             target_day = signal_date + timedelta(days=horizon)
-            if target_day > today:
+            # `>=`, not `>`: today's bar is still open when this runs (16:00 UTC
+            # on a Friday is four hours before the US close, and a crypto UTC-day
+            # bar is always in progress), so scoring against it compares a close
+            # to a mid-session snapshot.
+            if target_day >= today:
                 continue  # horizon not elapsed yet
             later = price_on_or_after(series, target_day)
             if later is None:
                 continue
             ret = (later - entry) / entry
             dir_return = ret if stance == "bullish" else -ret
+            # The baseline counts each symbol-day once, whoever called it: it
+            # measures the market over these windows, not the channels.
+            if horizon == HORIZONS[0] and ret != 0:
+                if (signal_date, symbol) not in counted_windows:
+                    counted_windows.add((signal_date, symbol))
+                    windows += 1
+                    rises += ret > 0
+            if dir_return == 0:
+                continue  # a dead-flat move is a push, not a miss
             bucket = stats[channel][horizon]
             bucket["total"] += 1
-            bucket["dir_return_sum"] += dir_return
+            bucket["returns"].append(dir_return)
             if dir_return > 0:
                 bucket["hits"] += 1
-    return {channel: dict(h) for channel, h in stats.items()}
+    if unscored:
+        log_info(f"{unscored} call(s) had no usable price series and went unscored.")
+    baseline = (rises / windows, windows) if windows else None
+    return {channel: dict(h) for channel, h in stats.items()}, baseline
+
+
+def evaluate(records, today, price_fetcher=fetch_prices):
+    """Just the per-channel stats from score_calls."""
+    return score_calls(records, today, price_fetcher=price_fetcher)[0]
+
+
+def baseline_rise_rate(records, today, price_fetcher=fetch_prices):
+    """
+    The share of scored windows that simply rose, ignoring who called what, as
+    (rate, sample) at the first horizon — the report's coin-flip line.
+
+    Without it a hit rate is unreadable. Over the committed dataset 67% of
+    7-day windows rose, so a 63% overall hit rate is *below* what calling "up"
+    on everything would have scored.
+    """
+    return score_calls(records, today, price_fetcher=price_fetcher)[1]
 
 
 def _scored_calls(horizons):
@@ -516,14 +637,19 @@ def _format_channel_block(rank, channel, horizons):
     for horizon in HORIZONS:
         bucket = horizons.get(horizon) or {}
         total = bucket.get("total", 0)
-        if not total:
+        returns = bucket.get("returns") or []
+        if not total or not returns:
             continue
         hits = bucket.get("hits", 0)
         pct = 100.0 * hits / total
-        avg = 100.0 * bucket.get("dir_return_sum", 0.0) / total
+        # The median, not the mean. The mean is dominated by a handful of calls
+        # (the top 5% of moves carry ~31% of the total), so it routinely reads
+        # ~2x the move a reader would actually have seen: "avg +5.2%" against a
+        # median of +3.0%. "typical" is the number people think they are reading.
+        typical = 100.0 * statistics.median(returns)
         rows.append(
             f"   {horizon_label(horizon)}: {hits} of {total} right "
-            f"({pct:.0f}%) · avg {avg:+.1f}%"
+            f"({pct:.0f}%) · typical move {typical:+.1f}%"
         )
     if not rows:
         return []
@@ -534,7 +660,7 @@ def _format_channel_block(rank, channel, horizons):
     return [name] + rows
 
 
-def build_scorecard(stats, today):
+def build_scorecard(stats, today, baseline=None):
     """Plain-text report; "" when nothing was evaluable."""
     # Rank by hit rate at the first horizon, most active first on ties. A small
     # sample is flagged in the block rather than demoted: 8/10 is still a better
@@ -566,6 +692,14 @@ def build_scorecard(stats, today):
     ]
     if counted:
         lines.append("Calls scored: " + ", ".join(counted))
+    # Without this line a hit rate is unreadable: in a month where two thirds of
+    # everything rose, 60% right is worse than calling "up" on every ticker.
+    if baseline:
+        rate, sample = baseline
+        lines.append(
+            f"For scale: {100 * rate:.0f}% of these {HORIZONS[0]}-day windows "
+            f"rose on their own, whoever called them ({sample} windows)."
+        )
     lines.append("")
     for block in blocks:
         lines.extend(block)
@@ -591,8 +725,8 @@ def generate_scorecard(today=None, path=SIGNALS_FILE, price_fetcher=fetch_prices
             "waiting for more history before scoring."
         )
         return ""
-    stats = evaluate(records, today, price_fetcher=price_fetcher)
-    return build_scorecard(stats, today)
+    stats, baseline = score_calls(records, today, price_fetcher=price_fetcher)
+    return build_scorecard(stats, today, baseline=baseline)
 
 
 def main():

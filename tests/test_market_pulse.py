@@ -141,9 +141,13 @@ def test_weighted_consensus_changes_direction():
 def test_channel_weights_from_track_record():
     from datetime import timedelta
     d0 = date(2026, 7, 1)
-    series = {"tsla.us": {d0: 100.0, d0 + timedelta(days=7): 110.0}}
+    tickers = ["TSLA", "AAPL", "MSFT", "AMZN", "META"]
+    series = {f"{t.lower()}.us": {d0: 100.0, d0 + timedelta(days=7): 110.0} for t in tickers}
     # 5 evaluated calls for "Proven" (meets MIN_TRACK_CALLS), 1 for "Rookie".
-    records = [_rec("2026-07-01", "Proven", [_asset(stance="bullish")]) for _ in range(5)]
+    # They must be five *distinct positions*: the scorecard now counts repeat
+    # mentions of one position once, so five copies of the same call score once.
+    records = [_rec("2026-07-01", "Proven", [_asset(ticker=t, stance="bullish")])
+               for t in tickers]
     records.append(_rec("2026-07-01", "Rookie", [_asset(stance="bullish")]))
     weights, details = mp.channel_weights_from_track_record(
         records, date(2026, 7, 24), price_fetcher=lambda s, a, b: series.get(s, {})
