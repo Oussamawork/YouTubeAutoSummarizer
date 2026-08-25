@@ -3,8 +3,8 @@
   "models": {
     "gemini-2.5-flash": 1,
     "gemini-3-flash-preview": 1,
-    "gemini-3.5-flash": 4,
-    "gemini-3.6-flash": 6
+    "gemini-3.5-flash": 5,
+    "gemini-3.6-flash": 7
   },
   "spent": {}
 }
