@@ -4,13 +4,7 @@
     "gemini-3-flash-preview": 2,
     "gemini-3.5-flash": 1,
     "gemini-3.6-flash": 10,
-    "gemini-3.7-flash": 4
+    "gemini-3.7-flash": 5
   },
-  "spent": {
-    "gemini-3.7-flash": {
-      "at": "2026-08-26T19:54:16+00:00",
-      "confirmations": 1,
-      "used": 4
-    }
-  }
+  "spent": {}
 }
