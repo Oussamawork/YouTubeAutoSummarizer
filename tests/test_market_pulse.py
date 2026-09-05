@@ -111,6 +111,8 @@ def test_generate_pulse_windows(tmp_path, monkeypatch):
         _rec("2026-05-01", "A", [_asset(ticker="OLD1234")]),   # outside lookback
     ]
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    # The legacy view is a compatibility path: it runs only when asked for.
+    monkeypatch.setattr(mp, "PULSE_DATA_SOURCE", "legacy")
     text = mp.generate_pulse(days=7, today=date(2026, 7, 24), path=str(path),
                              price_fetcher=lambda symbol, start, end: {})
     assert "Videos analyzed: 1" in text

@@ -628,6 +628,9 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     if want_signals:
         # One call for both; None means "not usable" — fall back to the plain
         # summary call so a combined-format hiccup can never cost a summary.
+        # (None, research) means the combined OUTPUT was truncated by the
+        # claims array: the summary is fetched on its own below and delivered,
+        # and `research` says the claims must be extracted separately.
         combined = summarize_with_signals(
             transcript_text, video_details['video_title'], compact=compact,
             channel_name=video_details.get('channel_name'),
@@ -779,6 +782,18 @@ def _record_market_signals(channel_id, video_details, summary, research=None):
         nt = video_details.get("normalized")
         if research is None and nt is not None:
             research = extract_research(nt, _research_context(video_details, channel_id))
+        elif research is not None and research.get("retry_separately") and nt is not None:
+            # The combined response was cut off by the size of its claims
+            # array and the summary went out from a summary-only call. The
+            # claims are extracted now on their own, in chunks small enough
+            # to fit the output cap; if that cannot finish either, the ledger
+            # keeps the truncation reason and the retry job picks it up.
+            second = extract_research(nt, _research_context(video_details, channel_id), prefer_chunked=True)
+            if second.get("status") not in ("failed_retryable", "failed_final") or second.get("claims"):
+                research = second
+            else:
+                research = dict(research, failure_reason=(
+                    f"combined_output_truncated;standalone:{second.get('failure_reason') or second.get('status')}"))
         _persist_research(channel_id, video_details, summary, research)
     except Exception as e:
         log_error(f"Market-signal recording failed for {video_details.get('video_url')}: {e}", exc_info=True)

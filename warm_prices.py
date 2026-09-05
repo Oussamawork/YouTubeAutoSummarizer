@@ -86,7 +86,7 @@ def resolvable_assets(records, cache, learned):
     return [(key, *first_seen[key]) for key in ranked]
 
 
-def needed_ranges(records, today):
+def needed_ranges(records, today, claims=None):
     """
     {symbol: (start, end)} covering every price lookup the weekly jobs will
     make: each directional call's symbol from its call date through its longest
@@ -119,7 +119,54 @@ def needed_ranges(records, today):
         if symbol:
             want(symbol, today - timedelta(days=LATEST_PRICE_LOOKBACK_DAYS), today)
 
+    # The canonical scorecard and pulse: every testable headline forecast's
+    # instrument from the day before publication through its evaluation
+    # window, its resolved benchmark over the same range, and the current
+    # window's price-target symbols.
+    for symbol, start, end in canonical_ranges(claims if claims is not None else _load_claims(), today):
+        want(symbol, start, end)
+
     return ranges
+
+
+def _load_claims():
+    import canonical_claims
+    try:
+        return canonical_claims.load_canonical_claims()
+    except Exception as e:  # warming must never fail on a research-ledger problem
+        log_warn(f"Canonical claims unavailable for warming: {e}")
+        return []
+
+
+def canonical_ranges(claims, today):
+    """[(symbol, start, end)] the canonical analytics will look up."""
+    import canonical_claims
+    import scorecard_pricing as sp
+    from datetime import date as _date
+    out = []
+    for c in canonical_claims.headline_claims(claims):
+        symbol = canonical_claims.priceable_symbol(c)
+        if not symbol:
+            continue
+        pub = canonical_claims.claim_date(c)
+        if c.get("testable") and c.get("forecast_end_date") and pub:
+            try:
+                end = _date.fromisoformat(c["forecast_end_date"])
+            except ValueError:
+                continue
+            start, stop = pub - timedelta(days=1), end + timedelta(days=cs.MAX_PRICE_LAG_DAYS)
+            out.append((symbol, start, stop))
+            exchange = sp.exchange_for_claim(c, symbol)
+            bench, _ = sp.resolve_benchmark(c.get("asset_type"), exchange, c.get("sector"), symbol)
+            if bench:
+                out.append((bench, start, stop))
+    window_start = today - timedelta(days=PULSE_WINDOW_DAYS)
+    current = [c for c in claims if canonical_claims.in_window(c, window_start, today)]
+    for entry in canonical_claims.aggregate_views(current).values():
+        symbol = canonical_claims.priceable_symbol(entry)
+        if symbol and entry["targets"]:
+            out.append((symbol, today - timedelta(days=LATEST_PRICE_LOOKBACK_DAYS), today))
+    return out
 
 
 def warm(records, today, cache, fetcher=None):

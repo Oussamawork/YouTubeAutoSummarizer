@@ -185,15 +185,67 @@ candidates stay in the record with `review_required=True` and go to
 `review_queue.jsonl`; nothing unsupported is silently kept and nothing is
 silently dropped.
 
+### 7.1 Schema v2 additions (review corrections)
+
+Schema and prompt versions are now `2`. New fields per claim:
+
+| Field | Values | Set by |
+| --- | --- | --- |
+| `host_position` | adopted, rejected, neutral, not_applicable | evidence regexes first (`_REJECT_RE` beats `_ADOPT_RE`), the model's word only when the excerpt is silent — and a model-asserted adoption without evidence is downgraded to neutral |
+| `third_party_origin` | organisation | kept when an adopted third-party view is promoted to the speaker's own |
+| `entity_resolution_method` | explicit_mention, local_coreference, title, curated_mapping, unresolved | `validate_claims` |
+| `entity_resolution_confidence` | 1.0 / 0.8 explicit, 0.7 local coreference, 0.6 title, 0.5 curated-only, 0.0 unresolved | `validate_claims` |
+| `testability_type` | unconditional_testable, conditional_testable, not_testable | `validate_claims` |
+| `condition_text`, `condition_observable`, `condition_kind`, `condition_status`, `condition_evaluation_date`, `condition_evidence`, `condition_data_source` | see § 13.2 | `condition_observability`; outcomes from `condition_evaluations.jsonl` |
+| `evidence_start_seconds` / `evidence_end_seconds` | the CUE containing the evidence | `NormalizedTranscript.seconds_at` / `end_seconds_at` (null for plain text) |
+
+**Portfolio disclosures are not views.** "I own Tesla" — whatever claim
+type, stance or action the model attached — becomes `claim_type =
+portfolio_disclosure`, `stance = not_applicable`, `stance_basis =
+not_applicable`, `recommendation_action = none`, `is_forward_looking =
+false`, `portfolio_disclosure = owns_unspecified` or the position the
+evidence itself supports (`long`, `short`, `no_position`; a model-supplied
+`long` without supporting words is downgraded). Only a statement that also
+forecasts or recommends keeps its view, with the disclosure noted beside
+it. `claims.carries_view` is the single filter every stance path uses
+(consensus, net stance, flips, tone, the legacy reduction, the pulse, the
+scorecard): it requires `claim_type ∈ VIEW_CLAIM_TYPES`, so a disclosure —
+or a question, fact, news report, third-party view, retrospective or
+hypothetical — never votes, even if its `stance` field says bullish. The
+disclosures go to their own report (`canonical_claims.portfolio_disclosures`,
+appended to the pulse and the research report).
+
+**Third-party attribution (rule and implementation now agree).** A reported
+view (`speaker_quoting_third_party`, `speaker_describing_market_consensus`,
+`speaker_reporting_news`) is `third_party_view` with `stance =
+not_applicable` and `host_position` recorded; it needs NO review — it is
+excluded from own-view analytics by attribution, not by a reviewer. A view
+the speaker explicitly adopts ("I agree with that", "that's my target too")
+is promoted to `speaker_personal_view` (claim type `price_target` /
+`forecast`, `third_party_origin` kept) and counts as their own. What DOES go
+to review is an own-view claim whose evidence reads like a quotation without
+adoption (`possible_third_party_view`).
+
+**Local coreference (no outside knowledge).** A generic subject ("the
+stock", "it", "the company", "shares") resolves to the ACTIVE local subject:
+the curated asset names in the evidence itself, else in the previous two
+sentences of the same segment (at most 400 characters back). Exactly one
+distinct asset → resolved (`local_coreference`, 0.7); two or more →
+`ambiguous_coreference`, unresolved, review; none → unresolved. Only names
+the curated tables or the catalogue-verified learned map already know can
+be the referent.
+
 ## 8. Combined envelope outcomes
 
 | Response | Delivery | Research |
 | --- | --- | --- |
 | valid summary + valid claims | sent | `complete` (or `needs_review` when every claim is flagged) |
 | valid summary + malformed `claims` | sent | `failed_retryable`, reason `malformed_claims`, `signals: null`, retried later |
-| valid summary + `claims: []` | sent | `no_claims_found` (after validation), `signals: {"assets": []}` |
+| valid summary + `claims: []`, transcript plausibly claim-free | sent | `no_claims_found` (after validation AND the suspicious-empty check), `signals: {"assets": []}` |
+| valid summary + `claims: []`, transcript carries claim language | sent | `failed_retryable`, reason `suspicious_empty_extraction`, `signals: null`; a standalone pass runs (same run when budget permits, else the retry job); a standalone pass that is empty again → `needs_review`. Never `no_claims_found`. |
 | malformed envelope / no summary | fallback: plain summary call, then separate `extract_research` | as that call decides |
-| output truncated (`finish_reason=length`) | escalate, then `TRUNCATED_SENTINEL` → deferred, never half-delivered | untouched |
+| output truncated (`finish_reason=length`) after escalation | `complete()` reports `TRUNCATED_SENTINEL` (truncation wins over quota and "" so the cause is not hidden); `summarize_with_signals` returns `(None, research)`; the scraper makes a **summary-only call** and delivers it; the watermark advances with that delivery exactly as for any sent summary | `failed_retryable` / `combined_output_truncated` with `retry_separately`; the scraper immediately runs `extract_research(prefer_chunked=True)` — claims in `RESEARCH_CHUNK_TOKENS` chunks, each writing fewer claims — and records its outcome (`complete`, `quota_deferred`, …); if that cannot finish, the ledger keeps the truncation reason and `research_backfill --retry` picks the video up. Never `no_claims_found`. |
+| standalone claims call truncated | n/a | re-run in smaller chunks (`_extract_research_chunked(max_chunk_tokens=RESEARCH_CHUNK_TOKENS)`) |
 | input too large for every model | `summarize_transcript` chunked path | `extract_research` chunked path |
 | partial coverage | n/a (a merge never runs) | `partial`, claims excluded from headline analytics |
 
@@ -245,23 +297,42 @@ becomes active and the previous one is listed as superseded, so
 `load_active_claims` counts one version per video while the history stays in
 `claims.jsonl`.
 
-## 11. `signals.jsonl` compatibility
+## 11. `signals.jsonl` compatibility and who reads what
 
-Rows keep the legacy shape and are now derived from validated claims
-(`claims.claims_to_legacy_signals`), with `research_status` and
-`coverage_status` added. Reduction rules: only headline-eligible own-view
-claims contribute; one entry per asset; `stance` = the shortest-horizon
-directional claim's stance, with `reduced: "conflicting_horizons:…"` and every
-`claim_id` listed when horizons disagree (the legacy enum has no "mixed");
-`conviction` from `certainty_level`; `action` from `recommendation_action`
-(add/accumulate→buy, reduce/short→sell, avoid→none); `price_target` from an
-absolute USD target or a range midpoint (`reduced: "range_midpoint"`);
-`horizon` = bucket; `market_sentiment` from the bullish/bearish mix. A failed
-extraction is written as `signals: null` (as before) — never as an empty
-asset list — and a later successful retry appends a `backfilled` row for the
-same `video_id`. Existing consumers (`signals_data`, `market_pulse`,
-`channel_scorecard`, `pulse_charts`, `warm_prices`) are unchanged and
-tested against the derived shape.
+`data/signals.jsonl` is a **backward-compatible view only**. Rows keep the
+legacy shape and are derived from validated claims
+(`claims.claims_to_legacy_signals`): only `carries_view` claims contribute;
+one entry per asset; `stance` = the shortest-horizon directional claim's
+stance with `reduced: "conflicting_horizons:…"` when horizons disagree (the
+legacy enum has no "mixed" and no horizon axis); conviction / action /
+price-target reductions as before. A failed or suspicious-empty extraction
+is written as `signals: null`, never as an empty asset list. That reduction
+controls nothing new.
+
+**Canonical data source.** `canonical_claims.load_canonical_claims` is the
+one loader: active run per video (superseded runs out), no
+`schema_version="legacy"` rows, no cross-chunk repeats, the latest recorded
+condition outcome overlaid. `headline_claims` and `view_claims` narrow it
+further; `aggregate_views` groups per (asset, horizon bucket) with one
+current view per source.
+
+| Scheduled job | Entry point | Data source |
+| --- | --- | --- |
+| `weekly-pulse.yml` (Mon) | `market_pulse.main` → `_canonical_pulse_inputs` | canonical claims via `load_canonical_claims`; tone from each video's own view claims (`video_tone`); charts from the same views (`pulse_charts.build_chart_data(..., tone=…)`); latest prices for USD targets; track-record weights only when `SCORECARD_RANKINGS=true` |
+| `weekly-scorecard.yml` (Fri) | `channel_scorecard.main` → `generate_canonical_scorecard` | canonical claims scored by `research_analytics.scorecard` under `scorecard_pricing`; experimental / unranked by default; conditional-forecast report appended |
+| research report (`research_analytics.main`) | `build_report` | canonical claims; quality header, consensus, flips, disclosures, conditional report, scorecard |
+| `warm-prices.yml` (Sun) | `warm_prices.needed_ranges` | canonical forecast + benchmark ranges (`canonical_ranges`) **plus** the legacy ranges, so both the production jobs and the legacy consumers find their closes cached |
+| `daily-summary.yml` | `scraper.py`, `research_backfill.py --retry` | writes claims, state and the compatibility row; reads neither |
+
+**Legacy consumers that remain** (compatibility only, never the headline
+result): `market_pulse.build_pulse` / `aggregate_assets` (run only with
+`PULSE_DATA_SOURCE=legacy`), `channel_scorecard.evaluate` /
+`build_scorecard` / `generate_scorecard` (`--legacy`), `pulse_charts` data
+prep over legacy records, `warm_prices` legacy ranges, `ticker_resolver`
+(learns tickers from asset names in the legacy rows), and
+`research_backfill --import-legacy` (turns the old rows into review-required
+legacy claims). Nothing in `canonical_claims` imports `load_signals`
+(asserted by `tests/test_canonical_analytics.py`).
 
 ## 12. Migration and backfill
 
@@ -279,24 +350,151 @@ the scraper and commits `data/research/` and `data/transcripts/`.
 
 ## 13. Analytics
 
-`research_analytics.py`: quality header (discovered / included / transcribed /
-fully processed / partial / awaiting retry; claims, forward-looking,
-testable, review-required, unresolved entities, missing timestamps; sources;
-date range; the universe sentence), descriptive counts with distinct units,
-consensus = latest headline claim per source per asset per horizon bucket
-(buckets never merged; `net_stance = (bull - bear)/(bull + bear)` only when
-the denominator is non-zero), flips (same source/asset/bucket, both claims
-and both evidences kept, elapsed days, changed catalysts/risks), scorecard
-(matured, testable, evidence-backed, resolved instrument; entry = first close
-on/after publication, evaluation = first close on/after the end date, UTC,
-5-day lag, unadjusted provider closes, SPY benchmark, conditional forecasts
-excluded; direction / target / raw / excess / MFE / MAE kept separate; sources
-under `MIN_SCORECARD_SAMPLE` shown but unranked). `market_pulse` appends the
-quality header after the text pulse.
+`research_analytics.py`: quality header (unchanged), descriptive counts,
+consensus = latest **view** claim per source per asset per horizon bucket
+(`claims.carries_view`; buckets never merged; `net_stance = (bull -
+bear)/(bull + bear)` only when the denominator is non-zero), flips (same
+source/asset/bucket), the portfolio-disclosure report, the conditional-
+forecast report, and the scorecard below.
+
+### 13.1 Scorecard methodology (`scorecard_pricing.py`)
+
+Status: **experimental**. Source rankings are disabled unless
+`SCORECARD_RANKINGS=true`; the block is labelled `EXPERIMENTAL — unranked`
+and every source is listed alphabetically with `(unranked)`.
+
+*Price data.* Twelve Data `time_series` is requested with
+`adjust=$PRICE_ADJUSTMENT` (`splits` by default = split-adjusted, the
+minimum accepted; `all` = dividends folded in, recorded as
+`total_return_adjusted`). `price_cache` stores the adjustment per symbol and
+never serves a series fetched under another adjustment. Every scored claim
+records `price_provider`, `adjustment_type`, `corporate_action_status`,
+`currency`, `requested_start/end`, the entry's requested date and resolved
+trading date, and the evaluation's. A series whose adjustment is unknown or
+unadjusted is refused (`unadjusted_or_unknown_prices`), so a fetcher without
+`price_provenance` cannot score anything.
+
+*Publication-time rule* (`entry_point`). The instrument's exchange is
+resolved from the symbol suffix (`EXCHANGES`: XNYS with full NYSE holiday
+rules; XLON/XETR/XAMS/XTKS/XHKG/XKRX/XSHG/XSHE with weekday-only calendars,
+`calendar_confidence=weekdays_only`; crypto = continuous). The publication
+instant is placed in the exchange's timezone against the session:
+before open / during session → that day's close; after close, weekend,
+holiday → the next trading day's close ("next-close" convention); a
+publication with no time of day → the next trading day's close
+(conservative). A close dated the publication day is never used when the
+video went up after that close, and a close the series carries on a holiday
+is never used. Crypto: no session; entry = the close of the publication's
+UTC day (the first daily close after publication). Evaluation = the first
+trading-day close on or after `forecast_end_date`; both within 5 days.
+
+*Benchmarks* (`resolve_benchmark`). Per claim, from (asset type, exchange
+country, sector) through `BENCHMARKS` (sector ETFs for US sectors, SPY for
+US stocks/ETFs, BTC for crypto other than BTC itself; `BENCHMARKS_JSON`
+overrides). No defensible benchmark (non-US venue, unresolved exchange,
+self-benchmark) → raw performance only, `excess_return = null`,
+`benchmark_method` says why. `rankable_sources` ranks only sources that
+share one benchmark method and meet `MIN_SCORECARD_SAMPLE`, and only when
+rankings are enabled.
+
+*Unresolved exchange* → excluded (`unresolved_exchange`). *Conditional
+forecasts* → excluded from the unconditional scorecard (`conditional`);
+scored only with `include_conditional=True` and `condition_status == met`.
+
+### 13.2 Conditional-forecast model
+
+`testability_type`: `unconditional_testable` (forward-looking, resolved
+instrument, metric/direction, dated horizon, located evidence, full
+coverage, no condition), `conditional_testable` (the same, with an
+objectively observable condition), `not_testable`. A condition is
+observable when `claims.condition_observability` recognises it: a price
+level (`daily_close`), a policy-rate decision (`fomc_decisions`), a macro
+release (`official_statistics_release`), an earnings release
+(`company_filings`), or a dated public event (`public_announcements`).
+Anything else is `subjective` and blocks testability with the specific
+issue `condition_not_objectively_observable` — the existence of a condition
+is never by itself the reason. Fields: `condition_text`, `condition_status`
+(met / not_met / partially_met / unknown / not_evaluated),
+`condition_evaluation_date`, `condition_evidence`, `condition_data_source`.
+Outcomes are appended to `data/research/condition_evaluations.jsonl`
+(`research_state.record_condition_evaluation`) and overlaid by the loader;
+the latest wins. The separate report:
+`research_analytics.conditional_forecast_report` (in the research report
+and the scorecard message). Conditional forecasts stay out of unconditional
+rankings by default.
+
+### 13.3 Suspicious-empty detection (`claims.suspicious_empty_check`)
+
+Deterministic, high-recall, conservative. The transcript is split into
+sentences (unpunctuated caption runs longer than 40 words are scanned in
+25-word windows). A sentence is skipped when it ends with "?" or carries an
+educational / historical / promotional marker (historically, for example,
+let's say, imagine, means that, on average, last year, back in, in 20xx,
+returned, was/were, sponsor, use code, …). A remaining sentence must name an
+identifiable asset (curated alias, learned ticker, ticker-like token when
+the transcript is not mostly upper-case, or "the stock"/"bitcoin"/…). Then:
+
+- **strong**: recommendation wording (I'm buying, I'd sell, this is a buy,
+  avoid it, stay away, load up, take profits, …), or prediction wording
+  (will, expect, going to, could hit, should reach, price target, by end of,
+  next year, over the next, heading to, will double/crash/rally, …) together
+  with a number/percentage/currency, bullish/bearish wording, or a
+  directional verb (fall, rally, reach, hit, …);
+- **moderate**: bullish/bearish/overvalued/undervalued/upside/downside
+  wording, or prediction wording alone.
+
+Suspicious = at least one strong sentence or two moderate ones. On a
+suspicious empty result: combined path → `failed_retryable` /
+`suspicious_empty_extraction` (a standalone pass follows); standalone path
+→ `needs_review` / `suspicious_empty_extraction`; `signals: null`; the
+matching sentences are logged in the run's warnings. Never
+`no_claims_found`.
+
+### 13.4 Evidence timestamps
+
+`NormalizedTranscript.cues` keeps every caption cue's normalized span and
+seconds; `seconds_at(offset)` returns the cue containing the offset (an
+untimed cue inherits the previous timestamp), `end_seconds_at` the next
+cue's start. Claims in one segment therefore carry their own cue times
+(15 / 19 / 23 s in the example below, not the segment's 12 s). Plain-text
+transcripts keep null.
+
+### 13.5 Partial-cache versioning (`partial_cache.py`)
+
+Both chunked paths store one record per chunk under
+`data/research/partials/<hash>/<task>-<chunk>.json` with the full key —
+task type (`summary_notes` vs `research_claims`), transcript hash,
+normalization version, `CHUNKING_VERSION`, chunk id and boundaries, prompt
+version, schema version, provider/model policy — and a record is reused only
+when every key field matches the current run; otherwise it is ignored and
+overwritten.
+
+### 13.6 Extraction-quality evaluation (`claims_eval.py`)
+
+`python claims_eval.py --fixtures evals/claims [--live] [--report out.json]`.
+Not part of CI. Offline mode replays each fixture's stored `model_output`
+through the real deterministic pipeline and scores it against hand-labelled
+`expected_claims`; live mode (needs `--live` AND `CLAIMS_EVAL_LIVE=1` AND
+provider credentials, and warns that it spends quota) calls the current
+prompt. Metrics: atomic precision/recall, numerical-value, evidence-
+grounding, attribution, entity-resolution, stance, horizon and
+recommendation accuracy, false no-claims rate, duplicate rate; errors
+grouped by category with representative false positives/negatives.
+Matching is stable (evidence overlap or same segment, same asset, claim-type
+family, direction/target/bucket where labelled), never exact JSON. The
+fixture format and expansion steps are in `evals/claims/README.md`. The
+five shipped fixtures are hand-written caption-style segments with
+hand-written model outputs; **no live model quality has been measured** by
+this work.
 
 ## 14. Tests
 
-`./scripts/check.sh` → 511 passed. Coverage of the required list: full
+`./scripts/check.sh` → 575 passed. Review corrections:
+`test_portfolio_disclosures.py` (1), `test_truncation_fallback.py` (2, 10),
+`test_canonical_analytics.py` (3), `test_scorecard_pricing.py` (4),
+`test_conditional_forecasts.py` (5), `test_attribution_coreference.py` (6),
+`test_suspicious_empty.py` (7), `test_claims_eval.py` (8),
+`test_evidence_timestamps.py` (9). Original coverage: 511 passed; Coverage of the required list: full
 transcript (1–7: `test_summarizer.py` new tests, `test_token_budget.py`,
 `test_model_capabilities.py`), chunking (8–12: `test_transcript_normalize.py`,
 `test_summarizer_chunked.py`, `test_signals.py`), normalization (13–18:
@@ -305,69 +503,90 @@ delivery (31–40: `test_signals.py`, `test_scraper.py`,
 `test_research_state.py`, existing Telegram/analytics suites), analytics
 (41–46: `test_research_analytics.py`).
 
-## 15. End-to-end example (offline, model mocked)
+## 15. End-to-end example (offline, model mocked; regenerated 2026-09-05)
+
+Same raw excerpt as before (five caption cues, 12–31 s), published
+`2026-09-01T14:00:00+00:00`. The model output is a stored candidate list that
+deliberately mislabels two claims: "I own Tesla" as a neutral stance with
+`recommendation_action=buy`, and the Apple question as a forecast.
 
 ```
-RAW EXCERPT:
-00:00:12 --> 00:00:15
-Host: welcome back everyone today we talk nvidia
-00:00:15 --> 00:00:19
-today we talk nvidia and honestly I expect Nvidia to fall over the next
-00:00:19 --> 00:00:23
-over the next three months, but I remain bullish over five years
-00:00:23 --> 00:00:27
-Goldman expects the stock to reach $200 but that is their call not mine
-00:00:27 --> 00:00:31
-Host: could Apple fall 30 percent from here? I own Tesla by the way
+VALIDATION WARNINGS:
+  claim 2: 'the stock' resolved to 'Nvidia' from local context
+  claim 3: question reclassified from forecast
+  claim 4: recommendation 'buy' not stated in evidence; set to none
+  claim 4: ownership-only statement reclassified from stance to portfolio_disclosure
 
-NORMALIZED TEXT:
-Host: welcome back everyone today we talk nvidia and honestly I expect Nvidia to fall over the next three months, but I remain bullish over five years Goldman expects the stock to reach $200 but that is their call not mine could Apple fall 30 percent from here? I own Tesla by the way
+{"claim_id": "clm_a4babdd5b0cde12cf5b0", "segment_id": "5f3cb3c79a9f-s001", "attribution_type": "speaker_personal_view", "host_position": "not_applicable", "claim_type": "forecast", "is_forward_looking": true, "subject_mention": "Nvidia", "canonical_entity_name": "Nvidia", "entity_resolution_method": "explicit_mention", "entity_resolution_confidence": 1.0, "ticker": "NVDA", "stance": "bearish", "recommendation_action": "none", "forecast_direction": "decrease", "target_value": null, "horizon_bucket": "short", "forecast_end_date": "2026-12-01", "portfolio_disclosure": "not_stated", "evidence_text": "I expect Nvidia to fall over the next three months", "evidence_start_seconds": 15, "evidence_end_seconds": 23, "testable": true, "testability_type": "unconditional_testable", "testability_issues": [], "review_required": false, "review_reasons": []}
+{"claim_id": "clm_f0c72e87573bba0df015", "segment_id": "5f3cb3c79a9f-s001", "attribution_type": "speaker_personal_view", "host_position": "not_applicable", "claim_type": "stance", "is_forward_looking": true, "subject_mention": "Nvidia", "canonical_entity_name": "Nvidia", "entity_resolution_method": "local_coreference", "entity_resolution_confidence": 0.7, "ticker": "NVDA", "stance": "bullish", "recommendation_action": "none", "forecast_direction": null, "target_value": null, "horizon_bucket": "long", "forecast_end_date": "2031-09-01", "portfolio_disclosure": "not_stated", "evidence_text": "I remain bullish over five years", "evidence_start_seconds": 19, "evidence_end_seconds": 23, "testable": false, "testability_type": "not_testable", "testability_issues": ["missing_metric", "missing_direction"], "review_required": false, "review_reasons": []}
+{"claim_id": "clm_4dffdb532129c4276e69", "segment_id": "5f3cb3c79a9f-s001", "attribution_type": "speaker_quoting_third_party", "host_position": "rejected", "claim_type": "third_party_view", "is_forward_looking": true, "subject_mention": "the stock", "canonical_entity_name": "Nvidia", "entity_resolution_method": "local_coreference", "entity_resolution_confidence": 0.7, "ticker": "NVDA", "stance": "not_applicable", "recommendation_action": "none", "forecast_direction": null, "target_value": 200.0, "horizon_bucket": "unspecified", "forecast_end_date": null, "portfolio_disclosure": "not_stated", "evidence_text": "Goldman expects the stock to reach $200 but that is their call not mine", "evidence_start_seconds": 23, "evidence_end_seconds": 27, "testable": false, "testability_type": "not_testable", "testability_issues": ["missing_horizon"], "review_required": false, "review_reasons": []}
+{"claim_id": "clm_8f6a5e10a6abf15703dc", "segment_id": "5f3cb3c79a9f-s002", "attribution_type": "interviewer_question", "host_position": "not_applicable", "claim_type": "question", "is_forward_looking": false, "subject_mention": "Apple", "canonical_entity_name": "Apple", "entity_resolution_method": "explicit_mention", "entity_resolution_confidence": 1.0, "ticker": "AAPL", "stance": "not_applicable", "recommendation_action": "none", "forecast_direction": "decrease", "target_value": null, "horizon_bucket": "unspecified", "forecast_end_date": null, "portfolio_disclosure": "not_stated", "evidence_text": "could Apple fall 30 percent from here?", "evidence_start_seconds": 27, "evidence_end_seconds": null, "testable": false, "testability_type": "not_testable", "testability_issues": [], "review_required": false, "review_reasons": []}
+{"claim_id": "clm_02ee7a8f806656ddd46b", "segment_id": "5f3cb3c79a9f-s002", "attribution_type": "speaker_personal_view", "host_position": "not_applicable", "claim_type": "portfolio_disclosure", "is_forward_looking": false, "subject_mention": "Tesla", "canonical_entity_name": "Tesla", "entity_resolution_method": "explicit_mention", "entity_resolution_confidence": 1.0, "ticker": "TSLA", "stance": "not_applicable", "recommendation_action": "none", "forecast_direction": null, "target_value": null, "horizon_bucket": "unspecified", "forecast_end_date": null, "portfolio_disclosure": "owns_unspecified", "evidence_text": "I own Tesla by the way", "evidence_start_seconds": 27, "evidence_end_seconds": null, "testable": false, "testability_type": "not_testable", "testability_issues": [], "review_required": false, "review_reasons": []}
 
-QUALITY FLAGS: {'caption_overlap_removed': 2, 'duplicate_cues_removed': 0, 'unintelligible_markers': 0, 'lines_joined': 4}
-SEGMENT: {
- "segment_id": "5f3cb3c79a9f-s001",
- "video_id": "demo01",
- "sequence_number": 1,
- "start_seconds": 12,
- "end_seconds": 27,
- "start_character": 0,
- "end_character": 223,
- "speaker": "Host",
- "normalized_text": "Host: welcome back everyone today we talk nvidia and honestly I expect Nvidia to fall over the next three months, but I remain bullish over five years Goldman expects the stock to reach $200 but that is their call not mine ",
- "primary_category": "forecast",
- "secondary_tags": [
-  "company_analysis",
-  "introduction_or_outro",
-  "price_target"
- ],
- "quality_flags": [],
- "excluded_from_headline": false,
- "exclusion_reason": null
-}
+COMPATIBILITY SIGNAL (signals.jsonl row 'signals' field — the legacy VIEW, read by no canonical analytics):
+{"assets": [{"name": "Nvidia", "ticker": "NVDA", "type": "stock", "stance": "bearish", "conviction": "medium", "action": "none", "catalysts": [], "price_target": null, "horizon": "short", "claim_ids": ["clm_a4babdd5b0cde12cf5b0", "clm_f0c72e87573bba0df015"], "reduced": "conflicting_horizons:short=bearish,long=bullish"}], "market_sentiment": "mixed", "topics": [], "derived_from": "claims"}
 
-VALIDATION RESULT: status=complete warnings=['claim 3: question reclassified from forecast', "claim 4: recommendation 'buy' not stated in evidence; set to none"]
-{"claim_id": "clm_abf2e186f546b3dcc1ef", "segment_id": "5f3cb3c79a9f-s001", "attribution_type": "speaker_personal_view", "claim_type": "forecast", "is_forward_looking": true, "subject_mention": "Nvidia", "ticker": "NVDA", "ticker_source": "curated_mapping", "entity_resolution_status": "confirmed", "stance": "bearish", "recommendation_action": "none", "forecast_direction": "decrease", "target_value": null, "horizon_original": "over the next three months", "horizon_bucket": "short", "forecast_end_date": "2026-12-01", "certainty_level": "medium", "portfolio_disclosure": "not_stated", "evidence_text": "I expect Nvidia to fall over the next three months", "evidence_start_character": 62, "evidence_start_seconds": 12, "testable": true, "testability_issues": [], "review_required": false, "review_reasons": [], "coverage_status": "full"}
-{"claim_id": "clm_16946afa67c8e1858536", "segment_id": "5f3cb3c79a9f-s001", "attribution_type": "speaker_personal_view", "claim_type": "stance", "is_forward_looking": true, "subject_mention": "Nvidia", "ticker": "NVDA", "ticker_source": "curated_mapping", "entity_resolution_status": "confirmed", "stance": "bullish", "recommendation_action": "none", "forecast_direction": null, "target_value": null, "horizon_original": "over five years", "horizon_bucket": "long", "forecast_end_date": "2031-09-01", "certainty_level": "medium", "portfolio_disclosure": "not_stated", "evidence_text": "I remain bullish over five years", "evidence_start_character": 118, "evidence_start_seconds": 12, "testable": false, "testability_issues": ["missing_metric", "missing_direction"], "review_required": false, "review_reasons": [], "coverage_status": "full"}
-{"claim_id": "clm_4669b1c48af81a2108c2", "segment_id": "5f3cb3c79a9f-s001", "attribution_type": "speaker_quoting_third_party", "claim_type": "third_party_view", "is_forward_looking": true, "subject_mention": "the stock", "ticker": null, "ticker_source": "unresolved", "entity_resolution_status": "unresolved", "stance": "not_applicable", "recommendation_action": "none", "forecast_direction": null, "target_value": 200.0, "horizon_original": null, "horizon_bucket": "unspecified", "forecast_end_date": null, "certainty_level": "not_stated", "portfolio_disclosure": "not_stated", "evidence_text": "Goldman expects the stock to reach $200", "evidence_start_character": 151, "evidence_start_seconds": 12, "testable": false, "testability_issues": ["missing_horizon", "unresolved_entity"], "review_required": false, "review_reasons": [], "coverage_status": "full"}
-{"claim_id": "clm_b47e2fe4a5c69afea043", "segment_id": "5f3cb3c79a9f-s002", "attribution_type": "interviewer_question", "claim_type": "question", "is_forward_looking": false, "subject_mention": "Apple", "ticker": "AAPL", "ticker_source": "curated_mapping", "entity_resolution_status": "confirmed", "stance": "not_applicable", "recommendation_action": "none", "forecast_direction": "decrease", "target_value": null, "horizon_original": null, "horizon_bucket": "unspecified", "forecast_end_date": null, "certainty_level": "not_stated", "portfolio_disclosure": "not_stated", "evidence_text": "could Apple fall 30 percent from here?", "evidence_start_character": 223, "evidence_start_seconds": 27, "testable": false, "testability_issues": [], "review_required": false, "review_reasons": [], "coverage_status": "full"}
-{"claim_id": "clm_441e069643c80c31daa2", "segment_id": "5f3cb3c79a9f-s002", "attribution_type": "speaker_personal_view", "claim_type": "portfolio_disclosure", "is_forward_looking": false, "subject_mention": "Tesla", "ticker": "TSLA", "ticker_source": "curated_mapping", "entity_resolution_status": "confirmed", "stance": "neutral", "recommendation_action": "none", "forecast_direction": null, "target_value": null, "horizon_original": null, "horizon_bucket": "unspecified", "forecast_end_date": null, "certainty_level": "not_stated", "portfolio_disclosure": "owns_unspecified", "evidence_text": "I own Tesla by the way", "evidence_start_character": 262, "evidence_start_seconds": 27, "testable": false, "testability_issues": [], "review_required": false, "review_reasons": [], "coverage_status": "full"}
-
-COMPATIBILITY SIGNAL (signals.jsonl row 'signals' field):
-{"assets": [{"name": "Nvidia", "ticker": "NVDA", "type": "other", "stance": "bearish", "conviction": "medium", "action": "none", "catalysts": [], "price_target": null, "horizon": "short", "claim_ids": ["clm_abf2e186f546b3dcc1ef", "clm_16946afa67c8e1858536"], "reduced": "conflicting_horizons:short=bearish,long=bullish"}, {"name": "Tesla", "ticker": "TSLA", "type": "other", "stance": "neutral", "conviction": "unspecified", "action": "none", "catalysts": [], "price_target": null, "horizon": "unspecified", "claim_ids": ["clm_441e069643c80c31daa2"], "reduced": null}], "market_sentiment": "mixed", "topics": [], "derived_from": "claims"}
-
-ANALYTICS ROWS (consensus, one view per source/asset/horizon bucket):
+CONSENSUS (canonical, one view per source/asset/horizon):
 ('NVDA', 'short') {'bullish': 0, 'bearish': 1, 'neutral': 0, 'sources': 1, 'net_stance': -1.0}
-('NVDA', 'long') {'bullish': 1, 'bearish': 0, 'neutral': 0, 'sources': 1, 'net_stance': 1.0}
-('TSLA', 'unspecified') {'bullish': 0, 'bearish': 0, 'neutral': 1, 'sources': 1, 'net_stance': None}
+('NVDA', 'long')  {'bullish': 1, 'bearish': 0, 'neutral': 0, 'sources': 1, 'net_stance': 1.0}
+
+PULSE VIEWS (canonical_claims.aggregate_views — what the weekly pulse renders):
+('NVDA', 'short') {'label': 'NVDA [short]', 'bull': 0, 'bear': 1, 'neutral': 0, 'mentions': 1}
+('NVDA', 'long')  {'label': 'NVDA [long]',  'bull': 1, 'bear': 0, 'neutral': 0, 'mentions': 1}
+
+PORTFOLIO DISCLOSURES (separate report):
+[{"source": "Demo Channel", "asset": "TSLA", "ticker": "TSLA", "position": "owns_unspecified", "date": "2026-09-01", "evidence": "I own Tesla by the way", "claim_id": "clm_02ee7a8f806656ddd46b", "review_required": false}]
+
+SUSPICIOUS-EMPTY CHECK on this transcript: suspicious=True
+  strong: ["Host: welcome back everyone today we talk nvidia and honestly I expect Nvidia to fall over the next three months, but I remain bullish over"]
+EMPTY MODEL RESULT ({"claims": []}) -> combined path: failed_retryable / suspicious_empty_extraction, signals: null
+                                     -> standalone path: needs_review / suspicious_empty_extraction
+
+TRUNCATED COMBINED CALL (complete() -> TRUNCATED_SENTINEL after escalation)
+  summarize_with_signals -> (None, {status: failed_retryable, failure_reason: combined_output_truncated, retry_separately: true})
+  scraper -> summary-only call -> delivered -> watermark advanced -> extract_research(prefer_chunked=True)
+  (tests/test_truncation_fallback.py drives this through main() with finish_reason=length responses)
 ```
+
+What changed against the previous example:
+
+- **"I own Tesla" is not a neutral stance.** It is a `portfolio_disclosure`
+  with `stance=not_applicable`; there is no `('TSLA', 'unspecified')`
+  consensus row any more, no Tesla entry in the compatibility signal, and the
+  disclosure appears only in the disclosure report.
+- **Short and long term stay separate** in consensus and in the pulse
+  (`NVDA [short]` bearish, `NVDA [long]` bullish); the legacy row's single
+  `bearish` with `reduced: conflicting_horizons` shapes none of it.
+- **"The stock" resolves to Nvidia** through local coreference
+  (`entity_resolution_method=local_coreference`, 0.7, ticker NVDA), the host's
+  "that is their call not mine" is recorded as `host_position=rejected`, and
+  the claim needs no review — consistent with § 7.1.
+- **Timestamps are per cue**: 15 s, 19 s, 23 s inside one segment that
+  starts at 12 s.
+- **A suspicious empty extraction enters review** instead of
+  `no_claims_found`.
+- **Canonical analytics never read the reduced legacy signal.**
 
 ## 16. Limitations
 
 - Segment categories are keyword heuristics; they gate exclusion (sponsor,
   disclaimer, intro) and never decide meaning. The LLM extractor does.
-- Evidence timestamps are segment-level (source cues carry no per-word
-  times); Supadata is fetched as plain text, so most segments have no
-  seconds at all — `missing_timestamps` is reported in the quality header.
+- Evidence timestamps are cue-level (source cues carry no per-word times);
+  Supadata is fetched as plain text, so most segments have no seconds at
+  all — `missing_timestamps` is reported in the quality header.
+- Non-US exchange calendars are weekday-only (`calendar_confidence=
+  weekdays_only`); a local holiday there shifts an entry by a day at most,
+  and the scored record says which calendar was used.
+- The suspicious-empty check is a keyword scan: it is tuned to be quiet on
+  explainers and loud on forecasts, but it cannot read meaning. A flagged
+  video costs one standalone extraction request or a review, never a
+  fabricated claim.
+- Local coreference only resolves to names the curated tables or the
+  verified learned map already know; a company the dataset has never seen
+  stays unresolved even when the context is unambiguous.
+- The evaluation fixtures are hand-authored; the harness measures live
+  model quality only when run with `--live` and `CLAIMS_EVAL_LIVE=1`, which
+  this work did not do.
 - `countTokens` measures the native request shape; the OpenAI-compatible
   layer may add a few tokens of scaffolding. The 2,048-token margin covers
   it. The 250k TPM value is this project's measured free-tier limit, not a
@@ -382,5 +601,7 @@ ANALYTICS ROWS (consensus, one view per source/asset/horizon bucket):
   then need a re-fetch under the normal budget).
 - Legacy rows cannot gain evidence retroactively; the compatibility view for
   new videos reduces information by design and says so in `reduced`.
-- Sector/exchange/benchmark ticker fields are carried but not resolved
-  (null) — no curated source exists for them yet.
+- The claim's `sector` comes from the model's wording and is only used to
+  pick a sector benchmark when it matches a `BENCHMARKS` key; `exchange`
+  on the claim stays null (the scorecard resolves it from the symbol at
+  scoring time and records it on the scored row).

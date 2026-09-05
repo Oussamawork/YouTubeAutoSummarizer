@@ -695,6 +695,7 @@ def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
 
     quota_hit = False
     too_large = False
+    truncated_hit = False
     for provider in providers:
         skip = _skip_reason(provider)
         if skip:
@@ -713,6 +714,7 @@ def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
             continue
         if text == TRUNCATED_SENTINEL:
             log_warn(f"{provider['name']} response was truncated; trying next provider.")
+            truncated_hit = True
             continue
         if text == QUOTA_EXHAUSTED_SENTINEL:
             log_warn(f"{provider['name']} quota/rate limit hit; skipping it for the rest of the run.")
@@ -723,6 +725,12 @@ def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
             return text
         log_warn(f"{provider['name']} did not produce a completion; trying next provider.")
 
+    if truncated_hit:
+        # A provider answered and ran out of room even after escalating: that
+        # is a verdict about the OUTPUT size, and the caller can shrink the
+        # output (summary only, chunked claims). Reporting it as quota or as
+        # "" would either defer the whole video or hide the cause.
+        return TRUNCATED_SENTINEL
     if quota_hit:
         return QUOTA_EXHAUSTED_SENTINEL
     if too_large:
@@ -872,27 +880,29 @@ MERGE_PREAMBLE = (
 )
 
 
-def _partial_path(cache_key, chunk_id):
-    return os.path.join(PARTIALS_DIR, cache_key, f"{chunk_id}.json")
+CHUNK_NOTES_PROMPT_VERSION = "1"
+CHUNK_NOTES_SCHEMA_VERSION = "1"
 
 
-def _load_partial(cache_key, chunk_id):
-    if not cache_key:
-        return None
-    try:
-        with open(_partial_path(cache_key, chunk_id), "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) and data.get("notes") else None
-    except (OSError, ValueError):
-        return None
+def _model_policy():
+    import partial_cache
+    return partial_cache.model_policy_string(_provider_configs())
 
 
-def _save_partial(cache_key, chunk, notes, provider):
-    if not cache_key:
-        return
-    write_json_atomic(_partial_path(cache_key, chunk.chunk_id), {
-        "chunk": chunk.to_dict(), "notes": notes, "model": provider.get("model"),
-    })
+def _load_partial(nt, chunk):
+    """The cached notes for this chunk, only when every input that shaped
+    them (transcript, normalization, chunking, boundaries, prompt, schema,
+    provider policy, task) matches the current run — see partial_cache."""
+    import partial_cache
+    payload = partial_cache.load("summary_notes", nt, chunk, CHUNK_NOTES_PROMPT_VERSION,
+                                 CHUNK_NOTES_SCHEMA_VERSION, _model_policy())
+    return payload if isinstance(payload, dict) and payload.get("notes") else None
+
+
+def _save_partial(nt, chunk, notes, provider):
+    import partial_cache
+    partial_cache.save("summary_notes", nt, chunk, {"notes": notes}, CHUNK_NOTES_PROMPT_VERSION,
+                       CHUNK_NOTES_SCHEMA_VERSION, _model_policy(), model=provider.get("model"))
 
 
 def _requests_remaining(provider):
@@ -930,7 +940,7 @@ def _summarize_chunked(provider, transcript, title, compact, cache_key):
                  f"{MAX_SUMMARY_CHUNKS} cap; trying the next provider.")
         return INPUT_TOO_LARGE_SENTINEL
 
-    done = {c.chunk_id: _load_partial(cache_key, c.chunk_id) for c in chunks}
+    done = {c.chunk_id: _load_partial(nt, c) for c in chunks}
     todo = [c for c in chunks if not done[c.chunk_id]]
     needed = len(todo) + 1  # + the merge call
     remaining = _requests_remaining(provider)
@@ -969,7 +979,7 @@ def _summarize_chunked(provider, transcript, title, compact, cache_key):
             LAST_CALL_TELEMETRY.update({"chunks_succeeded": succeeded, "chunks_failed": 1})
             return ""
         done[chunk.chunk_id] = {"notes": notes}
-        _save_partial(cache_key, chunk, notes, provider)
+        _save_partial(nt, chunk, notes, provider)
         succeeded += 1
 
     # Every chunk participated: assert it before merging.

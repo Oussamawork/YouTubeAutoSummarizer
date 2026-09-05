@@ -1,0 +1,131 @@
+{
+ "fixture_id": "nvda-two-horizons",
+ "channel_name": "Demo Investor",
+ "video_title": "Nvidia: short-term pain, long-term gain?",
+ "published_at": "2026-07-01T14:00:00+00:00",
+ "transcript": "00:00:12 --> 00:00:15\nHost: welcome back everyone today we talk nvidia\n00:00:15 --> 00:00:19\ntoday we talk nvidia and honestly I expect Nvidia to fall over the next\n00:00:19 --> 00:00:23\nover the next three months, but I remain bullish over five years\n00:00:23 --> 00:00:27\nGoldman expects the stock to reach $200 but that is their call not mine\n00:00:27 --> 00:00:31\nHost: could Apple fall 30 percent from here? I own Tesla by the way\n",
+ "expected_claims": [
+  {
+   "evidence_text": "I expect Nvidia to fall over the next three months",
+   "subject": "NVDA",
+   "claim_type": "forecast",
+   "attribution_type": "speaker_personal_view",
+   "stance": "bearish",
+   "forecast_direction": "decrease",
+   "horizon_bucket": "short",
+   "recommendation_action": "none",
+   "ticker": "NVDA",
+   "testability_type": "unconditional_testable"
+  },
+  {
+   "evidence_text": "I remain bullish over five years",
+   "subject": "NVDA",
+   "claim_type": "stance",
+   "attribution_type": "speaker_personal_view",
+   "stance": "bullish",
+   "horizon_bucket": "long",
+   "ticker": "NVDA"
+  },
+  {
+   "evidence_text": "Goldman expects the stock to reach $200",
+   "subject": "NVDA",
+   "claim_type": "third_party_view",
+   "attribution_type": "speaker_quoting_third_party",
+   "host_position": "rejected",
+   "target_value": 200,
+   "stance": "not_applicable",
+   "ticker": "NVDA",
+   "entity_resolution_method": "local_coreference"
+  },
+  {
+   "evidence_text": "could Apple fall 30 percent from here?",
+   "subject": "AAPL",
+   "claim_type": "question",
+   "attribution_type": "interviewer_question",
+   "stance": "not_applicable"
+  },
+  {
+   "evidence_text": "I own Tesla by the way",
+   "subject": "TSLA",
+   "claim_type": "portfolio_disclosure",
+   "stance": "not_applicable",
+   "recommendation_action": "none",
+   "portfolio_disclosure": "owns_unspecified",
+   "ticker": "TSLA"
+  }
+ ],
+ "model_output": {
+  "claims": [
+   {
+    "speaker": "host",
+    "attribution_type": "speaker_personal_view",
+    "claim_type": "forecast",
+    "is_forward_looking": true,
+    "subject_mention": "Nvidia",
+    "asset_type": "stock",
+    "stance": "bearish",
+    "forecast_metric": "price",
+    "forecast_direction": "decrease",
+    "horizon_original": "over the next three months",
+    "certainty_original": "expect",
+    "certainty_level": "medium",
+    "evidence_text": "I expect Nvidia to fall over the next three months",
+    "extraction_confidence": "high"
+   },
+   {
+    "speaker": "host",
+    "attribution_type": "speaker_personal_view",
+    "claim_type": "stance",
+    "is_forward_looking": true,
+    "subject_mention": "Nvidia",
+    "asset_type": "stock",
+    "stance": "bullish",
+    "horizon_original": "over five years",
+    "certainty_level": "medium",
+    "evidence_text": "I remain bullish over five years",
+    "extraction_confidence": "high"
+   },
+   {
+    "speaker": "host",
+    "attribution_type": "speaker_quoting_third_party",
+    "attributed_person_or_organization": "Goldman",
+    "host_position": "rejected",
+    "claim_type": "third_party_view",
+    "is_forward_looking": true,
+    "subject_mention": "the stock",
+    "asset_type": "stock",
+    "target_kind": "absolute_value",
+    "target_value": 200,
+    "currency": "USD",
+    "stance": "not_applicable",
+    "evidence_text": "Goldman expects the stock to reach $200 but that is their call not mine",
+    "extraction_confidence": "high"
+   },
+   {
+    "speaker": "host",
+    "attribution_type": "interviewer_question",
+    "claim_type": "question",
+    "is_forward_looking": false,
+    "subject_mention": "Apple",
+    "asset_type": "stock",
+    "stance": "not_applicable",
+    "forecast_direction": "decrease",
+    "evidence_text": "could Apple fall 30 percent from here?",
+    "extraction_confidence": "high"
+   },
+   {
+    "speaker": "host",
+    "attribution_type": "speaker_personal_view",
+    "claim_type": "stance",
+    "is_forward_looking": false,
+    "subject_mention": "Tesla",
+    "asset_type": "stock",
+    "stance": "neutral",
+    "recommendation_action": "buy",
+    "portfolio_disclosure": "owns_unspecified",
+    "evidence_text": "I own Tesla by the way",
+    "extraction_confidence": "medium"
+   }
+  ]
+ }
+}

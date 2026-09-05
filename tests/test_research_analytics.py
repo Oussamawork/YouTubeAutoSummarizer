@@ -105,6 +105,16 @@ def _series(start, days, step):
     return {start + timedelta(days=i): 100.0 + step * i for i in range(days)}
 
 
+def _fetcher(prices, adjustment="split_adjusted"):
+    """A price fetcher that declares its provenance, as the production one
+    does; a fetcher without one is refused by the scorecard on purpose."""
+    def fetch(symbol, start, end):
+        return prices.get(symbol, {})
+    fetch.price_provenance = {"provider": "test", "adjustment": adjustment,
+                              "corporate_action_status": adjustment}
+    return fetch
+
+
 def test_scorecard_scores_only_matured_testable_forecasts():
     today = date(2026, 8, 1)
     matured = _c("A", "NVDA", "bullish", published="2026-07-01", testable=True, forecast_end_date="2026-07-15",
@@ -112,9 +122,10 @@ def test_scorecard_scores_only_matured_testable_forecasts():
     young = _c("A", "NVDA", "bullish", published="2026-07-20", testable=True, forecast_end_date="2026-09-30", n=2)
     untestable = _c("A", "NVDA", "bullish", published="2026-07-01", testable=False, n=3)
     prices = {"nvda.us": _series(date(2026, 7, 1), 40, 1.0), "spy.us": _series(date(2026, 7, 1), 40, 0.5)}
-    sc = ra.scorecard([matured, young, untestable], today, lambda s, a, b: prices.get(s, {}), min_sample=1)
+    sc = ra.scorecard([matured, young, untestable], today, _fetcher(prices), min_sample=1)
     excluded = sc.pop("_excluded")
     assert excluded == {"not_matured": 1, "not_testable": 1}
+    assert sc.pop("_rankings_enabled") is False
     a = sc["A"]
     assert a["n"] == 1 and a["direction_hits"] == 1 and a["target_hits"] == 1
     assert a["raw_returns"][0] > 0 and a["excess_returns"][0] > 0 and a["mfe"][0] >= a["raw_returns"][0]
@@ -125,7 +136,9 @@ def test_report_renders_and_respects_min_sample():
     claims = [_c("A", "NVDA", "bullish", published="2026-07-01", testable=True, forecast_end_date="2026-07-15")]
     prices = {"nvda.us": _series(date(2026, 7, 1), 40, 1.0)}
     text = ra.build_report(claims, [], {"videos": {}}, [], date(2026, 6, 30), today, today=today,
-                           price_fetcher=lambda s, a, b: prices.get(s, {}))
+                           price_fetcher=_fetcher(prices))
     assert "Research data quality" in text
-    assert "unranked: below sample minimum" in text
+    # Rankings are off by default: the scorecard is labelled experimental
+    # and every source is unranked, whatever its sample.
+    assert "EXPERIMENTAL" in text and "(unranked)" in text
     assert "n=1" in text and "not investment advice" in text

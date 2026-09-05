@@ -156,6 +156,21 @@ def tone_weeks(records, today, num_weeks=TONE_WEEKS):
     return weeks
 
 
+def spread_from_weeks(weeks):
+    """The bull-bear spread rows from tone-week rows (see spread_weeks)."""
+    return [
+        {
+            "label": week["label"],
+            "short_label": week["short_label"],
+            "weeks_ago": week["weeks_ago"],
+            "n": week["n"],
+            "spread": (week["bullish"] - week["bearish"]) / week["n"] * 100.0,
+            "partial": week["partial"],
+        }
+        for week in weeks
+    ]
+
+
 def spread_weeks(records, today, num_weeks=SPREAD_WEEKS):
     """
     The bull-bear spread per week: share of videos expecting a rise minus the
@@ -171,17 +186,7 @@ def spread_weeks(records, today, num_weeks=SPREAD_WEEKS):
     averaging out and a turn in the line is distinguishable from one loud week.
     Until then the chart labels itself as early days (see MATURE_SPREAD_WEEKS).
     """
-    return [
-        {
-            "label": week["label"],
-            "short_label": week["short_label"],
-            "weeks_ago": week["weeks_ago"],
-            "n": week["n"],
-            "spread": (week["bullish"] - week["bearish"]) / week["n"] * 100.0,
-            "partial": week["partial"],
-        }
-        for week in tone_weeks(records, today, num_weeks=num_weeks)
-    ]
+    return spread_from_weeks(tone_weeks(records, today, num_weeks=num_weeks))
 
 
 def conviction_points(current, limit=MAX_MAP_POINTS, min_directional=MIN_MAP_DIRECTIONAL):
@@ -231,19 +236,28 @@ def upside_rows(current, latest_prices, limit=MAX_UPSIDE_ROWS):
     return rows[:limit]
 
 
-def build_chart_data(records, current, previous, window_start, today):
+def build_chart_data(records, current, previous, window_start, today, tone=None, videos=None,
+                     channels=None):
     """Everything the renderer needs, as plain dicts/lists. `current` and
-    `previous` are aggregate_assets() outputs for the two windows."""
-    current_records = [r for r in records if _in_window(r, window_start, today)]
-    channels = {r.get("channel_name") for r in current_records if r.get("channel_name")}
+    `previous` are per-asset entries (canonical_claims.aggregate_views for
+    the production pulse, aggregate_assets for the legacy view) for the two
+    windows. `tone` (week rows) and the video/channel counts are supplied by
+    the canonical pulse, whose tone comes from each video's own view claims;
+    without them they are computed from legacy signal records."""
+    if tone is None:
+        current_records = [r for r in records if _in_window(r, window_start, today)]
+        channel_names = {r.get("channel_name") for r in current_records if r.get("channel_name")}
+        tone = tone_weeks(records, today)
+        videos = len(current_records) if videos is None else videos
+        channels = len(channel_names) if channels is None else channels
     return {
         "window": window_label(window_start, today),
-        "videos": len(current_records),
-        "channels": len(channels),
+        "videos": videos or 0,
+        "channels": channels or 0,
         "consensus": consensus_rows(current),
         "flips": flip_rows(current, previous),
-        "tone": tone_weeks(records, today),
-        "spread": spread_weeks(records, today),
+        "tone": tone[-TONE_WEEKS:] if tone else [],
+        "spread": spread_from_weeks(tone),
         "map": conviction_points(current),
         "upside": [],  # filled by the caller once latest prices are known
     }

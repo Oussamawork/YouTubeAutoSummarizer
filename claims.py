@@ -24,8 +24,8 @@ from datetime import date, datetime, timedelta, timezone
 from log import log_info, log_warn
 from signals_data import ASSET_ALIASES, TICKER_ALIASES, learned_tickers
 
-SCHEMA_VERSION = "1"
-EXTRACTION_PROMPT_VERSION = "1"
+SCHEMA_VERSION = "2"
+EXTRACTION_PROMPT_VERSION = "2"
 
 # --- Enumerations -----------------------------------------------------------
 
@@ -37,12 +37,33 @@ ATTRIBUTION_TYPES = {
 }
 # Attributions that count as the source's own current view in analytics.
 OWN_VIEW_ATTRIBUTIONS = {"speaker_personal_view", "guest_personal_view"}
+THIRD_PARTY_ATTRIBUTIONS = {"speaker_quoting_third_party", "speaker_describing_market_consensus",
+                            "speaker_reporting_news"}
 CLAIM_TYPES = {
     "forecast", "price_target", "recommendation", "stance", "valuation_view",
     "fact", "news_report", "third_party_view", "historical_claim",
     "portfolio_disclosure", "question", "hypothetical", "opinion", "risk",
     "catalyst", "other",
 }
+# Claim types that can carry an investment VIEW (a stance a reader may act
+# on). Everything else — a portfolio disclosure, a question, a fact, a news
+# report, a third party's view, a retrospective, a hypothetical — is recorded
+# but never enters stance counts, net stance, consensus, sentiment, flips or
+# forecast scorecards, whatever stance value it carries.
+VIEW_CLAIM_TYPES = {"forecast", "price_target", "recommendation", "stance", "valuation_view",
+                    "opinion", "risk", "catalyst"}
+NON_VIEW_CLAIM_TYPES = CLAIM_TYPES - VIEW_CLAIM_TYPES
+# Testability is three-valued: an unconditional forecast is scorable as soon
+# as it matures; a conditional one is scorable only once its condition has
+# been observed to hold; and a claim missing an instrument, metric, horizon,
+# evidence or an objectively observable condition is not testable at all.
+TESTABILITY_TYPES = {"unconditional_testable", "conditional_testable", "not_testable"}
+CONDITION_STATUSES = {"met", "not_met", "partially_met", "unknown", "not_evaluated"}
+# How the claim's entity was pinned down, and where a third-party view's
+# speaker stands on it.
+ENTITY_RESOLUTION_METHODS = {"explicit_mention", "local_coreference", "title", "curated_mapping",
+                             "unresolved"}
+HOST_POSITIONS = {"adopted", "rejected", "neutral", "not_applicable"}
 SPEAKER_CONFIDENCE = {"high", "medium", "low", "unknown"}
 STANCES = {"bullish", "bearish", "neutral", "mixed", "not_applicable", "unclear"}
 STANCE_BASIS = {"explicit", "inferred_from_context", "not_applicable"}
@@ -82,6 +103,7 @@ CLAIM_FIELDS_SPEC = (
     'speaker_reporting_news|speaker_quoting_third_party|speaker_describing_market_consensus|'
     'interviewer_question|hypothetical_example|retrospective_claim|sarcasm_or_humor|unclear", '
     '"attributed_person_or_organization": "<who, for third-party views>", '
+    '"host_position": "adopted|rejected|neutral <for third-party views: does the speaker adopt it, reject it, or just report it>", '
     '"claim_type": "forecast|price_target|recommendation|stance|valuation_view|fact|news_report|'
     'third_party_view|historical_claim|portfolio_disclosure|question|hypothetical|opinion|risk|catalyst|other", '
     '"is_forward_looking": true|false, '
@@ -122,14 +144,18 @@ CLAIM_RULES = (
     "- A question is not a forecast (attribution_type=interviewer_question, "
     "claim_type=question, is_forward_looking=false).\n"
     "- A reported analyst/bank/consensus target is a third-party view "
-    "(speaker_quoting_third_party / speaker_describing_market_consensus) unless "
-    "the speaker explicitly adopts it.\n"
+    "(speaker_quoting_third_party / speaker_describing_market_consensus) with "
+    "host_position=neutral, unless the speaker explicitly adopts it "
+    "(host_position=adopted) or rejects it (host_position=rejected).\n"
     "- \"Last year I said X\" is retrospective_claim / historical_claim, not a "
     "new forecast.\n"
-    "- Owning a stock is portfolio_disclosure, not a recommendation; praise "
-    "without an explicit buy/sell/hold instruction is opinion with "
-    "recommendation_action=none. Only an explicit instruction gets "
-    "buy/sell/hold/etc.\n"
+    "- Owning a stock is portfolio_disclosure with stance=not_applicable and "
+    "recommendation_action=none — it is not a view; praise without an explicit "
+    "buy/sell/hold instruction is opinion with recommendation_action=none. Only "
+    "an explicit instruction gets buy/sell/hold/etc.\n"
+    "- When the speaker says \"the stock\", \"it\" or \"the company\", keep "
+    "subject_mention as spoken; the surrounding transcript decides which "
+    "company it is, never outside knowledge.\n"
     "- Keep short-term and long-term views as separate claims. Do not assign a "
     "market-wide statement to every company mentioned elsewhere.\n"
     "- ticker_spoken only when the speaker SAYS the ticker or it appears in the "
@@ -153,7 +179,11 @@ CLAIM_EXAMPLES = (
     "subject_mention:Apple, is_forward_looking:false, stance:not_applicable}.\n"
     "3. \"Goldman expects the stock to reach $200.\" -> {claim_type:third_party_view, "
     "attribution_type:speaker_quoting_third_party, attributed_person_or_organization:Goldman, "
-    "target_kind:absolute_value, target_value:200, currency:USD, stance:not_applicable}.\n"
+    "host_position:neutral, subject_mention:\"the stock\", target_kind:absolute_value, target_value:200, "
+    "currency:USD, stance:not_applicable}.\n"
+    "3b. \"I own Tesla.\" -> {claim_type:portfolio_disclosure, subject_mention:Tesla, "
+    "portfolio_disclosure:owns_unspecified, stance:not_applicable, recommendation_action:none, "
+    "is_forward_looking:false}.\n"
     "4. \"Last year I said Bitcoin would double, and it did.\" -> {claim_type:historical_claim, "
     "attribution_type:retrospective_claim, subject_mention:Bitcoin, is_forward_looking:false}.\n"
     "5. \"Micron is the cheapest memory name right now.\" -> {claim_type:valuation_view, subject_mention:Micron, "
@@ -352,15 +382,64 @@ _RETRO_RE = re.compile(
 _THIRD_PARTY_RE = re.compile(
     r"\b(analysts?|wall street|consensus|goldman|morgan stanley|jp ?morgan|bank of america|"
     r"citi|ubs|barclays|according to|reports? (say|said)|the street expects?)\b", re.IGNORECASE)
-_ADOPT_RE = re.compile(r"\b(i agree|i think so too|i share|my target|i also (think|expect|see))\b",
-                       re.IGNORECASE)
+_ADOPT_RE = re.compile(
+    r"\b(i agree|i think so too|i share|my target|i also (think|expect|see)|"
+    r"that'?s my (target|view|call|number)( too| as well)?|i'?m with (them|him|her)|"
+    r"i think (they|he|she)('re| are|'s| is) right|same (view|call) here|"
+    r"i('d| would) (go|say) (the )?same|and i believe (them|that|it))\b", re.IGNORECASE)
+_REJECT_RE = re.compile(
+    r"\b(not my (call|view|target|number)|(their|his|her) call,? not mine|"
+    r"that('s| is) (their|his|her) (call|view|number)|i disagree|i don'?t (agree|buy (that|it|this))|"
+    r"i do not agree|i'?m not (convinced|buying (that|it|this))|i think (they|he|she)('re| are|'s| is) wrong|"
+    r"(way |far )?too (bullish|bearish|optimistic|pessimistic|aggressive)|i wouldn'?t (go|say) that)\b",
+    re.IGNORECASE)
 _RECOMMEND_RE = re.compile(
     r"\b(buy|buying|bought|sell|selling|sold|accumulat\w*|short\w*|avoid\w*|trim\w*|reduc\w*|"
     r"add(?:ing)? to|hold(?:ing)? (?:on|it|them|this|the)|recommend\w*|you should|i would|i'd)\b",
     re.IGNORECASE)
-_OWNERSHIP_RE = re.compile(r"\b(i own|i hold|i'm holding|my position|in my portfolio|i have a position)\b",
-                           re.IGNORECASE)
+_OWNERSHIP_RE = re.compile(
+    r"\b(i own|we own|i hold|we hold|i'?m holding|i am holding|my position|in my portfolio|"
+    r"i have a position|i'?m long|i am long|we'?re long|i'?m short|i am short|we'?re short|"
+    r"i bought|i sold|i don'?t own|i do not own|i have no position|no position in)\b", re.IGNORECASE)
+_LONG_RE = re.compile(r"\b(i'?m long|i am long|we'?re long|we are long|long (position|the stock|shares))\b",
+                      re.IGNORECASE)
+_SHORT_RE = re.compile(r"\b(i'?m short|i am short|we'?re short|we are short|short (position|the stock))\b",
+                       re.IGNORECASE)
+_NO_POSITION_RE = re.compile(r"\b(i don'?t own|i do not own|i have no position|no position in|"
+                             r"i sold (all|out|everything|my (whole )?position))\b", re.IGNORECASE)
 _TICKER_WORD = re.compile(r"(?<![\w$])\$?([A-Za-z]{1,6})(?![\w])")
+# Generic references whose referent lives in the surrounding transcript.
+_GENERIC_SUBJECT = re.compile(
+    r"^(it|its|it'?s|they|them|their|this|that|the (stock|company|name|shares|share price|coin|token|etf|"
+    r"business|firm)|this (stock|company|name|one|coin|token|business)|that (stock|company|name|one)|"
+    r"(the )?shares|the price)$", re.IGNORECASE)
+# How far back a generic reference may look for its subject: the sentences
+# just before the evidence, inside the same segment.
+COREFERENCE_SENTENCES = 2
+COREFERENCE_MAX_CHARS = 400
+# A condition is objectively observable when it names something a data
+# series or a scheduled release settles. Each rule records the source that
+# would settle it. Anything else stays a subjective condition — the claim is
+# recorded as conditional, not testable, with the specific reason.
+OBSERVABLE_CONDITIONS = (
+    (re.compile(r"\b(fed|fomc|federal reserve|central bank|ecb|boe|boj)\b.*\b(cut|cuts|cutting|hike|hikes|"
+                r"hiking|raise|raises|lower|lowers|pause|pauses|hold|holds)\b|\brate (cut|hike)s?\b",
+                re.IGNORECASE), "policy_rate_decision", "fomc_decisions"),
+    (re.compile(r"\b(cpi|inflation|pce|ppi|unemployment|jobs report|payrolls|gdp)\b.*"
+                r"\b(comes? in|prints?|above|below|under|over|hot|cool|rises?|falls?|drops?|\d)",
+                re.IGNORECASE), "macro_release", "official_statistics_release"),
+    (re.compile(r"\b(earnings|revenue|guidance|eps)\b.*\b(beat|beats|miss|misses|above|below|"
+                r"raise|raises|cut|cuts|\d)", re.IGNORECASE), "earnings_release", "company_filings"),
+    (re.compile(r"\b(approv(al|ed|es)|fda|launch(es|ed)?|ships?|delivers?|merger|acquisition|"
+                r"deal closes|ipo|listing|halving|etf approval)\b", re.IGNORECASE),
+     "scheduled_event", "public_announcements"),
+    (re.compile(r"(\$\s?\d|\d+(\.\d+)?\s?(k|thousand|million|billion|trillion|%|percent)?\b).*"
+                r"\b(above|below|under|over|beyond|past|through|breaks?|holds?|reclaims?|closes?|"
+                r"drops? to|falls? to|hits?|reach(es)?)\b|\b(above|below|under|over|beyond|past|"
+                r"breaks?|holds?|reclaims?|closes? (above|below)|drops? to|falls? to|hits?|reach(es)?)\b.*"
+                r"(\$\s?\d|\d+(\.\d+)?\s?(k|thousand|million|billion|trillion|%|percent)?\b)",
+                re.IGNORECASE), "price_level", "daily_close"),
+)
 
 
 def _norm_name(name):
@@ -562,6 +641,214 @@ def _is_question(evidence):
     return ev.endswith("?") or (bool(_QUESTION_START.match(ev)) and "?" in ev)
 
 
+def condition_observability(condition):
+    """
+    (observable, kind, data_source) for a forecast's condition. Observable
+    means a documented data source settles whether it held: a price level, a
+    policy-rate decision, a scheduled macro release, an earnings release or a
+    dated public event. A condition nobody can measure ("if management
+    executes", "if sentiment improves") is (False, "subjective", None). The
+    existence of a condition is never by itself what makes a claim
+    untestable — only an unobservable one is.
+    """
+    text = (condition or "").strip()
+    if not text:
+        return False, None, None
+    for pattern, kind, source in OBSERVABLE_CONDITIONS:
+        if pattern.search(text):
+            return True, kind, source
+    return False, "subjective", None
+
+
+def portfolio_position(evidence):
+    """The position the evidence itself supports: long / short / no_position
+    / owns_unspecified, or None when it discloses nothing."""
+    ev = evidence or ""
+    if _NO_POSITION_RE.search(ev):
+        return "no_position"
+    if _SHORT_RE.search(ev):
+        return "short"
+    if _LONG_RE.search(ev):
+        return "long"
+    if _OWNERSHIP_RE.search(ev):
+        return "owns_unspecified"
+    return None
+
+
+def host_position_from(evidence, model_value=None):
+    """
+    Where the speaker stands on a third party's view, from the evidence
+    first (explicit rejection beats adoption beats the model's word) and the
+    model's `host_position` only when the evidence says nothing.
+    """
+    ev = evidence or ""
+    if _REJECT_RE.search(ev):
+        return "rejected"
+    if _ADOPT_RE.search(ev):
+        return "adopted"
+    if model_value in ("adopted", "rejected") :
+        # The model may have read a wider context than the excerpt; an
+        # adoption it asserts without evidence in the excerpt is not acted
+        # on (it would promote a third-party view into the speaker's own).
+        return "neutral"
+    return "neutral"
+
+
+def _asset_mentions(text):
+    """[(offset, name as written)] for curated asset names and learned
+    tickers in `text`, leftmost first. Only names the dataset can already
+    identify count — a coreference is never resolved to a name nobody has
+    checked."""
+    import transcript_normalize as tn
+    found = []
+    for m in tn._ALIAS_RE.finditer(text or ""):
+        found.append((m.start(), m.group(1)))
+    learned = learned_tickers()
+    if learned:
+        for name in learned:
+            for m in re.finditer(r"\b" + re.escape(name) + r"\b", text or "", re.IGNORECASE):
+                found.append((m.start(), m.group(0)))
+    return sorted(found)
+
+
+def _asset_identity(name):
+    key = _norm_name(name)
+    return ASSET_ALIASES.get(key) or learned_tickers().get(key) or key
+
+
+def local_subject(nt, span, evidence):
+    """
+    Resolve a generic subject ("the stock", "it") from the ACTIVE local
+    subject: asset names in the evidence itself, else in the previous
+    COREFERENCE_SENTENCES sentences of the same segment (at most
+    COREFERENCE_MAX_CHARS back). Returns (name, status) where status is
+    "resolved" (exactly one active subject), "ambiguous" (two or more
+    distinct assets are active, nothing is guessed) or "unresolved" (none).
+    Uses only the transcript, never outside knowledge.
+    """
+    if span is None:
+        return None, "unresolved"
+    in_evidence = _asset_mentions(evidence)
+    if in_evidence:
+        names = {_asset_identity(n) for _, n in in_evidence}
+        return (in_evidence[-1][1], "resolved") if len(names) == 1 else (None, "ambiguous")
+    seg = nt.segment_at(span[0])
+    seg_start = seg.start_character if seg else 0
+    window_start = max(seg_start, span[0] - COREFERENCE_MAX_CHARS)
+    before = nt.text[window_start:span[0]]
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+|\n", before) if s.strip()]
+    context = " ".join(sentences[-COREFERENCE_SENTENCES:])
+    mentions = _asset_mentions(context)
+    if not mentions:
+        return None, "unresolved"
+    names = {_asset_identity(n) for _, n in mentions}
+    if len(names) > 1:
+        return None, "ambiguous"
+    return mentions[-1][1], "resolved"
+
+
+# --- Suspicious-empty check ---------------------------------------------------
+#
+# Valid JSON with claims: [] proves only that the model returned nothing. A
+# deterministic, high-recall scan of the transcript decides whether "nothing"
+# is plausible: strong indicators are an identifiable asset in the same
+# sentence as forecast or recommendation language (with or without a number);
+# moderate ones are an asset with bullish/bearish wording or with a number
+# and directional language. Educational, historical and interrogative
+# sentences never count, so an explainer full of percentages is not an alert.
+
+_SUSP_PREDICT = re.compile(
+    r"\b(will|won'?t|is going to|are going to|gonna|i expect|we expect|expects?|expecting|"
+    r"could (hit|reach|go|get|fall|drop|rally|double|triple|see|be)|should (hit|reach|go|rally|fall|be|see)|"
+    r"(price )?targets?\b|my target|by (the )?end of|next (year|quarter|month|week)|over the next|"
+    r"in the next|within (a|the next|\d)|heading (to|for|towards?)|headed (to|for|towards?)|on its way to|"
+    r"(will|could|should|may|might|gonna|going to) (double|triple|halve|crash|rally|soar|drop|fall|rise|"
+    r"climb|surge|plunge|tank|moon|explode|collapse|outperform|underperform|recover|bounce|break(out)?)|"
+    r"i see (it|them|\w+ (at|going|hitting|reaching)))\b", re.IGNORECASE)
+_SUSP_RECO = re.compile(
+    r"\b(i('| a)?m (buying|selling|adding|trimming|shorting|accumulating)|i would (buy|sell|short|avoid)|"
+    r"i'?d (buy|sell|short|avoid)|buy (it|the dip|this|these|shares|here|now)|sell (it|this|these|"
+    r"everything|here|now)|(strong )?(buy|sell|hold) rating|(a|my|our) (buy|sell|hold|avoid)\b|"
+    r"i recommend|stay away|avoid (it|this|the stock|them)|accumulate|load up|take profits?|"
+    r"(don'?t|do not) (buy|sell|touch|chase)|you should (buy|sell|own|avoid)|(this|it) is a (buy|sell|hold)|"
+    r"i'?m (long|short)|(over|under)weight)\b", re.IGNORECASE)
+_SUSP_BULLBEAR = re.compile(
+    r"\b(bullish|bearish|overvalued|undervalued|overbought|oversold|upside|downside|cheap|expensive|"
+    r"(over|under)priced|top pick|conviction)\b", re.IGNORECASE)
+_SUSP_NUMBER = re.compile(
+    r"(\$\s?\d|\d+(\.\d+)?\s?(%|percent)|\b\d+(\.\d+)?\s?(k|thousand|million|billion|trillion)\b|\b\d+x\b|"
+    r"\b(double|triple)\b)", re.IGNORECASE)
+_SUSP_EXCLUDE = re.compile(
+    r"\b(historically|for example|for instance|let'?s say|imagine|suppose|hypothetically|what is|what'?s|"
+    r"how does|how do|means that|is defined|in general|on average|typically|the formula|last (year|month|"
+    r"week|time)|back in|in (19|20)\d\d|returned|was|were|had|used to|sponsor|use code|promo)\b",
+    re.IGNORECASE)
+_SUSP_GENERIC_ASSET = re.compile(r"\b(the stock|this stock|the shares|the coin|this coin|the token|"
+                                 r"bitcoin|ethereum|s&p ?500|nasdaq|gold|oil)\b", re.IGNORECASE)
+
+
+# Auto-captions carry little punctuation, so a "sentence" can run for
+# minutes; runs longer than this many words are scanned in fixed windows.
+_SENTENCE_MAX_WORDS = 40
+_WINDOW_WORDS = 25
+
+
+def _sentences(text):
+    out = []
+    for piece in re.split(r"(?<=[.!?])\s+|\n", text or ""):
+        piece = piece.strip()
+        if not piece:
+            continue
+        words = piece.split()
+        if len(words) <= _SENTENCE_MAX_WORDS:
+            out.append(piece)
+            continue
+        for i in range(0, len(words), _WINDOW_WORDS):
+            out.append(" ".join(words[i:i + _WINDOW_WORDS]))
+    return out
+
+
+def _has_asset(sentence, allow_ticker_like):
+    if _asset_mentions(sentence) or _SUSP_GENERIC_ASSET.search(sentence):
+        return True
+    if allow_ticker_like:
+        import transcript_normalize as tn
+        return bool(tn._TICKER_LIKE.search(sentence) and tn._assets_in(sentence))
+    return False
+
+
+def suspicious_empty_check(text):
+    """
+    {"suspicious": bool, "strong": [...], "moderate": [...], "score": n}:
+    whether an empty claims array is believable for this transcript.
+    Suspicious when at least one strong sentence exists (asset + forecast or
+    recommendation language, no educational/historical marker, not a
+    question) or two moderate ones (asset + bullish/bearish wording, or
+    asset + number + prediction wording). Deterministic; never raises.
+    """
+    text = text or ""
+    letters = [c for c in text if c.isalpha()]
+    # An all-caps transcript would make every word look like a ticker.
+    allow_ticker_like = bool(letters) and sum(1 for c in letters if c.isupper()) / len(letters) < 0.6
+    strong, moderate = [], []
+    for sentence in _sentences(text):
+        if sentence.endswith("?") or _SUSP_EXCLUDE.search(sentence):
+            continue
+        if not _has_asset(sentence, allow_ticker_like):
+            continue
+        predict, reco = bool(_SUSP_PREDICT.search(sentence)), bool(_SUSP_RECO.search(sentence))
+        number, bullbear = bool(_SUSP_NUMBER.search(sentence)), bool(_SUSP_BULLBEAR.search(sentence))
+        if reco or (predict and (number or bullbear)) or (predict and re.search(
+                r"\b(fall|drop|rise|rally|double|triple|crash|soar|climb|surge|plunge|reach|hit)\b",
+                sentence, re.IGNORECASE)):
+            strong.append(sentence[:200])
+        elif bullbear or (predict and number) or predict:
+            moderate.append(sentence[:200])
+    suspicious = bool(strong) or len(moderate) >= 2
+    return {"suspicious": suspicious, "strong": strong[:5], "moderate": moderate[:5],
+            "score": 2 * len(strong) + len(moderate)}
+
+
 # --- Validation ---------------------------------------------------------------
 
 
@@ -638,26 +925,69 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
             if attribution not in ("retrospective_claim",):
                 attribution = "retrospective_claim"
             forward = False
-        # Rule: a reported third-party target is not the speaker's view.
+        # Rule: a reported third-party view is not the speaker's view unless
+        # the speaker explicitly adopts it. A reported view needs no review —
+        # it is excluded from own-view analytics by its attribution — but an
+        # own-view claim whose evidence reads like a quotation does.
+        host_position = "not_applicable"
+        third_party_origin = None
         if attribution in OWN_VIEW_ATTRIBUTIONS and _THIRD_PARTY_RE.search(evidence) \
                 and not _ADOPT_RE.search(evidence):
             review.append("possible_third_party_view")
-        if attribution in ("speaker_quoting_third_party", "speaker_describing_market_consensus",
-                           "speaker_reporting_news") and claim_type in ("forecast", "price_target", "recommendation"):
-            claim_type = "third_party_view"
+        if attribution in THIRD_PARTY_ATTRIBUTIONS or claim_type == "third_party_view":
+            host_position = host_position_from(evidence, raw.get("host_position"))
+            third_party_origin = _s(raw.get("attributed_person_or_organization"))
+            if host_position == "adopted":
+                # Adoption makes it the speaker's own current view; the
+                # origin is kept so the provenance is never lost.
+                attribution = "speaker_personal_view"
+                if claim_type == "third_party_view":
+                    claim_type = "price_target" if any(
+                        _num(raw.get(k)) is not None for k in ("target_value", "target_low", "target_high")
+                    ) else "forecast"
+            else:
+                if claim_type in ("forecast", "price_target", "recommendation", "stance",
+                                  "valuation_view", "opinion"):
+                    claim_type = "third_party_view"
+                stance = "not_applicable"
+                action = "none"
         # Rules: ownership and praise are not recommendations.
         if action not in ("none", "unclear") and not _RECOMMEND_RE.search(evidence):
             warnings.append(f"claim {i}: recommendation '{action}' not stated in evidence; set to none")
             action = "none"
-        portfolio = _enum(raw.get("portfolio_disclosure"), PORTFOLIO, "not_stated")
-        if _OWNERSHIP_RE.search(evidence) and portfolio == "not_stated":
-            portfolio = "owns_unspecified"
         if attribution == "hypothetical_example" or claim_type == "hypothetical":
             forward = False
 
         # Numbers must be in the evidence.
         target_value, target_low, target_high = _num(raw.get("target_value")), _num(raw.get("target_low")), _num(raw.get("target_high"))
         baseline, change = _num(raw.get("baseline_value")), _num(raw.get("expected_change_value"))
+        direction = _enum(raw.get("forecast_direction"), DIRECTIONS, None)
+
+        # Rule: a portfolio disclosure is not a view. "I own Tesla" carries
+        # no stance, no recommendation and no forecast; only a statement that
+        # ALSO forecasts or recommends keeps its view (with the disclosure
+        # noted beside it).
+        supported_position = portfolio_position(evidence)
+        portfolio = _enum(raw.get("portfolio_disclosure"), PORTFOLIO, "not_stated")
+        if supported_position:
+            portfolio = supported_position
+        elif portfolio in ("long", "short", "no_position"):
+            portfolio = "owns_unspecified" if _OWNERSHIP_RE.search(evidence) else "not_stated"
+        view_content = (
+            claim_type in ("forecast", "price_target", "recommendation", "valuation_view")
+            or action not in ("none", "unclear") or direction is not None
+            or any(v is not None for v in (target_value, target_low, target_high))
+            or bool(_RECOMMEND_RE.search(evidence) and action != "none")
+        )
+        if claim_type == "portfolio_disclosure" or (
+                supported_position and claim_type in ("stance", "opinion", "other", "fact") and not view_content):
+            if claim_type != "portfolio_disclosure":
+                warnings.append(f"claim {i}: ownership-only statement reclassified from {claim_type} "
+                                "to portfolio_disclosure")
+            claim_type = "portfolio_disclosure"
+            stance, action, forward = "not_applicable", "none", False
+            if portfolio in ("not_stated", "unclear"):
+                portfolio = "owns_unspecified"
         for label, value in (("target_value", target_value), ("target_low", target_low),
                              ("target_high", target_high), ("baseline_value", baseline),
                              ("expected_change_value", change)):
@@ -677,26 +1007,51 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
         if target_kind == "absolute_value" and currency is None and "$" in evidence:
             currency = "USD"
 
-        # Entity resolution.
+        # Entity resolution. A generic subject ("the stock", "it") resolves
+        # through LOCAL coreference only: the one active subject of the
+        # surrounding sentences, never a guess between two, never knowledge.
         asset_type = _enum(raw.get("asset_type"), ASSET_TYPES, None)
-        ent = resolve_entity(raw.get("subject_mention"), raw.get("ticker_spoken"), evidence,
-                             context.get("video_title"), asset_type)
+        subject = _s(raw.get("subject_mention"))
+        resolution_method, resolution_confidence = "unresolved", 0.0
+        coref_status = None
+        if subject and _GENERIC_SUBJECT.match(subject):
+            resolved_name, coref_status = local_subject(nt, span, evidence)
+            if coref_status == "resolved":
+                warnings.append(f"claim {i}: '{subject}' resolved to '{resolved_name}' from local context")
+                subject = resolved_name
+                resolution_method, resolution_confidence = "local_coreference", 0.7
+        ent = resolve_entity(subject, raw.get("ticker_spoken"), evidence, context.get("video_title"), asset_type)
+        if coref_status == "ambiguous":
+            ent.update(entity_resolution_status="ambiguous", ticker=None, ticker_source="unresolved",
+                       review_reason="ambiguous_coreference")
         if ent["review_reason"]:
             review.append(ent["review_reason"])
             if ent["review_reason"] == "missing_asset":
                 issues.append("missing_asset")
-            elif ent["review_reason"] == "ambiguous_entity":
+            elif ent["review_reason"] in ("ambiguous_entity", "ambiguous_coreference"):
                 issues.append("ambiguous_entity")
         # The asset mention must be supported: in the evidence itself, or at
         # least in the segment the evidence sits in ("the stock" one sentence
         # after the name is normal speech, a name from nowhere is not).
-        subject = _s(raw.get("subject_mention"))
-        if subject and span is not None:
+        if subject and span is not None and resolution_method == "unresolved":
             folded_subject = _fold(subject)[0]
             in_evidence = folded_subject and folded_subject in _fold(evidence)[0]
             in_segment = seg is not None and folded_subject and folded_subject in _fold(seg.normalized_text)[0]
-            if not (in_evidence or in_segment):
+            in_title = folded_subject and folded_subject in _fold(context.get("video_title") or "")[0]
+            if in_evidence:
+                resolution_method = "explicit_mention"
+                resolution_confidence = 1.0 if ent["entity_resolution_status"] == "confirmed" else 0.8
+            elif in_segment:
+                resolution_method, resolution_confidence = "local_coreference", 0.7
+            elif in_title:
+                resolution_method, resolution_confidence = "title", 0.6
+            elif ent["entity_resolution_status"] in ("confirmed", "probable"):
+                resolution_method, resolution_confidence = "curated_mapping", 0.5
                 review.append("subject_not_in_evidence")
+            else:
+                review.append("subject_not_in_evidence")
+        if ent["entity_resolution_status"] in ("ambiguous", "unresolved") and coref_status != "resolved":
+            resolution_method, resolution_confidence = "unresolved", 0.0
 
         # Horizon.
         horizon_original = _s(raw.get("horizon_original"))
@@ -704,9 +1059,11 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
         if forward and h_issue:
             issues.append(h_issue)
 
-        # Testability (forward-looking claims only).
+        # Testability (forward-looking claims only). A condition is not by
+        # itself disqualifying: an objectively observable one makes the
+        # claim conditional_testable; only an unobservable one blocks it.
         metric = _s(raw.get("forecast_metric"))
-        direction = _enum(raw.get("forecast_direction"), DIRECTIONS, None)
+        observable, condition_kind, condition_source = condition_observability(condition)
         if forward:
             if not metric and target_kind in ("none", "qualitative", None):
                 issues.append("missing_metric")
@@ -714,19 +1071,29 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
                 issues.append("missing_direction")
             if target_kind == "qualitative":
                 issues.append("purely_qualitative")
-            if condition:
-                issues.append("conditional_outcome_not_observable")
+            if condition and not observable:
+                issues.append("condition_not_objectively_observable")
             if coverage_status == "partial":
                 issues.append("incomplete_transcript_coverage")
             if ent["ticker"] is None and asset_type in (None, "stock", "crypto", "etf"):
-                issues.append("missing_asset" if not _s(raw.get("subject_mention")) else "ambiguous_entity"
+                issues.append("missing_asset" if not subject else "ambiguous_entity"
                               if ent["entity_resolution_status"] == "ambiguous" else "unresolved_entity")
         issues = list(dict.fromkeys(issues))
-        testable = forward and not issues and span is not None
+        if not forward or issues or span is None:
+            testability_type = "not_testable"
+        elif condition:
+            testability_type = "conditional_testable"
+        else:
+            testability_type = "unconditional_testable"
+        testable = testability_type != "not_testable"
 
         review_required = bool(review) or span is None or ent["entity_resolution_status"] == "ambiguous" \
             or _enum(raw.get("extraction_confidence"), EXTRACTION_CONFIDENCE, "medium") == "low"
         review = list(dict.fromkeys(review))
+        evidence_start_seconds = nt.seconds_at(span[0]) if span and hasattr(nt, "seconds_at") else None
+        evidence_end_seconds = nt.end_seconds_at(max(span[0], span[1] - 1)) if span and hasattr(nt, "end_seconds_at") else None
+        if evidence_start_seconds is None and seg is not None:
+            evidence_start_seconds, evidence_end_seconds = seg.start_seconds, seg.end_seconds
 
         claim = {
             "schema_version": SCHEMA_VERSION,
@@ -745,10 +1112,14 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
             "speaker_confidence": _enum(raw.get("speaker_confidence"), SPEAKER_CONFIDENCE, "unknown"),
             "attribution_type": attribution,
             "attributed_person_or_organization": _s(raw.get("attributed_person_or_organization")),
+            "host_position": host_position,
+            "third_party_origin": third_party_origin if attribution in OWN_VIEW_ATTRIBUTIONS and host_position == "adopted" else None,
             "claim_type": claim_type,
             "is_forward_looking": forward,
             "subject_mention": _s(raw.get("subject_mention")),
             "canonical_entity_name": ent["canonical_entity_name"],
+            "entity_resolution_method": resolution_method,
+            "entity_resolution_confidence": resolution_confidence,
             "ticker_spoken": (_s(raw.get("ticker_spoken")) or "").lstrip("$").upper() or None,
             "ticker": ent["ticker"],
             "ticker_source": ent["ticker_source"],
@@ -778,6 +1149,13 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
             "forecast_start_date": start_d.isoformat() if start_d else None,
             "forecast_end_date": end_d.isoformat() if end_d else None,
             "condition": condition,
+            "condition_text": condition,
+            "condition_observable": bool(observable) if condition else None,
+            "condition_kind": condition_kind if condition else None,
+            "condition_status": "not_evaluated" if condition else None,
+            "condition_evaluation_date": None,
+            "condition_evidence": None,
+            "condition_data_source": condition_source if condition else None,
             "trigger": _s(raw.get("trigger")),
             "certainty_original": _s(raw.get("certainty_original")),
             "certainty_level": certainty,
@@ -788,11 +1166,12 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
             "counterarguments": _strlist(raw.get("counterarguments")),
             "portfolio_disclosure": portfolio,
             "evidence_text": evidence,
-            "evidence_start_seconds": seg.start_seconds if seg else None,
-            "evidence_end_seconds": seg.end_seconds if seg else None,
+            "evidence_start_seconds": evidence_start_seconds,
+            "evidence_end_seconds": evidence_end_seconds,
             "evidence_start_character": span[0] if span else None,
             "evidence_end_character": span[1] if span else None,
             "testable": testable,
+            "testability_type": testability_type,
             "testability_issues": issues,
             "extraction_confidence": _enum(raw.get("extraction_confidence"), EXTRACTION_CONFIDENCE, "medium"),
             "review_required": review_required,
@@ -837,7 +1216,33 @@ def is_headline_claim(claim):
         and claim.get("attribution_type") in OWN_VIEW_ATTRIBUTIONS
         and not claim.get("repeat_of_claim_id")
         and not claim.get("superseded")
+        and claim.get("schema_version") != "legacy"
     )
+
+
+def carries_view(claim):
+    """
+    True when a claim is an investment VIEW that stance analytics may count:
+    headline-eligible, of a view-bearing claim type, with a bullish / bearish
+    / neutral / mixed stance. A portfolio disclosure, a question, a third
+    party's view or a retrospective never passes, whatever stance it carries.
+    """
+    return (
+        is_headline_claim(claim)
+        and claim.get("claim_type") in VIEW_CLAIM_TYPES
+        and claim.get("stance") in ("bullish", "bearish", "neutral", "mixed")
+    )
+
+
+def record_condition_outcome(claim, status, evaluation_date=None, evidence=None, data_source=None):
+    """Apply an observed condition outcome to a conditional claim (in
+    memory). Returns the claim; an unknown status is recorded as 'unknown'."""
+    claim["condition_status"] = status if status in CONDITION_STATUSES else "unknown"
+    claim["condition_evaluation_date"] = evaluation_date
+    claim["condition_evidence"] = evidence
+    if data_source:
+        claim["condition_data_source"] = data_source
+    return claim
 
 
 # --- Compatibility view -------------------------------------------------------
@@ -870,8 +1275,7 @@ def claims_to_legacy_signals(claims):
     Returns None when no claim is usable, so callers never mistake a failed
     or empty extraction for "no assets".
     """
-    usable = [c for c in claims if is_headline_claim(c)
-              and c.get("subject_mention") and c.get("stance") in ("bullish", "bearish", "neutral", "mixed")]
+    usable = [c for c in claims if carries_view(c) and c.get("subject_mention")]
     if not claims:
         return {"assets": [], "market_sentiment": "neutral", "topics": [], "derived_from": "claims"}
     groups = {}
