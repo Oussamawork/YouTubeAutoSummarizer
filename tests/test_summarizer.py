@@ -21,21 +21,76 @@ class _Hdr:
         self.headers = headers
 
 
-def test_truncate_short_unchanged():
-    assert summarizer._truncate_transcript("short") == "short"
+def test_no_transcript_truncation_remains():
+    # The 120,000-char head/tail cut is gone for good: nothing in the module
+    # trims, caps or marks a transcript. A long video's middle — the second
+    # asset, the target, the condition — must reach the model.
+    for name in ("_truncate_transcript", "_head_and_tail", "_fit_to_provider",
+                 "LLM_MAX_TRANSCRIPT_CHARS", "GEMINI_MAX_INPUT_CHARS",
+                 "GROQ_MAX_INPUT_CHARS", "TRANSCRIPT_TRUNCATION_MARKER"):
+        assert not hasattr(summarizer, name), name
+    import inspect
+    assert "[transcript truncated]" not in inspect.getsource(summarizer)
 
 
-def test_truncate_long_keeps_both_ends():
-    # The END carries the price targets and conclusions, so a head-only cut
-    # would discard exactly what the summary exists to capture.
-    limit = summarizer.LLM_MAX_TRANSCRIPT_CHARS
-    long = "H" * (limit) + "M" * 500 + "T" * limit
-    out = summarizer._truncate_transcript(long)
-    assert len(out) == limit                       # honors the budget exactly
-    assert summarizer.TRANSCRIPT_TRUNCATION_MARKER in out
-    assert out.startswith("H")                     # opening thesis kept
-    assert out.endswith("T")                       # closing targets kept
-    assert "M" not in out                          # the middle is what goes
+def _ok_post(sent):
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok."}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 3}}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.append(json)
+        return R()
+    return fake_post
+
+
+def test_long_transcript_is_sent_in_full_when_it_fits(monkeypatch):
+    # 150,000 chars — over the old cap — with a unique marker in the MIDDLE.
+    # With a 1M-token model the complete request fits, so the marker must be
+    # in the request that leaves the process.
+    sent = []
+    monkeypatch.setattr(summarizer.requests, "post", _ok_post(sent))
+    marker = "UNIQUE-MIDDLE-MARKER-XYZ"
+    transcript = "a" * 75000 + " " + marker + " " + "b" * 75000
+    provider = {"name": "gemini-3.7-flash", "model": "gemini-3.7-flash",
+                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "api_key": "k"}
+    assert summarizer._call_provider(provider, transcript, "Title") == "ok."
+    body = sent[0]["messages"][1]["content"]
+    assert marker in body
+    assert transcript in body                      # verbatim, nothing cut
+    assert "truncated" not in body
+    assert summarizer.LAST_CALL_TELEMETRY["transcript_chars"] == len(transcript)
+    assert summarizer.LAST_CALL_TELEMETRY["reported_input_tokens"] == 12
+    assert summarizer.LAST_CALL_TELEMETRY["finish_reason"] == "stop"
+
+
+def test_max_tokens_is_an_output_cap_not_an_input_limit(monkeypatch):
+    # A tiny max_tokens must not shrink what the model reads.
+    sent = []
+    monkeypatch.setattr(summarizer.requests, "post", _ok_post(sent))
+    transcript = "word " * 30000
+    provider = {"name": "gemini-3.7-flash", "model": "gemini-3.7-flash",
+                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "api_key": "k"}
+    summarizer._call_provider(provider, transcript, max_tokens=64)
+    assert sent[0]["max_tokens"] == 64
+    assert transcript.strip() in sent[0]["messages"][1]["content"]
+
+
+def test_request_over_model_capacity_is_reported_not_trimmed(monkeypatch):
+    # A model with a small window gets INPUT_TOO_LARGE, and no request is sent.
+    sent = []
+    monkeypatch.setattr(summarizer.requests, "post", _ok_post(sent))
+    monkeypatch.setenv("MODEL_CAPABILITIES_JSON",
+                       '{"tiny": {"input_token_limit": 4000, "output_token_limit": 1000}}')
+    import model_capabilities
+    model_capabilities.reset_cache()
+    provider = {"name": "tiny", "model": "tiny", "base_url": "http://x", "api_key": "k"}
+    out = summarizer._call_provider(provider, "x " * 20000)
+    assert out == summarizer.INPUT_TOO_LARGE_SENTINEL
+    assert sent == []
 
 
 def test_build_user_message_with_title():
@@ -188,26 +243,27 @@ def test_was_truncated_survives_hostile_shapes():
         assert summarizer._was_truncated(data) is False
 
 
-def test_prompt_trimmed_to_provider_input_budget(monkeypatch):
-    # The global cap is sized for the widest context in the chain; a smaller
-    # fallback would otherwise get a prompt it must reject outright.
-    sent = {}
-
-    class R:
-        status_code = 200
-
-        def json(self):
-            return {"choices": [{"message": {"content": "ok."}, "finish_reason": "stop"}]}
-
-    def fake_post(url, headers=None, json=None, timeout=None):
-        sent["len"] = len(json["messages"][1]["content"])
-        return R()
-
-    monkeypatch.setattr(summarizer.requests, "post", fake_post)
-    provider = dict(_provider(), max_input_chars=500)
-    summarizer._call_provider(provider, "x" * 5000)
-    # Exactly the budget — the marker must fit inside it, not extend past it.
-    assert sent["len"] == 500
+def test_each_fallback_model_is_judged_on_its_own_window(monkeypatch):
+    # The chain: a small-window model first, a 1M-token model second. The
+    # small one must neither receive a trimmed transcript nor block the wide
+    # one; the summary comes from the model that can read all of it.
+    sent = []
+    monkeypatch.setattr(summarizer.requests, "post", _ok_post(sent))
+    monkeypatch.setenv("MODEL_CAPABILITIES_JSON",
+                       '{"small": {"input_token_limit": 4000, "output_token_limit": 1000}}')
+    import model_capabilities
+    model_capabilities.reset_cache()
+    small = {"name": "small", "model": "small", "base_url": "http://x", "api_key": "k"}
+    wide = {"name": "gemini-3.7-flash", "model": "gemini-3.7-flash",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "api_key": "k"}
+    monkeypatch.setattr(summarizer, "_provider_configs", lambda: [small, wide])
+    # Bound the chunked path on the small model so the test proves the
+    # per-model decision rather than the chunker (covered separately).
+    monkeypatch.setattr(summarizer, "MAX_SUMMARY_CHUNKS", 0)
+    transcript = "x " * 20000
+    assert summarizer.summarize_transcript(transcript) == "ok."
+    assert [p["model"] for p in sent] == ["gemini-3.7-flash"]
+    assert transcript.strip() in sent[0]["messages"][1]["content"]
 
 
 def test_untruncated_response_passes_through(monkeypatch):

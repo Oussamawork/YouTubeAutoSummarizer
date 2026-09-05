@@ -102,9 +102,15 @@ This skips the channel scan and dedup state entirely — useful for any video, s
 | `LLM_MAX_TOKENS` | `2000` | Response budget per summary call. A response cut off at the cap is retried with double the budget and deferred (never delivered half-written) if it still truncates. |
 | `LLM_MAX_TOKENS_CEILING` / `LLM_MAX_ESCALATIONS` | `8000` / `2` | Escalation bound. The effective ceiling is at least `start budget x 2^escalations`, so a call configured above `8000` can still escalate rather than silently losing the feature. |
 | `LLM_REASONING_EFFORT` | `low` | Thinking budget for reasoning models. Gemini 3 counts thinking tokens against `max_tokens`, so an uncapped budget spends the response allowance on thinking and returns a few hundred characters cut mid-sentence. Set empty to omit the parameter. |
-| `LLM_MAX_TRANSCRIPT_CHARS` | `120000` | Transcript chars sent to the model (~30k tokens, several times the longest realistic video). Over-long transcripts are cut in the MIDDLE, keeping the opening thesis and the closing price targets. Free tiers meter tokens per minute and an escalation re-sends the whole input, so a near-context-window request gets rejected rather than producing a better summary. |
-| `GEMINI_MAX_INPUT_CHARS` / `GROQ_MAX_INPUT_CHARS` | `120000` / `12000` | Per-provider input budgets, trimmed to fit at call time. Groq reserves `max_tokens` against its per-minute budget at admission, so its prompt has to be far smaller than its context window suggests. |
-| `LLM_COMBINED_MAX_TOKENS` | `3000` | Budget for the combined summary+signals call, which must fit both plus JSON escaping. |
+| `SUMMARY_MAX_OUTPUT_TOKENS` | `4000` | Output allowance for a plain summary call (alias of `LLM_MAX_TOKENS`). Caps what the model **writes**, never what it reads: the complete transcript is always sent. |
+| `COMBINED_MAX_OUTPUT_TOKENS` | `8000` | Output allowance for the combined summary+claims call (alias `LLM_COMBINED_MAX_TOKENS`); `CLAIMS_MAX_OUTPUT_TOKENS` (`6000`) for a claims-only call. |
+| `CONTEXT_SAFETY_MARGIN_TOKENS` | `2048` | Headroom kept under a model's computed input capacity. Whether a request fits is decided per model, in tokens, over the complete request (`token_budget.py`); a request that does not fit is chunked with full coverage, never trimmed. |
+| `LLM_LIVE_CAPABILITIES` / `LLM_LIVE_COUNT_TOKENS` | `true` / `true` | Use Gemini's `models.get` (input/output limits, cached a week in `data/model_capabilities.json`) and `countTokens` (exact request size). Off falls back to the dated registry in `model_capabilities.py` and a conservative 3-chars-per-token estimate. `MODEL_CAPABILITIES_JSON` declares limits for a proxy or unknown model. |
+| `GEMINI_FREE_TIER_TPM` | `250000` | Free-tier tokens-per-minute cap, applied as a per-request input bound for Gemini models (a single request over it is rejected outright). `0` disables. |
+| `MAX_SUMMARY_CHUNKS` / `CHUNK_OVERLAP_TOKENS` | `12` / `300` | Bounds for complete-coverage chunked summarization of a transcript that does not fit one request (each chunk is one metered request; a quota pre-check defers the video when the remaining requests cannot finish it). |
+| `PERSIST_TRANSCRIPTS` | `true` | Store raw transcripts gzip'd under `data/transcripts/` before any cleaning, so research can be reprocessed without another transcript credit. |
+| `EXHAUSTIVE_RESEARCH_MODE` / `RESEARCH_CHUNK_TOKENS` | `false` / `12000` | High-recall research: extract claims chunk by chunk even when the transcript fits. Multiplies requests; affects only the research branch. |
+| `RESEARCH_BACKFILL_MAX_VIDEOS` | `5` | Videos per run for `research_backfill.py --retry` (research retries from stored transcripts). |
 | `MAX_VIDEOS_PER_RUN` | `0` (no cap) | Max videos processed per channel per run; older ones go first, the rest wait for the next run. `0` processes everything the channel has due. |
 | `NO_TRANSCRIPT_MAX_ATTEMPTS` | `8` | Runs to retry a video whose captions aren't up yet. Giving up needs **this and** `NO_TRANSCRIPT_MIN_HOURS` to be satisfied. |
 | `NO_TRANSCRIPT_MIN_HOURS` | `36` | Never write a video off before it has been chased this long, whatever the polling rate. An attempt count alone is the wrong unit: at one run every two hours, three attempts is six hours, and auto-captions routinely take longer to appear. |
@@ -159,6 +165,10 @@ least want to miss first — the ones at the bottom absorb whatever is left.
 | `TWELVEDATA_API` (secret) | — | Price data for implied upside, the accuracy scorecard and the price-target chart ([twelvedata.com](https://twelvedata.com), free tier: 800 requests/day, 8/min). Without it prices are unavailable and the jobs say so once per run (the keyless Stooq source it replaced sat behind a browser check and returned nothing to a server, verified 2026-08-17, and has been removed). |
 | `TWELVEDATA_MAX_REQUESTS` | `120` | Ceiling on price requests per run, so a paced run can't outlast its workflow timeout. The Sunday cache warmer raises it to 600. |
 | `SUPADATA_RESET_DAY` | `1` | Day of the month the plan's credits reset. Supadata resets on the plan's anniversary, not the 1st — the dashboard shows it ("Credits reset on 08/17" → set `17`). Only consulted when pacing is enabled: it makes the pacing think the cycle ends sooner than it does; a per-day ceiling of budget ÷ 28 limits the damage, but set it correctly. |
+
+### Research dataset (claims) and market signals (on by default):
+
+Every delivered summary also produces **atomic, evidence-backed claims** — one record per asset × metric × direction × target × horizon × condition, each with a verbatim excerpt located in the normalized transcript, the speaker attribution (own view / guest / quoted analyst / question / retrospective), the ticker only when spoken or curated, and a deterministic testability verdict. They live in `data/research/claims.jsonl`; the research ledger `data/research/research_state.json` tracks extraction independently of Telegram delivery (a failed extraction is `failed_retryable` and retried by `research_backfill.py --retry` from the stored transcript, never recorded as "no claims"). `python research_analytics.py --dry-run` prints the data-quality header, consensus (one current view per source per asset per horizon bucket), stance changes and the scorecard. `data/signals.jsonl` continues to be written, now **derived** from the validated claims (`claims.claims_to_legacy_signals` documents the reduction).
 
 ### Market signals (on by default):
 
@@ -250,16 +260,15 @@ The transcript is summarized by a large language model through the OpenAI-compat
 
 The video **title** is passed alongside the transcript to ground the model on the topic. Output is kept plain-text (no markdown) because the Telegram sender HTML-escapes the summary, so `**bold**`/`#` markers would not render.
 
-To avoid blowing past model context windows and to keep token cost predictable, very long transcripts are **truncated** to a configurable character cap before being sent, with a `...[transcript truncated]` marker appended and a warning logged.
+The **complete transcript** is sent every time. Before a request leaves the process it is measured in tokens — system prompt, title, transcript and the JSON envelope together — against the selected model's own input limit (live metadata when available, a dated registry otherwise). A request that does not fit is never trimmed: the transcript is summarized in ordered, overlapping chunks that cover every character, the chunk notes are merged by one final call, and partial coverage is never delivered. The old 120,000-character cap that cut the middle out of long videos is gone; see `docs/tdd-full-transcript-claims.md`.
 
 Tunable summarization environment variables (all optional, with sensible defaults):
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LLM_MAX_TOKENS` | `1500` | Max tokens for the generated summary. |
+| `SUMMARY_MAX_OUTPUT_TOKENS` | `4000` | Output allowance for the generated summary (input capacity is the model's own limit). |
 | `LLM_TEMPERATURE` | `0.3` | Sampling temperature (lower = more faithful). |
-| `LLM_TIMEOUT` | `60` | Per-request timeout in seconds. |
-| `LLM_MAX_TRANSCRIPT_CHARS` | `48000` | Character cap on transcript text sent to the model. |
+| `LLM_TIMEOUT` | `120` | Per-request timeout in seconds. |
 
 ### Telegram Integration:
 The script uses the Telegram Bot API to send summarized content directly to a Telegram channel.
