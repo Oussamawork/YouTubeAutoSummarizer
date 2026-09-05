@@ -88,7 +88,14 @@ video-id → retry record for
 deferred videos (captions not up yet → retried until `NO_TRANSCRIPT_MAX_ATTEMPTS`
 *and* `NO_TRANSCRIPT_MIN_HOURS` are both exceeded, and no more often than
 `PENDING_RETRY_MIN_HOURS`; LLM quota exhausted). Deciding a video advances the
-watermark; deferring does not.
+watermark; deferring does not. **Delivery is part of deciding**: a final
+outcome whose message Telegram has not accepted yet is held in the record's
+`undelivered` block (the finished text plus the entry fields) and re-sent on a
+later run without refetching the transcript or calling the LLM. Held records
+survive the video leaving the RSS feed. A digest's videos are finalized only
+once the digest itself has been accepted. Runs stop starting new videos after
+`RUN_DEADLINE_MINUTES` so buffered digests always get flushed before the
+workflow timeout.
 
 ## Design docs
 - `docs/tdd-transcript-budget.md` — measured findings on transcript-credit

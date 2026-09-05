@@ -175,7 +175,6 @@ def save_state(file_path, seen):
                 pass
 
 
-# Function to save results to a JSON file
 def title_matches(title, keywords):
     """
     True when `title` mentions any keyword as a whole word (case-insensitive),
@@ -214,14 +213,6 @@ def append_jsonl(path, record):
         log_error(f"Could not append record to {path}: {e}")
         return False
 
-
-def save_to_json(data, filename):
-    try:
-        with open(filename, 'w') as json_file:
-            json.dump(data, json_file, indent=4)
-        print(f"Data saved to {filename}")
-    except Exception as e:
-        print(f"Error saving data to JSON file: {e}")
 
 def clean_summary(summary: str) -> str:
     """
