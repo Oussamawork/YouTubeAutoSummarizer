@@ -9,6 +9,7 @@ import requests
 from dotenv import load_dotenv
 
 import price_cache
+import scorecard_pricing as sp
 from helpers import env_int
 from log import log_info, log_warn, log_error
 from sendToTelegram import send_telegram_text
@@ -17,11 +18,18 @@ from signals_data import (
     UNPRICEABLE_TICKERS,
 )
 
-# Weekly per-channel accuracy scorecard: joins the directional calls recorded
-# in data/signals.jsonl with daily price data (Twelve Data) and measures each
-# channel's hit rate — was the price higher after a bullish call, lower after a
-# bearish one — at 7- and 30-day horizons. Runs every Friday from
-# weekly-scorecard.yml; silently skips until the dataset spans at least a week.
+# Weekly per-source accuracy scorecard (Fridays, weekly-scorecard.yml).
+#
+# PRODUCTION PATH (main): canonical claims through canonical_claims.load_
+# canonical_claims, scored by research_analytics.scorecard under the rules in
+# scorecard_pricing (exchange-aware next-close entry, split-adjusted prices
+# with recorded provenance, per-claim benchmarks or an honest null). It is
+# reported as EXPERIMENTAL and unranked until SCORECARD_RANKINGS=true.
+#
+# LEGACY PATH (evaluate / build_scorecard / generate_scorecard, --legacy):
+# the original fixed 7/30-day directional hit rate over data/signals.jsonl —
+# kept as a compatibility consumer of the legacy view and for
+# market_pulse's track-record weighting, never as the headline scorecard.
 # Hit rates over tiny samples are noise: the report always shows sample sizes,
 # and remains research input, not investment advice.
 
@@ -282,6 +290,10 @@ def fetch_prices_twelvedata(symbol, start, end, api_key):
         "symbol": td_symbol, "interval": "1day",
         "start_date": start.isoformat(), "end_date": end.isoformat(),
         "order": "ASC", "format": "JSON", "outputsize": 5000, "apikey": api_key,
+        # Split-adjusted at minimum ("splits", the provider default); "all"
+        # folds dividends in for a total-return series. Recorded with the
+        # closes so a cached series is never mistaken for the other kind.
+        "adjust": sp.PRICE_ADJUSTMENT,
     }
     # A bare ticker listed on several exchanges is rejected with a 400 asking
     # for disambiguation — that is what NU (Nu Holdings), AMTM (Amentum) and
@@ -350,14 +362,25 @@ def fetch_prices(symbol, start, end, cache=None):
     """
     cache = price_cache.active() if cache is None else cache
     entry = cache.get(symbol)
-    if price_cache.covered(entry, start, end):
+    adjustment = sp.adjustment_label()
+    if price_cache.covered(entry, start, end, adjustment):
         return price_cache.slice_range(entry, start, end)
 
     prices = fetch_prices_live(symbol, start, end)
     if prices:
-        price_cache.remember(cache, symbol, start, end, prices)
+        price_cache.remember(cache, symbol, start, end, prices, adjustment)
         return price_cache.slice_range(cache[symbol], start, end)
+    if entry and (entry.get("adjustment") or "split_adjusted") != adjustment:
+        return {}  # never serve a differently adjusted series as this one
     return price_cache.slice_range(entry, start, end)
+
+
+# What every series served by fetch_prices is: the scorecard records it per
+# scored claim and refuses series whose adjustment it does not know.
+fetch_prices.price_provenance = {
+    "provider": "twelvedata", "adjustment": sp.adjustment_label(),
+    "corporate_action_status": sp.adjustment_label(),
+}
 
 
 def price_on_or_after(prices, day, max_lag=MAX_PRICE_LAG_DAYS):
@@ -489,14 +512,47 @@ def generate_scorecard(today=None, path=SIGNALS_FILE, price_fetcher=fetch_prices
     return build_scorecard(stats, today)
 
 
+def generate_canonical_scorecard(today=None, price_fetcher=fetch_prices, claims=None):
+    """
+    The production scorecard: canonical claims (active runs, no legacy rows,
+    no repeats) scored under scorecard_pricing. Returns "" when nothing is
+    scorable yet. Experimental and unranked unless SCORECARD_RANKINGS=true.
+    """
+    import canonical_claims
+    import research_analytics as ra
+    today = today or datetime.now(timezone.utc).date()
+    claims = canonical_claims.load_canonical_claims() if claims is None else claims
+    if not claims:
+        log_info("No canonical claims yet; the scorecard starts once research data accumulates.")
+        return ""
+    sc = ra.scorecard(claims, today, price_fetcher)
+    excluded, min_sample = sc.pop("_excluded"), sc.pop("_min_sample")
+    rankings_on = sc.pop("_rankings_enabled")
+    if not sc:
+        log_info(f"No matured, scorable forecasts yet (excluded: {excluded}).")
+        return ""
+    rankable = ra.rankable_sources(sc, min_sample)
+    lines = [f"🎯 Source Scorecard — as of {today.isoformat()} "
+             f"({'ranked' if rankings_on and rankable else sp.SCORECARD_EXPERIMENTAL_LABEL})",
+             "Data: canonical claims (data/research/claims.jsonl, active runs only)", "",
+             ra.format_scorecard_lines(sc, excluded, min_sample, rankings_on, rankable), ""]
+    conditional = ra.format_conditional_report(ra.conditional_forecast_report(claims, today))
+    if conditional:
+        lines += [conditional, ""]
+    lines.append(DISCLAIMER)
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Per-channel accuracy scorecard from data/signals.jsonl + daily prices"
+        description="Per-source accuracy scorecard from canonical claims + daily prices"
     )
     parser.add_argument("--dry-run", action="store_true", help="Print instead of sending")
+    parser.add_argument("--legacy", action="store_true",
+                        help="Use the legacy 7/30-day scorecard over data/signals.jsonl (compatibility only)")
     args = parser.parse_args()
 
-    scorecard = generate_scorecard()
+    scorecard = generate_scorecard() if args.legacy else generate_canonical_scorecard()
     if not scorecard:
         log_info("Nothing to score this week; skipping the scorecard.")
         return 0

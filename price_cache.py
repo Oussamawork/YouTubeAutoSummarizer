@@ -73,7 +73,11 @@ def load(path=CACHE_FILE):
                 closes[parsed] = float(close)
             except (TypeError, ValueError):
                 continue
-        cache[symbol] = {"from": start, "to": end, "closes": closes}
+        # Entries written before adjustment was recorded came from the
+        # provider's default request (Twelve Data adjust=splits), so they are
+        # split-adjusted; the field is filled in rather than left ambiguous.
+        cache[symbol] = {"from": start, "to": end, "closes": closes,
+                         "adjustment": entry.get("adjustment") or "split_adjusted"}
     return cache
 
 
@@ -92,6 +96,7 @@ def save(cache, path=CACHE_FILE, today=None):
             "from": max(entry["from"], cutoff).isoformat(),
             "to": entry["to"].isoformat(),
             "closes": closes,
+            "adjustment": entry.get("adjustment") or "split_adjusted",
         }
     if not write_json_atomic(path, {"version": CACHE_VERSION, "symbols": symbols}, indent=1):
         return False
@@ -100,10 +105,14 @@ def save(cache, path=CACHE_FILE, today=None):
     return True
 
 
-def covered(entry, start, end):
+def covered(entry, start, end, adjustment=None):
     """True when the cached range spans [start, end] — i.e. the request can be
-    answered without touching the network."""
-    return bool(entry) and entry["from"] <= start and entry["to"] >= end
+    answered without touching the network — and, when `adjustment` is given,
+    the cached closes carry that adjustment (a split-adjusted series never
+    answers a total-return request, or the reverse)."""
+    if not entry or entry["from"] > start or entry["to"] < end:
+        return False
+    return adjustment is None or (entry.get("adjustment") or "split_adjusted") == adjustment
 
 
 def slice_range(entry, start, end):
@@ -113,18 +122,23 @@ def slice_range(entry, start, end):
     return {d: c for d, c in entry["closes"].items() if start <= d <= end}
 
 
-def remember(cache, symbol, start, end, closes):
+def remember(cache, symbol, start, end, closes, adjustment=None):
     """Merge a freshly fetched range into the cache, widening the symbol's
     covered range. `start`/`end` are what was *asked for*, so a symbol that
     simply had no trading days in the window still counts as covered and is
-    not asked for again."""
+    not asked for again. A series under a different adjustment replaces the
+    old one outright rather than being merged into it."""
     entry = cache.get(symbol)
+    if entry and adjustment and (entry.get("adjustment") or "split_adjusted") != adjustment:
+        entry = None
     if entry:
         entry["from"] = min(entry["from"], start)
         entry["to"] = max(entry["to"], end)
         entry["closes"].update(closes)
+        entry.setdefault("adjustment", adjustment or "split_adjusted")
     else:
-        cache[symbol] = {"from": start, "to": end, "closes": dict(closes)}
+        cache[symbol] = {"from": start, "to": end, "closes": dict(closes),
+                         "adjustment": adjustment or "split_adjusted"}
     return cache[symbol]
 
 

@@ -21,28 +21,41 @@ import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
-from claims import is_headline_claim, OWN_VIEW_ATTRIBUTIONS
+from claims import is_headline_claim, carries_view, OWN_VIEW_ATTRIBUTIONS
 from log import log_info, log_warn
+import canonical_claims
 import research_state
+import scorecard_pricing as sp
 
 BUCKETS = ("short", "medium", "long", "unspecified")
 # Rank a source only once it has this many matured forecasts. An analytical
 # rule, configurable — not a claim of statistical reliability.
 MIN_SCORECARD_SAMPLE = int(os.getenv("MIN_SCORECARD_SAMPLE") or 20)
-MAX_PRICE_LAG_DAYS = 5
-BENCHMARK_SYMBOL = "spy.us"
+MAX_PRICE_LAG_DAYS = sp.MAX_PRICE_LAG_DAYS
 
 SCORECARD_RULES = {
-    "publication_timestamp": "published_at from the video feed (UTC)",
-    "entry_price": "first daily close ON or AFTER the publication date (next-close rule), "
-                   f"within {MAX_PRICE_LAG_DAYS} calendar days",
-    "evaluation_date": "forecast_end_date (resolved by claims.resolve_horizon); evaluated at the "
-                       f"first close on or after it, within {MAX_PRICE_LAG_DAYS} days",
-    "timezone": "UTC dates; the price provider's close is its venue's session close",
-    "trading_calendar": "weekends/holidays roll forward to the next available close",
-    "adjusted_prices": "provider daily closes as served (Twelve Data time_series, unadjusted)",
-    "benchmark": f"{BENCHMARK_SYMBOL} over the same entry/evaluation dates when available",
-    "conditional_forecasts": "excluded (testability issue conditional_outcome_not_observable)",
+    "status": "experimental; source rankings disabled unless SCORECARD_RANKINGS=true",
+    "publication_timestamp": "published_at from the video feed (UTC instant)",
+    "entry_price": "next-close rule: the first session close STRICTLY AFTER the publication instant, "
+                   "placed against the instrument's exchange session in the exchange's timezone; a "
+                   "publication after the close, on a weekend or on a holiday takes the next trading "
+                   "day's close; a publication without a time of day takes the next trading day's close "
+                   f"(conservative); within {MAX_PRICE_LAG_DAYS} calendar days of that day",
+    "crypto": "24/7 assets have no session: entry = the close of the UTC day the video was published "
+              "(the first daily close after publication)",
+    "evaluation_date": "forecast_end_date (claims.resolve_horizon); the first trading-day close on or "
+                       f"after it, within {MAX_PRICE_LAG_DAYS} days",
+    "trading_calendar": "NYSE holiday rules for US listings; weekday-only calendars elsewhere "
+                        "(calendar_confidence recorded); continuous for crypto",
+    "adjusted_prices": "split-adjusted at minimum (provider adjust=splits); total-return-adjusted when "
+                       "PRICE_ADJUSTMENT=all (dividends folded in); unadjusted or unknown series are "
+                       "refused; provider, adjustment, corporate-action status, currency, requested and "
+                       "resolved dates are recorded per scored claim",
+    "benchmark": "resolved per claim by asset type, exchange country and sector (scorecard_pricing."
+                 "BENCHMARKS, BENCHMARKS_JSON override); null when none is defensible; sources scored "
+                 "under different benchmark methods are not ranked against each other",
+    "conditional_forecasts": "excluded from unconditional rankings; scored separately only once their "
+                             "condition is recorded as met (condition_evaluations.jsonl)",
     "maturity": "a forecast is scored only once its evaluation date has passed",
 }
 
@@ -226,8 +239,8 @@ def latest_views(claims):
     for c in sorted(claims, key=lambda c: (c.get("published_at") or "", c.get("extracted_at") or "")):
         key = _asset_key(c)
         direction = _direction_of(c)
-        if not key or not is_headline_claim(c):
-            continue
+        if not key or not carries_view(c):
+            continue  # disclosures, questions, third-party views never count
         bucket = c.get("horizon_bucket") or "unspecified"
         stance = direction or ("neutral" if c.get("stance") in ("neutral", "mixed") else None)
         if stance is None:
@@ -265,7 +278,7 @@ def find_flips(claims):
     directional stance. Both claims and both pieces of evidence are kept."""
     history = defaultdict(list)
     for c in sorted(claims, key=lambda c: (c.get("published_at") or "", c.get("extracted_at") or "")):
-        if not is_headline_claim(c):
+        if not carries_view(c):
             continue
         direction = _direction_of(c)
         key = _asset_key(c)
@@ -295,14 +308,7 @@ def find_flips(claims):
 
 
 def _symbol(claim):
-    ticker = (claim.get("ticker") or "").lower()
-    if not ticker:
-        return None
-    if claim.get("asset_type") == "crypto":
-        return f"{ticker}usd"
-    if claim.get("asset_type") in ("stock", "etf", None):
-        return f"{ticker}.us"
-    return None
+    return canonical_claims.priceable_symbol(claim)
 
 
 def _on_or_after(series, day):
@@ -313,24 +319,29 @@ def _on_or_after(series, day):
     return None, None
 
 
-def scorecard(claims, today, price_fetcher, min_sample=None):
+def scorecard(claims, today, price_fetcher, min_sample=None, include_conditional=False):
     """
-    Evaluate matured, testable, headline forecasts. Returns
-    {source: {"n": int, "direction_hits": int, "target_hits": int,
-              "target_n": int, "raw_returns": [...], "excess_returns": [...],
-              "mfe": [...], "mae": [...]}} plus a "_excluded" Counter saying
-    why claims were not scored. Sources under `min_sample` are reported but
-    not ranked (see build_report).
+    Evaluate matured, testable, headline forecasts under scorecard_pricing:
+    exchange-aware next-close entry, split-adjusted (at least) series with
+    recorded provenance, a per-claim benchmark or an honest null.
+
+    Returns {source: {"n", "direction_hits", "target_hits", "target_n",
+    "raw_returns", "excess_returns", "mfe", "mae", "benchmark_methods",
+    "scored": [per-claim records with provenance]}} plus "_excluded" (why
+    claims were not scored), "_min_sample" and "_rankings_enabled".
+    Unconditional forecasts only, unless `include_conditional` — and then
+    only those whose condition is recorded as met.
     """
     min_sample = MIN_SCORECARD_SAMPLE if min_sample is None else min_sample
     excluded = Counter()
     stats = defaultdict(lambda: {"n": 0, "direction_hits": 0, "target_hits": 0, "target_n": 0,
-                                 "raw_returns": [], "excess_returns": [], "mfe": [], "mae": []})
+                                 "raw_returns": [], "excess_returns": [], "mfe": [], "mae": [],
+                                 "benchmark_methods": Counter(), "scored": []})
     series_cache = {}
 
-    def series(symbol, start, end):
+    def series(symbol, start, end, exchange):
         if symbol not in series_cache:
-            series_cache[symbol] = price_fetcher(symbol, start, end) or {}
+            series_cache[symbol] = sp.series_from_fetcher(price_fetcher, symbol, start, end, exchange)
         return series_cache[symbol]
 
     for c in claims:
@@ -340,6 +351,14 @@ def scorecard(claims, today, price_fetcher, min_sample=None):
         if not c.get("is_forward_looking") or not c.get("testable"):
             excluded["not_testable"] += 1
             continue
+        ttype = c.get("testability_type") or ("conditional_testable" if c.get("condition") else "unconditional_testable")
+        if ttype == "conditional_testable":
+            if not include_conditional:
+                excluded["conditional"] += 1
+                continue
+            if c.get("condition_status") != "met":
+                excluded[f"condition_{c.get('condition_status') or 'not_evaluated'}"] += 1
+                continue
         pub, end = _date(c.get("published_at")), _date(c.get("forecast_end_date"))
         symbol = _symbol(c)
         direction = _direction_of(c)
@@ -349,19 +368,40 @@ def scorecard(claims, today, price_fetcher, min_sample=None):
         if end > today:
             excluded["not_matured"] += 1
             continue
-        prices = series(symbol, pub, min(end + timedelta(days=MAX_PRICE_LAG_DAYS), today))
-        entry_day, entry = _on_or_after(prices, pub)
-        eval_day, exit_ = _on_or_after(prices, end)
-        if not entry or not exit_:
+        exchange = sp.exchange_for_claim(c, symbol)
+        if exchange is None:
+            excluded["unresolved_exchange"] += 1
+            continue
+        window_end = min(end + timedelta(days=MAX_PRICE_LAG_DAYS), today)
+        ps = series(symbol, pub - timedelta(days=1), window_end, exchange)
+        if not ps.scorable():
+            excluded["unadjusted_or_unknown_prices" if ps.closes else "no_prices"] += 1
+            continue
+        entry = sp.entry_point(exchange, c.get("published_at"), ps.closes)
+        exit_ = sp.evaluation_point(exchange, end, ps.closes)
+        if entry["price"] is None or exit_["price"] is None:
             excluded["no_prices"] += 1
             continue
-        ret = (exit_ - entry) / entry
-        bench = series(BENCHMARK_SYMBOL, pub, min(end + timedelta(days=MAX_PRICE_LAG_DAYS), today))
-        b_entry, b_exit = _on_or_after(bench, pub)[1], _on_or_after(bench, end)[1]
-        excess = ret - ((b_exit - b_entry) / b_entry) if b_entry and b_exit else None
-        window = [p for d, p in prices.items() if entry_day <= d <= eval_day]
-        mfe = (max(window) - entry) / entry if direction == "bullish" else (entry - min(window)) / entry
-        mae = (entry - min(window)) / entry if direction == "bullish" else (max(window) - entry) / entry
+        entry_day, eval_day = _date(entry["resolved_trading_date"]), _date(exit_["resolved_trading_date"])
+        if eval_day <= entry_day:
+            excluded["evaluation_before_entry"] += 1
+            continue
+        ret = (exit_["price"] - entry["price"]) / entry["price"]
+        bench_symbol, bench_method = sp.resolve_benchmark(c.get("asset_type"), exchange, c.get("sector"), symbol)
+        excess, bench_return = None, None
+        if bench_symbol:
+            bs = series(bench_symbol, pub - timedelta(days=1), window_end, exchange)
+            if bs.scorable():
+                b_entry = sp.entry_point(exchange, c.get("published_at"), bs.closes)
+                b_exit = sp.evaluation_point(exchange, end, bs.closes)
+                if b_entry["price"] and b_exit["price"]:
+                    bench_return = (b_exit["price"] - b_entry["price"]) / b_entry["price"]
+                    excess = ret - bench_return
+            if excess is None:
+                bench_method = f"{bench_method}:no_benchmark_prices"
+        window = [p for d, p in ps.closes.items() if entry_day <= d <= eval_day]
+        mfe = (max(window) - entry["price"]) / entry["price"] if direction == "bullish" else (entry["price"] - min(window)) / entry["price"]
+        mae = (entry["price"] - min(window)) / entry["price"] if direction == "bullish" else (max(window) - entry["price"]) / entry["price"]
         bucket = stats[_source(c)]
         bucket["n"] += 1
         bucket["direction_hits"] += 1 if (ret > 0) == (direction == "bullish") and ret != 0 else 0
@@ -370,15 +410,124 @@ def scorecard(claims, today, price_fetcher, min_sample=None):
             bucket["excess_returns"].append(excess if direction == "bullish" else -excess)
         bucket["mfe"].append(mfe)
         bucket["mae"].append(mae)
+        bucket["benchmark_methods"][bench_method if excess is not None else "none"] += 1
         target = c.get("target_value")
+        reached = None
         if c.get("target_kind") == "absolute_value" and target:
             bucket["target_n"] += 1
             reached = max(window) >= target if direction == "bullish" else min(window) <= target
             bucket["target_hits"] += 1 if reached else 0
-    out = {source: dict(v) for source, v in stats.items()}
+        bucket["scored"].append({
+            "claim_id": c.get("claim_id"), "symbol": symbol, "direction": direction,
+            "testability_type": ttype, "condition_status": c.get("condition_status"),
+            "exchange": exchange.code, "exchange_timezone": exchange.timezone,
+            "calendar_confidence": exchange.calendar_confidence,
+            "session_relation": entry["session_relation"], "entry_convention": entry["convention"],
+            "entry_requested_date": entry["requested_date"], "entry_resolved_trading_date": entry["resolved_trading_date"],
+            "entry_price": entry["price"], "evaluation_requested_date": exit_["requested_date"],
+            "evaluation_resolved_trading_date": exit_["resolved_trading_date"], "evaluation_price": exit_["price"],
+            "raw_return": ret, "benchmark_symbol": bench_symbol if excess is not None else None,
+            "benchmark_method": bench_method, "benchmark_return": bench_return, "excess_return": excess,
+            "target_reached": reached, **ps.provenance(),
+        })
+    out = {source: dict(v, benchmark_methods=dict(v["benchmark_methods"])) for source, v in stats.items()}
     out["_excluded"] = dict(excluded)
     out["_min_sample"] = min_sample
+    out["_rankings_enabled"] = sp.SCORECARD_RANKINGS_ENABLED
     return out
+
+
+def rankable_sources(sc, min_sample):
+    """
+    Sources that may be ranked against each other: rankings enabled, sample
+    minimum met, and one shared benchmark method (a source scored against a
+    sector ETF is not compared with one scored raw or against BTC).
+    """
+    if not sp.SCORECARD_RANKINGS_ENABLED:
+        return []
+    methods = {}
+    for source, v in sc.items():
+        if source.startswith("_") or v["n"] < min_sample:
+            continue
+        used = {m for m in v.get("benchmark_methods", {}) if v["benchmark_methods"][m]}
+        methods[source] = frozenset(used)
+    if not methods:
+        return []
+    common = Counter(methods.values()).most_common(1)[0][0]
+    return sorted(s for s, m in methods.items() if m == common)
+
+
+def conditional_forecast_report(claims, today=None):
+    """
+    The separate conditional-forecast report: every conditional forecast
+    with its condition, whether it is objectively observable, the recorded
+    condition outcome and the data source that would settle it. Never
+    mixed into the unconditional scorecard.
+    """
+    rows = []
+    for c in claims:
+        if not c.get("condition") or c.get("schema_version") == "legacy":
+            continue
+        rows.append({
+            "source": _source(c), "asset": _asset_key(c), "condition": c.get("condition"),
+            "observable": c.get("condition_observable"), "kind": c.get("condition_kind"),
+            "status": c.get("condition_status") or "not_evaluated",
+            "evaluation_date": c.get("condition_evaluation_date"), "data_source": c.get("condition_data_source"),
+            "testability_type": c.get("testability_type"), "direction": _direction_of(c),
+            "forecast_end_date": c.get("forecast_end_date"), "headline": is_headline_claim(c),
+            "claim_id": c.get("claim_id"), "evidence": c.get("evidence_text"),
+        })
+    return sorted(rows, key=lambda r: (r["status"], r["source"], r["asset"] or ""))
+
+
+def format_conditional_report(rows):
+    if not rows:
+        return ""
+    by_status = Counter(r["status"] for r in rows)
+    lines = ["🔀 Conditional forecasts (kept out of unconditional rankings): "
+             + ", ".join(f"{k} {v}" for k, v in sorted(by_status.items()))]
+    for r in rows[:15]:
+        obs = "observable" if r["observable"] else "subjective"
+        src = f" via {r['data_source']}" if r["data_source"] else ""
+        lines.append(f"• {r['source']} on {r['asset'] or 'unresolved'} [{r['direction'] or 'n/a'}] if "
+                     f"\"{r['condition']}\" — {obs}{src}; condition {r['status']}")
+    if len(rows) > 15:
+        lines.append(f"…and {len(rows) - 15} more.")
+    return "\n".join(lines)
+
+
+def format_scorecard_lines(sc, excluded, min_sample, rankings_on, rankable):
+    """The scorecard block: experimental and unranked unless rankings are
+    enabled AND the sources share a benchmark method and the sample minimum."""
+    label = "ranked" if rankings_on and rankable else sp.SCORECARD_EXPERIMENTAL_LABEL
+    lines = [f"Scorecard ({label}; matured, testable, evidence-backed unconditional forecasts; "
+             f"exchange-aware next-close entry, split-adjusted prices; sample minimum {min_sample}):"]
+    if rankings_on and rankable:
+        order = sorted(sc.items(), key=lambda kv: (kv[0] not in rankable,
+                                                   -(kv[1]["direction_hits"] / kv[1]["n"] if kv[1]["n"] else 0),
+                                                   kv[0]))
+    else:
+        order = sorted(sc.items(), key=lambda kv: kv[0])
+    for source, v in order:
+        med = _median(v["raw_returns"])
+        mean = sum(v["raw_returns"]) / len(v["raw_returns"]) if v["raw_returns"] else 0.0
+        methods = ", ".join(f"{k} {n}" for k, n in sorted(v.get("benchmark_methods", {}).items()))
+        excess = (f", excess vs benchmark mean {100 * sum(v['excess_returns']) / len(v['excess_returns']):+.1f}%"
+                  if v["excess_returns"] else ", benchmark n/a")
+        if rankings_on and rankable:
+            note = "" if source in rankable else " (unranked: below sample minimum or different benchmark method)"
+        else:
+            note = " (unranked)"
+        lines.append(
+            f"• {source}: direction {pct(v['direction_hits'], v['n'])}, target "
+            f"{pct(v['target_hits'], v['target_n'])}, return mean {100*mean:+.1f}% median "
+            f"{100*(med or 0):+.1f}%{excess}, n={v['n']}, benchmark {methods or 'none'}{note}"
+        )
+    if not sc:
+        lines.append("• no matured forecasts yet")
+    if excluded:
+        lines.append("Excluded from scoring: " + ", ".join(f"{k} {v}" for k, v in sorted(excluded.items())))
+    return "\n".join(lines)
 
 
 def _median(values):
@@ -439,26 +588,22 @@ def build_report(claims, gate_outcomes, state, runs, start, end, today=None, pri
         for f in flips[:10]:
             lines.append(f"• {f['source']} on {f['asset']} [{f['horizon_bucket']}]: {f['from']} → {f['to']} "
                          f"({f['previous_date']} → {f['new_date']}, {f['elapsed_days']}d)")
+    disclosures = canonical_claims.format_portfolio_disclosures(
+        canonical_claims.portfolio_disclosures(window))
+    if disclosures:
+        lines.append("")
+        lines.append(disclosures)
+    conditional = format_conditional_report(conditional_forecast_report(window, today))
+    if conditional:
+        lines.append("")
+        lines.append(conditional)
     if price_fetcher is not None:
         sc = scorecard(claims, today, price_fetcher)
         excluded, min_sample = sc.pop("_excluded"), sc.pop("_min_sample")
+        rankings_on = sc.pop("_rankings_enabled")
+        rankable = rankable_sources(dict(sc, _min_sample=min_sample), min_sample)
         lines.append("")
-        lines.append(f"Scorecard (matured, testable, evidence-backed forecasts; ranked from {min_sample}):")
-        ranked = sorted(sc.items(), key=lambda kv: (kv[1]["n"] < min_sample,
-                                                    -(kv[1]["direction_hits"] / kv[1]["n"] if kv[1]["n"] else 0)))
-        for source, v in ranked:
-            med = _median(v["raw_returns"])
-            mean = sum(v["raw_returns"]) / len(v["raw_returns"]) if v["raw_returns"] else 0.0
-            note = "" if v["n"] >= min_sample else " (unranked: below sample minimum)"
-            lines.append(
-                f"• {source}: direction {pct(v['direction_hits'], v['n'])}, target "
-                f"{pct(v['target_hits'], v['target_n'])}, return mean {100*mean:+.1f}% median "
-                f"{100*(med or 0):+.1f}%, n={v['n']}{note}"
-            )
-        if not sc:
-            lines.append("• no matured forecasts yet")
-        if excluded:
-            lines.append("Excluded from scoring: " + ", ".join(f"{k} {v}" for k, v in sorted(excluded.items())))
+        lines.append(format_scorecard_lines(sc, excluded, min_sample, rankings_on, rankable))
     lines.append("")
     lines.append("⚠️ Extracted creator statements with evidence — research input, not investment advice.")
     return "\n".join(lines)
@@ -472,7 +617,7 @@ def main():
     args = parser.parse_args()
     today = datetime.now(timezone.utc).date()
     state = research_state.load_state()
-    claims = research_state.load_active_claims(state)
+    claims = canonical_claims.load_canonical_claims(state)
     fetcher = None
     if not args.no_scorecard:
         try:

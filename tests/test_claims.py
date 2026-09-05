@@ -258,7 +258,7 @@ def test_precise_horizons_follow_documented_rules():
     assert cm.resolve_horizon("within five years", P)[2] == "long"
 
 
-def test_conditional_forecast_keeps_condition_and_is_not_testable():
+def test_conditional_forecast_keeps_condition_and_is_conditionally_testable():
     text = "If the Fed cuts in September, small caps should rally into year end."
     claims, _ = _validate(text, [_claim(subject_mention="small caps", asset_type="sector", stance="bullish",
                                         forecast_direction="increase", condition="if the Fed cuts in September",
@@ -266,7 +266,11 @@ def test_conditional_forecast_keeps_condition_and_is_not_testable():
                                         evidence_text="If the Fed cuts in September, small caps should rally into year end")])
     c = claims[0]
     assert c["condition"] == "if the Fed cuts in September"
-    assert "conditional_outcome_not_observable" in c["testability_issues"] and c["testable"] is False
+    # A Fed decision is objectively observable: the claim is conditional and
+    # testable ONCE the condition is observed, not written off for having one.
+    assert c["testability_type"] == "conditional_testable" and c["testable"] is True
+    assert c["condition_status"] == "not_evaluated" and c["condition_data_source"] == "fomc_decisions"
+    assert "condition_not_objectively_observable" not in c["testability_issues"]
     assert c["forecast_end_date"] == "2026-12-31"
     assert c["entity_resolution_status"] == "confirmed" and c["ticker"] is None  # a sector, not a security
 

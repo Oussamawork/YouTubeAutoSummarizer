@@ -12,6 +12,7 @@ whether claims were captured. This module keeps that second ledger.
   data/research/segments.jsonl        transcript segments per (video, hash)
   data/research/gate_outcomes.jsonl   why each discovered video was/wasn't analyzed
   data/research/video_records.jsonl   one row per video seen by the research side
+  data/research/condition_evaluations.jsonl  observed outcomes of forecast conditions
 
 Idempotency: an extraction run is keyed by (transcript_hash,
 normalization_version, extraction_prompt_version, schema_version). Rerunning
@@ -34,6 +35,7 @@ REVIEW_FILE = os.path.join(RESEARCH_DIR, "review_queue.jsonl")
 SEGMENTS_FILE = os.path.join(RESEARCH_DIR, "segments.jsonl")
 GATE_FILE = os.path.join(RESEARCH_DIR, "gate_outcomes.jsonl")
 VIDEOS_FILE = os.path.join(RESEARCH_DIR, "video_records.jsonl")
+CONDITIONS_FILE = os.path.join(RESEARCH_DIR, "condition_evaluations.jsonl")
 
 STATUSES = {"pending", "extracting", "complete", "no_claims_found", "partial", "needs_review",
             "quota_deferred", "failed_retryable", "failed_final", "superseded"}
@@ -58,6 +60,7 @@ def _paths():
         "runs": os.path.join(d, "extraction_runs.jsonl"), "review": os.path.join(d, "review_queue.jsonl"),
         "segments": os.path.join(d, "segments.jsonl"), "gate": os.path.join(d, "gate_outcomes.jsonl"),
         "videos": os.path.join(d, "video_records.jsonl"),
+        "conditions": os.path.join(d, "condition_evaluations.jsonl"),
     }
 
 
@@ -287,3 +290,32 @@ def load_gate_outcomes(path=None):
 
 def load_runs(path=None):
     return _read_jsonl(path or _paths()["runs"])
+
+
+# --- Condition evaluations ----------------------------------------------------
+#
+# Claims are append-only, so the observed outcome of a conditional forecast's
+# condition ("if the Fed cuts in September") is recorded here and overlaid on
+# the claim by canonical_claims.load_canonical_claims. The latest evaluation
+# per claim wins; each row says what was observed, when, from which source.
+
+
+def record_condition_evaluation(claim_id, status, evaluation_date=None, evidence=None, data_source=None):
+    import claims as claims_mod
+    if status not in claims_mod.CONDITION_STATUSES:
+        log_warn(f"Unknown condition status {status!r} for {claim_id}; recording as unknown.")
+        status = "unknown"
+    return append_jsonl(_paths()["conditions"], {
+        "claim_id": claim_id, "condition_status": status,
+        "condition_evaluation_date": evaluation_date, "condition_evidence": evidence,
+        "condition_data_source": data_source, "recorded_at": now_iso(),
+    })
+
+
+def load_condition_evaluations(path=None):
+    """{claim_id: latest evaluation row}."""
+    latest = {}
+    for row in _read_jsonl(path or _paths()["conditions"]):
+        if row.get("claim_id"):
+            latest[row["claim_id"]] = row
+    return latest

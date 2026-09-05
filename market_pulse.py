@@ -5,8 +5,11 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
+import canonical_claims
 import channel_scorecard as cs
 import pulse_charts
+import scorecard_pricing as sp
+from helpers import env_flag
 from log import log_info, log_warn, log_error
 from sendToTelegram import send_telegram_text, send_telegram_photo_album
 # The dataset layer lives in signals_data; the names are re-exported here so
@@ -19,13 +22,23 @@ from signals_data import (  # noqa: F401  (re-exports)
     aggregate_assets, _directional_mentions, net_stance, _direction, _overall_tone,
 )
 
-# Weekly market pulse: aggregates the per-video signals accumulated in
-# data/signals.jsonl (see signals.py) into one Telegram report — top mentioned
-# assets with net stance, consensus flips vs the prior window, and assets newly
-# on the radar. Runs from its own weekly workflow; read-only over the dataset.
+# Weekly market pulse (Mondays, weekly-pulse.yml): one Telegram report — top
+# assets with net stance PER HORIZON BUCKET, consensus flips vs the prior
+# window, assets newly on the radar — plus the companion charts.
+#
+# PRODUCTION DATA SOURCE: canonical claims, read through
+# canonical_claims.load_canonical_claims (active runs only, no legacy rows,
+# no repeats) and aggregated per (asset, horizon bucket) by
+# canonical_claims.aggregate_views. A short-term bearish and a long-term
+# bullish view on the same asset are two rows, never one averaged stance.
+# data/signals.jsonl is a backward-compatible view: the legacy pulse over it
+# (build_pulse / aggregate_assets) is kept for existing callers and runs
+# only when PULSE_DATA_SOURCE=legacy is set explicitly.
 # The output is research over creator opinions, not investment advice.
 
 load_dotenv('.env')
+
+PULSE_DATA_SOURCE = (os.getenv("PULSE_DATA_SOURCE") or "canonical").strip().lower()
 
 # An asset is "new on the radar" when it appears in the current window but in
 # none of the records this many days before the window started.
@@ -242,11 +255,148 @@ def build_pulse(current_records, previous_records, older_records, start, end,
     return "\n".join(lines)
 
 
+def _canonical_weights(claims, today, price_fetcher):
+    """
+    Track-record weights from the canonical scorecard, only when source
+    rankings are enabled (they are a ranking): 0.5 + direction hit rate for
+    sources with MIN_TRACK_CALLS scored forecasts. Otherwise every source
+    weighs 1.0. Best-effort.
+    """
+    if not sp.SCORECARD_RANKINGS_ENABLED:
+        return {}, {}
+    try:
+        import research_analytics as ra
+        sc = ra.scorecard(claims, today, price_fetcher or cs.fetch_prices)
+        weights, details = {}, {}
+        for source, v in sc.items():
+            if source.startswith("_") or v["n"] < MIN_TRACK_CALLS:
+                continue
+            weights[source] = 0.5 + v["direction_hits"] / v["n"]
+            details[source] = (v["direction_hits"], v["n"])
+        return weights, details
+    except Exception as e:
+        log_warn(f"Track-record weighting unavailable this week: {e}")
+        return {}, {}
+
+
+def canonical_tone_weeks(claims, today, num_weeks=pulse_charts.SPREAD_WEEKS):
+    """Weekly tone rows (pulse_charts.tone_weeks shape) from each video's own
+    view claims — canonical_claims.video_tone — never from a model's overall
+    sentiment field."""
+    tone = canonical_claims.video_tone(claims)
+    dates = canonical_claims.video_dates(claims)
+    if not dates:
+        return []
+    earliest = min(dates.values())
+    weeks, end = [], today
+    for weeks_ago in range(num_weeks):
+        start = end - timedelta(days=7)
+        bucket = [vid for vid, d in dates.items() if start < d <= end and vid in tone]
+        if bucket:
+            counts = {k: sum(1 for vid in bucket if tone[vid] == k) for k in ("bullish", "bearish", "neutral", "mixed")}
+            first = start + timedelta(days=1)
+            weeks.append({
+                "label": f"{first.strftime('%b %-d')} - {end.strftime('%b %-d')}",
+                "short_label": end.strftime("%b %-d"), "weeks_ago": weeks_ago, "n": len(bucket),
+                **counts, "partial": earliest > start + timedelta(days=1),
+            })
+        end = start
+    weeks.reverse()
+    return weeks
+
+
+def _canonical_pulse_inputs(days, today, price_fetcher, claims=None):
+    """The production inputs: canonical claims sliced into the current,
+    previous and lookback windows and aggregated per (asset, horizon)."""
+    claims = canonical_claims.load_canonical_claims() if claims is None else claims
+    window_start = today - timedelta(days=days)
+    prev_start = window_start - timedelta(days=days)
+    lookback_start = window_start - timedelta(days=NEW_ASSET_LOOKBACK_DAYS)
+    current = [c for c in claims if canonical_claims.in_window(c, window_start, today)]
+    previous = [c for c in claims if canonical_claims.in_window(c, prev_start, window_start)]
+    older = [c for c in claims if canonical_claims.in_window(c, lookback_start, window_start)]
+    weights, details, latest_prices = {}, {}, {}
+    current_views = canonical_claims.aggregate_views(current)
+    if current_views:
+        latest_prices = fetch_latest_prices(current_views, price_fetcher=price_fetcher, today=today)
+        weights, details = _canonical_weights(claims, today, price_fetcher)
+    view_claims = canonical_claims.view_claims(current)
+    return {
+        "source": "canonical", "claims": claims, "window_start": window_start,
+        "current": current, "previous": previous, "older": older,
+        "current_views": canonical_claims.aggregate_views(current, weights),
+        "previous_views": canonical_claims.aggregate_views(previous, weights),
+        "older_keys": set(canonical_claims.aggregate_views(older)),
+        "videos": len({c.get("video_id") for c in view_claims}),
+        "channels": len({canonical_claims.source_of(c) for c in view_claims}),
+        "tone": canonical_tone_weeks(claims, today),
+        "weights": weights, "weight_details": details, "latest_prices": latest_prices,
+    }
+
+
+def build_canonical_pulse(inputs, today):
+    """Render the plain-text pulse from canonical inputs. "" when the window
+    holds no view claims."""
+    current, previous = inputs["current_views"], inputs["previous_views"]
+    if not inputs["videos"]:
+        return ""
+    lines = [
+        f"📈 Weekly Market Pulse — {inputs['window_start'].isoformat()} → {today.isoformat()}",
+        f"Videos with views: {inputs['videos']} · Sources: {inputs['channels']} · "
+        "data: canonical claims (one current view per source, per asset, per horizon)",
+    ]
+    week = [w for w in inputs["tone"] if w["weeks_ago"] == 0]
+    if week:
+        w = week[0]
+        lines.append("Overall tone: " + " · ".join(f"{k} {w[k]}" for k in ("bullish", "bearish", "mixed", "neutral") if w[k]))
+    if current:
+        lines.append("")
+        lines.append("Top assets (per horizon bucket):")
+        ranked = sorted(
+            current.items(),
+            key=lambda kv: (-_directional_mentions(kv[1]), -abs(net_stance(kv[1])),
+                            -kv[1]["mentions"], kv[1]["label"]),
+        )
+        for key, entry in ranked[:MAX_ASSETS_IN_REPORT]:
+            lines.append(_format_asset_line(entry, inputs["latest_prices"].get(key)))
+        if len(ranked) > MAX_ASSETS_IN_REPORT:
+            lines.append(f"…and {len(ranked) - MAX_ASSETS_IN_REPORT} more.")
+    flips = find_flips(current, previous)
+    if flips:
+        lines.append("")
+        lines.append("🔄 Consensus flips vs prior week (same asset and horizon):")
+        for flip in flips:
+            lines.append(f"• {flip['label']}: {flip['from']} → {flip['to']}")
+    new_assets = {k: e for k, e in current.items() if k not in inputs["older_keys"]}
+    if new_assets:
+        lines.append("")
+        lines.append(f"🆕 New on the radar (past {NEW_ASSET_LOOKBACK_DAYS} days):")
+        for entry in sorted(new_assets.values(), key=lambda e: -e["mentions"])[:5]:
+            lines.append(f"• {entry['label']} — {_direction(net_stance(entry))}")
+    disclosures = canonical_claims.format_portfolio_disclosures(
+        canonical_claims.portfolio_disclosures(inputs["current"]))
+    if disclosures:
+        lines.append("")
+        lines.append(disclosures)
+    if inputs["weight_details"]:
+        lines.append("")
+        weighted = " · ".join(
+            f"{channel} {inputs['weights'][channel]:.2f} ({hits}/{total})"
+            for channel, (hits, total) in sorted(inputs["weight_details"].items())
+        )
+        lines.append(f"⚖️ Consensus weighted by scorecard track record: {weighted}")
+    lines.append("")
+    lines.append(DISCLAIMER)
+    return "\n".join(lines)
+
+
 def _pulse_inputs(days, today, path, price_fetcher):
     """Load the dataset, slice the windows, and compute the best-effort extras
     (track-record weights, latest prices) that both the text pulse and the
     charts consume — shared so the price lookups run once per pulse, not once
-    per output."""
+    per output. Canonical claims unless PULSE_DATA_SOURCE=legacy."""
+    if PULSE_DATA_SOURCE != "legacy":
+        return _canonical_pulse_inputs(days, today, price_fetcher)
     records = load_signals(path)
     window_start = today - timedelta(days=days)
     prev_start = window_start - timedelta(days=days)
@@ -270,7 +420,7 @@ def _pulse_inputs(days, today, path, price_fetcher):
             records, today, price_fetcher=price_fetcher
         )
     return {
-        "records": records, "window_start": window_start,
+        "source": "legacy", "records": records, "window_start": window_start,
         "current": current, "previous": previous, "older": older,
         "weights": weights, "weight_details": details,
         "latest_prices": latest_prices,
@@ -286,6 +436,8 @@ def generate_pulse(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None,
     charts."""
     today = today or datetime.now(timezone.utc).date()
     inputs = inputs or _pulse_inputs(days, today, path, price_fetcher)
+    if inputs.get("source") == "canonical":
+        return build_canonical_pulse(inputs, today)
     if not inputs["current"]:
         return ""
     return build_pulse(
@@ -305,13 +457,22 @@ def generate_charts(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None,
     try:
         today = today or datetime.now(timezone.utc).date()
         inputs = inputs or _pulse_inputs(days, today, path, price_fetcher)
-        if not inputs["current"]:
-            return []
-        current = aggregate_assets(inputs["current"], inputs["weights"])
-        previous = aggregate_assets(inputs["previous"], inputs["weights"])
-        data = pulse_charts.build_chart_data(
-            inputs["records"], current, previous, inputs["window_start"], today
-        )
+        if inputs.get("source") == "canonical":
+            if not inputs["videos"]:
+                return []
+            current, previous = inputs["current_views"], inputs["previous_views"]
+            data = pulse_charts.build_chart_data(
+                [], current, previous, inputs["window_start"], today,
+                tone=inputs["tone"], videos=inputs["videos"], channels=inputs["channels"],
+            )
+        else:
+            if not inputs["current"]:
+                return []
+            current = aggregate_assets(inputs["current"], inputs["weights"])
+            previous = aggregate_assets(inputs["previous"], inputs["weights"])
+            data = pulse_charts.build_chart_data(
+                inputs["records"], current, previous, inputs["window_start"], today
+            )
         data["upside"] = pulse_charts.upside_rows(current, inputs["latest_prices"])
         return pulse_charts.render_charts(data, out_dir)
     except Exception as e:
@@ -330,7 +491,7 @@ def research_quality_section(days, today):
         import research_analytics
         import research_state
         state = research_state.load_state()
-        claims = research_state.load_active_claims(state)
+        claims = canonical_claims.load_canonical_claims(state)
         if not state.get("videos") and not claims:
             return ""
         header = research_analytics.quality_header(
@@ -349,7 +510,7 @@ CHART_ALBUM_CAPTION = (
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Weekly market pulse from data/signals.jsonl")
+    parser = argparse.ArgumentParser(description="Weekly market pulse from canonical claims")
     parser.add_argument("--days", type=int, default=7, help="Window size in days (default 7)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the pulse and write charts locally instead of sending them")
@@ -363,7 +524,8 @@ def main():
     inputs = _pulse_inputs(args.days, today, SIGNALS_FILE, None)
     pulse = generate_pulse(days=args.days, today=today, inputs=inputs)
     if not pulse:
-        log_info("No signal records in the window; skipping the pulse this week.")
+        log_info(f"No {inputs.get('source', 'signal')} records with views in the window; "
+                 "skipping the pulse this week.")
         return 0
 
     chart_paths = []

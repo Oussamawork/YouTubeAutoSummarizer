@@ -232,10 +232,29 @@ def test_genuinely_no_claims_is_distinct_from_failure(monkeypatch):
         signals, "complete",
         lambda sp, um, **kw: json.dumps({"summary": "S", "claims": [], "extraction_metadata": {"warnings": []}}),
     )
-    summary, research = signals.summarize_with_signals("t", context=_ctx())
+    ctx = _ctx()
+    ctx["normalized"] = _nt("Welcome back everyone. Today I walk through how to open a brokerage account "
+                            "and what a limit order is. Thanks for watching.")
+    summary, research = signals.summarize_with_signals("t", context=ctx)
     assert research["status"] == "no_claims_found"
     assert research["signals"] == {"assets": [], "market_sentiment": "neutral", "topics": [],
                                    "derived_from": "claims"}
+
+
+def test_empty_claims_on_a_forecast_transcript_is_suspicious_not_no_claims(monkeypatch):
+    # The default fixture transcript says "Nvidia will hit $200 by year end":
+    # an empty array against it is not believed. From the combined call the
+    # video goes to a standalone extraction pass; the compatibility view is
+    # null, never an empty asset list.
+    monkeypatch.setattr(
+        signals, "complete",
+        lambda sp, um, **kw: json.dumps({"summary": "S", "claims": [], "extraction_metadata": {"warnings": []}}),
+    )
+    summary, research = signals.summarize_with_signals("t", context=_ctx())
+    assert summary == "S"
+    assert research["status"] == "failed_retryable"
+    assert research["failure_reason"] == "suspicious_empty_extraction"
+    assert research["signals"] is None
 
 
 def test_summarize_with_signals_empty_transcript_skips_call(monkeypatch):

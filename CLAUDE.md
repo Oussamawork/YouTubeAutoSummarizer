@@ -45,12 +45,39 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   `data/transcripts/` before any cleaning, indexed in
   `data/research/transcript_records.jsonl`; hash-idempotent.
 - `claims.py` — the canonical research unit: atomic, evidence-backed claims
-  (schema v1), the extraction prompt with few-shots, deterministic validation
+  (schema v2), the extraction prompt with few-shots, deterministic validation
   (evidence located in the transcript, numbers present in evidence, spoken
-  tickers only, curated entity resolution, documented horizon rules,
-  attribution rules for questions / third-party targets / retrospectives /
-  ownership / praise, testability), and `claims_to_legacy_signals`, the
-  documented reduction that keeps `signals.jsonl` consumers working.
+  tickers only, curated entity resolution plus **local coreference** for
+  "the stock"/"it" with `entity_resolution_method`/`_confidence`, documented
+  horizon rules, attribution rules for questions / third-party views with
+  `host_position` / retrospectives / praise, **portfolio disclosures are never
+  views** (`carries_view` is the one stance filter), three-valued
+  `testability_type` with observable-condition detection, cue-level evidence
+  timestamps, the deterministic **suspicious-empty check**), and
+  `claims_to_legacy_signals`, the documented reduction that keeps the
+  `signals.jsonl` compatibility view working.
+- `canonical_claims.py` — **the one loader every production analytics job
+  reads**: active runs only, no legacy rows, no repeats, condition outcomes
+  overlaid; `view_claims`, `aggregate_views` (per asset AND horizon bucket,
+  one current view per source), `video_tone`, `portfolio_disclosures`.
+  `data/signals.jsonl` is a backward-compatible view read by nothing here.
+- `scorecard_pricing.py` — scorecard methodology: exchanges/timezones/
+  calendars (NYSE holiday rules), the publication-time **next-close entry
+  rule** (never a close that printed before the video; crypto = UTC-day
+  close), `PriceSeries` provenance (provider, adjustment — split-adjusted at
+  minimum, `PRICE_ADJUSTMENT=all` for total return — corporate-action status,
+  currency, requested/resolved dates), per-claim benchmark resolution with an
+  honest null, and `SCORECARD_RANKINGS` (off by default: scorecards are
+  experimental and unranked).
+- `partial_cache.py` — versioned per-chunk partials for both chunked paths:
+  a record is reused only when task type, transcript hash, normalization and
+  chunking versions, chunk boundaries, prompt and schema versions and the
+  provider/model policy all match.
+- `claims_eval.py` + `evals/claims/` — the optional extraction-quality
+  harness (precision/recall, numeric, grounding, attribution, entity, stance,
+  horizon, recommendation accuracy, false no-claims and duplicate rates;
+  errors by category). Offline replay by default; live only with `--live`
+  and `CLAIMS_EVAL_LIVE=1`. Never runs in CI.
 - `research_state.py` — research state independent of delivery
   (`data/research/research_state.json`) plus the append-only products:
   `claims.jsonl`, `extraction_runs.jsonl`, `review_queue.jsonl`,
@@ -61,12 +88,13 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   partial research from stored transcripts), `--reprocess` (stale versions),
   `--import-legacy` (old signals rows as `schema_version="legacy"`,
   review-required, no fabricated evidence). Bounded, quota-aware, resumable.
-- `research_analytics.py` — analytics over validated claims: data-quality
-  header with denominators, descriptive counts (claims vs segments vs videos
-  vs sources), consensus of one current view per source/asset/horizon bucket,
-  flips (same source, asset and bucket), and a scorecard over matured testable
-  forecasts with documented entry/evaluation rules. `market_pulse` appends the
-  quality header to the weekly pulse.
+- `research_analytics.py` — analytics over canonical claims: data-quality
+  header with denominators, descriptive counts, consensus of one current
+  **view** per source/asset/horizon bucket, flips (same source, asset and
+  bucket), the portfolio-disclosure and conditional-forecast reports, and the
+  experimental scorecard over matured unconditional forecasts under
+  `scorecard_pricing` (conditional ones only with `include_conditional` and
+  `condition_status=met`). `market_pulse` appends the quality header.
 - `gemini_quota.py` — per-model daily free-tier accounting in
   `data/gemini_usage.json` (20 requests/day per model, resets midnight Pacific);
   also classifies a 429 as a per-day or per-minute limit, which decides whether
@@ -77,10 +105,16 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   counted cap is final.
 - `signals.py` — the combined summary+claims fast path (one request, two
   products, validated independently: a malformed claims array never costs the
-  summary and is recorded as `failed_retryable`, never as an empty result),
-  standalone/chunked `extract_research`, and the legacy summary-based
-  extractor kept for compatibility. `data/signals.jsonl` rows are now derived
-  from validated claims (`research_status` says how).
+  summary and is recorded as `failed_retryable`, never as an empty result).
+  A combined response **truncated by its claims array** returns
+  `(None, research)` so the scraper makes a summary-only call, delivers it,
+  and extracts the claims separately in smaller chunks (never deferring the
+  video, never `no_claims_found`). An empty claims array against a
+  claim-bearing transcript is `suspicious_empty_extraction`
+  (`failed_retryable` from the combined call, `needs_review` from a
+  standalone one). Standalone/chunked `extract_research`, and the legacy
+  summary-based extractor kept for compatibility. `data/signals.jsonl` rows
+  are derived from validated claims (`research_status` says how).
 - `signals_data.py` — the dataset layer every analytics module reads:
   `load_signals`, asset identity (`ASSET_ALIASES`, `TICKER_ALIASES`,
   `UNPRICEABLE_TICKERS`, the learned map, `canonical_ticker`), date windows and
@@ -88,8 +122,11 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   below, which is what lets `market_pulse`, `channel_scorecard`, `pulse_charts`
   and `ticker_resolver` import each other at the top level instead of lazily.
   `market_pulse` re-exports its names for existing callers.
-- `market_pulse.py` — weekly aggregation over `data/signals.jsonl` (top assets,
-  consensus flips, new-on-radar) sent to Telegram by `weekly-pulse.yml`.
+- `market_pulse.py` — the weekly pulse (`weekly-pulse.yml`) over **canonical
+  claims** via `canonical_claims` (top assets per horizon bucket, flips,
+  new-on-radar, disclosures, tone from each video's own views). The legacy
+  pulse over `data/signals.jsonl` survives for compatibility and runs only
+  with `PULSE_DATA_SOURCE=legacy`.
 - `pulse_charts.py` — the pulse's companion PNG charts (consensus board, flip
   slope, weekly tone, bull-bear spread line, agreement-vs-attention map,
   target-upside ladder), styled for non-technical readers and sent as a Telegram
@@ -114,8 +151,12 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   reads the cache and only goes live for gaps, so every caller inherits it. The
   cache is process-wide (`price_cache.active`) — tests isolate it via the autouse
   fixture in `tests/conftest.py`, or one test's lookup answers another's mock.
-- `channel_scorecard.py` — Friday per-channel accuracy scorecard: directional
-  calls vs daily prices at 7/30-day horizons (`weekly-scorecard.yml`).
+- `channel_scorecard.py` — Friday scorecard (`weekly-scorecard.yml`):
+  `generate_canonical_scorecard` scores canonical claims under
+  `scorecard_pricing` (experimental, unranked unless `SCORECARD_RANKINGS=true`);
+  the legacy 7/30-day directional hit rate over `signals.jsonl` remains behind
+  `--legacy`. Twelve Data is requested with `adjust=$PRICE_ADJUSTMENT` and
+  `fetch_prices.price_provenance` declares what every series is.
   Prices come from **Twelve Data** when `TWELVEDATA_API` is set (free tier: 800
   requests/day, 8/min — `_twelvedata_pace` respects the per-minute budget so a
   run doesn't turn into 429s), served through the `price_cache` (see below).
@@ -175,8 +216,11 @@ workflow timeout.
 - `docs/tdd-full-transcript-claims.md` — why the 120k-char head/tail cut was
   removed, the token-budget algorithm, capability discovery, the chunked
   paths, the claim schema and prompt, the research-state design, the
-  `signals.jsonl` compatibility reduction, migration, and limitations. Read
-  before touching request sizing, `claims.py` or the research data products.
+  `signals.jsonl` compatibility view and which job reads what (§ 11), the
+  scorecard methodology, conditional-forecast model, suspicious-empty rules
+  and evaluation harness (§ 13), migration, and limitations. Read before
+  touching request sizing, `claims.py`, the analytics jobs or the research
+  data products.
 
 ## Dev workflow
 ```bash

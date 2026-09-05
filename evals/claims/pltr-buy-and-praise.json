@@ -1,0 +1,97 @@
+{
+ "fixture_id": "pltr-buy-and-praise",
+ "channel_name": "Demo Investor",
+ "video_title": "Palantir and Costco",
+ "published_at": "2026-08-14T20:30:00+00:00",
+ "transcript": "Palantir is expensive here. I'd buy Palantir under $20, not above. Costco is a wonderful business, I just would not add here. Revenue should rise next quarter but margins may fall.",
+ "expected_claims": [
+  {
+   "evidence_text": "I'd buy Palantir under $20",
+   "subject": "PLTR",
+   "claim_type": "recommendation",
+   "recommendation_action": "buy",
+   "stance": "bullish",
+   "ticker": "PLTR",
+   "testability_type": "not_testable"
+  },
+  {
+   "evidence_text": "Costco is a wonderful business",
+   "subject": "COSTCO",
+   "claim_type": "opinion",
+   "recommendation_action": "none",
+   "stance": "bullish"
+  },
+  {
+   "evidence_text": "Revenue should rise next quarter but margins may fall",
+   "subject": "COSTCO",
+   "claim_type": "forecast",
+   "forecast_direction": "increase",
+   "horizon_bucket": "medium"
+  },
+  {
+   "evidence_text": "Revenue should rise next quarter but margins may fall",
+   "subject": "COSTCO",
+   "claim_type": "forecast",
+   "forecast_direction": "decrease",
+   "horizon_bucket": "medium"
+  }
+ ],
+ "model_output": {
+  "claims": [
+   {
+    "attribution_type": "speaker_personal_view",
+    "claim_type": "recommendation",
+    "is_forward_looking": true,
+    "subject_mention": "Palantir",
+    "asset_type": "stock",
+    "stance": "bullish",
+    "recommendation_action": "buy",
+    "condition": "under $20",
+    "forecast_direction": "increase",
+    "forecast_metric": "price",
+    "horizon_original": "",
+    "evidence_text": "I'd buy Palantir under $20",
+    "extraction_confidence": "high"
+   },
+   {
+    "attribution_type": "speaker_personal_view",
+    "claim_type": "opinion",
+    "is_forward_looking": false,
+    "subject_mention": "Costco",
+    "asset_type": "stock",
+    "stance": "bullish",
+    "stance_basis": "inferred_from_context",
+    "recommendation_action": "buy",
+    "evidence_text": "Costco is a wonderful business",
+    "extraction_confidence": "medium"
+   },
+   {
+    "attribution_type": "speaker_personal_view",
+    "claim_type": "forecast",
+    "is_forward_looking": true,
+    "subject_mention": "Costco",
+    "asset_type": "stock",
+    "forecast_metric": "revenue",
+    "forecast_direction": "increase",
+    "horizon_original": "next quarter",
+    "certainty_original": "should",
+    "certainty_level": "medium",
+    "evidence_text": "Revenue should rise next quarter but margins may fall",
+    "extraction_confidence": "high"
+   },
+   {
+    "attribution_type": "speaker_personal_view",
+    "claim_type": "forecast",
+    "is_forward_looking": true,
+    "subject_mention": "Costco",
+    "asset_type": "stock",
+    "forecast_metric": "revenue",
+    "forecast_direction": "increase",
+    "horizon_original": "next quarter",
+    "certainty_level": "medium",
+    "evidence_text": "Revenue should rise next quarter but margins may fall",
+    "extraction_confidence": "high"
+   }
+  ]
+ }
+}

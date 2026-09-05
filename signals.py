@@ -9,7 +9,7 @@ import claims as claims_mod
 import research_state
 import summarizer
 import token_budget
-from helpers import env_flag, write_json_atomic
+from helpers import env_flag
 from summarizer import (
     complete,
     QUOTA_EXHAUSTED_SENTINEL,
@@ -250,7 +250,7 @@ def _failed(status, reason, context=None, **extra):
     return out
 
 
-def build_research(data, context, coverage_status="full", chunk_id=None):
+def build_research(data, context, coverage_status="full", chunk_id=None, standalone=False):
     """
     Validate the claims half of a model response independently of the
     summary. Returns a research result dict:
@@ -258,7 +258,11 @@ def build_research(data, context, coverage_status="full", chunk_id=None):
       claims: canonical records (may be empty)
       signals: the legacy compatibility object, or None when extraction failed
     A missing/malformed claims array is failed_retryable — never an empty
-    success — and an empty array is no_claims_found only after validation.
+    success — and an empty array is no_claims_found only after validation AND
+    the deterministic suspicious-empty check (claims.suspicious_empty_check)
+    found no claim-bearing language. `standalone` says the response came from
+    a dedicated claims call rather than the combined summary call, which
+    decides whether a suspicious empty result is retried or reviewed.
     """
     ctx = _research_context(context, coverage_status)
     nt = ctx.get("normalized")
@@ -271,15 +275,33 @@ def build_research(data, context, coverage_status="full", chunk_id=None):
     meta = data.get("extraction_metadata") if isinstance(data, dict) else None
     if isinstance(meta, dict) and isinstance(meta.get("warnings"), list):
         warnings.extend(str(w) for w in meta["warnings"] if w)
+    failure_reason = None
+    signals_view = claims_mod.claims_to_legacy_signals(validated)
     if not raw:
-        status = "no_claims_found"
+        # An empty array proves nothing by itself. When the transcript plainly
+        # carries forecast or recommendation language about an identifiable
+        # asset, "no claims" is not believed: the combined path hands the
+        # video to a standalone extraction pass (failed_retryable), and a
+        # standalone pass that comes back empty again goes to a human
+        # (needs_review). Neither is ever recorded as no_claims_found, and
+        # neither writes an empty asset list.
+        check = claims_mod.suspicious_empty_check(nt.text)
+        if check["suspicious"]:
+            status = "needs_review" if standalone else "failed_retryable"
+            failure_reason = "suspicious_empty_extraction"
+            signals_view = None
+            warnings.append("suspicious_empty_extraction: " + "; ".join(check["strong"] or check["moderate"]))
+            log_warn(f"Model returned no claims but the transcript looks claim-bearing "
+                     f"(score {check['score']}); research marked {status}.")
+        else:
+            status = "no_claims_found"
     elif all(c.get("review_required") for c in validated):
         status = "needs_review"
     else:
         status = "complete"
     return {
-        "status": status, "failure_reason": None, "claims": validated,
-        "signals": claims_mod.claims_to_legacy_signals(validated),
+        "status": status, "failure_reason": failure_reason, "claims": validated,
+        "signals": signals_view,
         "warnings": warnings, "coverage_status": coverage_status,
         "run_key": ctx.get("run_key"), "extraction_model": ctx.get("extraction_model"),
         "telemetry": dict(summarizer.LAST_CALL_TELEMETRY),
@@ -294,7 +316,10 @@ def summarize_with_signals(transcript, title=None, compact=False, channel_name=N
     INSUFFICIENT_TRANSCRIPT sentinel, `research` is a build_research() result
     (or None when the summary was the sentinel / quota) — or None when the
     combined path didn't work, telling the caller to fall back to the
-    separate summarize/extract calls. The complete transcript is sent; a
+    separate summarize/extract calls. A truncated combined response returns
+    (None, research) with research failed_retryable / combined_output_truncated
+    and `retry_separately=True`: the caller makes the summary-only call and
+    extracts the claims on their own. The complete transcript is sent; a
     transcript too large for every model returns None so the summary takes
     the chunked path and research runs separately. Never raises.
     """
@@ -318,6 +343,17 @@ def summarize_with_signals(transcript, title=None, compact=False, channel_name=N
     if text == INPUT_TOO_LARGE_SENTINEL:
         log_info("Combined request exceeds every model's input capacity; using the chunked paths.")
         return None
+    if text == TRUNCATED_SENTINEL:
+        # The claims array outgrew the output budget even after escalation.
+        # That is a research-output-size problem, not a summary problem: the
+        # caller makes a summary-only call (which fits — it is the claims
+        # that did not) and delivers it; the claims are extracted separately,
+        # in chunks small enough to fit. Deferring the whole video here would
+        # let research block delivery. Never recorded as no_claims_found.
+        log_warn("Combined summary+claims response was truncated after escalation; "
+                 "falling back to a summary-only call and separate claim extraction.")
+        return None, _failed("failed_retryable", "combined_output_truncated", _research_context(ctx),
+                             retry_separately=True)
     if not text:
         return None
 
@@ -354,17 +390,26 @@ def _claims_user_message(ctx, transcript, part=""):
     )
 
 
-def _claims_partial_path(cache_key, chunk_id):
-    return os.path.join(summarizer.PARTIALS_DIR, cache_key, f"claims-{chunk_id}.json")
+def _claims_partial(nt, chunk):
+    """Cached raw claims for this chunk, only under the current transcript,
+    normalization, chunking, boundaries, prompt, schema and provider policy
+    (partial_cache validates the record). None otherwise."""
+    import partial_cache
+    payload = partial_cache.load("research_claims", nt, chunk, claims_mod.EXTRACTION_PROMPT_VERSION,
+                                 claims_mod.SCHEMA_VERSION, _model_policy())
+    return payload if isinstance(payload, dict) and isinstance(payload.get("raw_claims"), list) else None
 
 
-def _load_claims_partial(cache_key, chunk_id):
-    try:
-        with open(_claims_partial_path(cache_key, chunk_id), "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) and isinstance(data.get("raw_claims"), list) else None
-    except (OSError, ValueError):
-        return None
+def _save_claims_partial(nt, chunk, raw):
+    import partial_cache
+    partial_cache.save("research_claims", nt, chunk, {"raw_claims": raw},
+                       claims_mod.EXTRACTION_PROMPT_VERSION, claims_mod.SCHEMA_VERSION, _model_policy(),
+                       model=summarizer.LAST_CALL_TELEMETRY.get("model"))
+
+
+def _model_policy():
+    import partial_cache
+    return partial_cache.model_policy_string(summarizer._provider_configs())
 
 
 def _research_chunk_tokens():
@@ -380,12 +425,16 @@ def _research_chunk_tokens():
     return per
 
 
-def extract_research(nt, context):
+def extract_research(nt, context, prefer_chunked=False):
     """
     Claim extraction from the (complete) normalized transcript, independent
     of the summary: used when the combined path did not yield usable claims
     and by the research retry job. One request when the transcript fits;
-    otherwise complete-coverage chunks with per-chunk resume. Returns a
+    otherwise complete-coverage chunks with per-chunk resume. A single
+    request whose OUTPUT is truncated (too many claims for the output cap)
+    is retried as smaller chunks, each of which writes fewer claims;
+    `prefer_chunked` starts there directly (the combined call already proved
+    the whole-transcript output does not fit). Returns a
     build_research()-shaped result whose status is quota_deferred /
     failed_retryable / partial when it could not finish. Never raises.
     """
@@ -394,37 +443,41 @@ def extract_research(nt, context):
     if not nt or not nt.text.strip():
         return _failed("failed_final", "empty_transcript", ctx)
 
-    if not EXHAUSTIVE_RESEARCH_MODE:
+    if not EXHAUSTIVE_RESEARCH_MODE and not prefer_chunked:
         text = complete(claims_mod.CLAIMS_SYSTEM_PROMPT, _claims_user_message(ctx, nt.text),
                         json_mode=True, max_tokens=CLAIMS_MAX_OUTPUT_TOKENS)
         if text == QUOTA_EXHAUSTED_SENTINEL:
             return _failed("quota_deferred", "llm_quota", ctx)
         if text == INPUT_TOO_LARGE_SENTINEL:
             return _extract_research_chunked(nt, ctx)
+        if text == TRUNCATED_SENTINEL:
+            log_warn("Standalone claim extraction was truncated; re-running in smaller chunks.")
+            return _extract_research_chunked(nt, ctx, max_chunk_tokens=RESEARCH_CHUNK_TOKENS)
         if not text:
             return _failed("failed_retryable", "no_output", ctx)
         data = claims_mod.parse_json_object(text)
         if data is None:
             return _failed("failed_retryable", "unparseable_json", ctx)
         ctx["extraction_model"] = summarizer.LAST_CALL_TELEMETRY.get("model")
-        return build_research(data, ctx, coverage_status="full")
-    return _extract_research_chunked(nt, ctx)
+        return build_research(data, ctx, coverage_status="full", standalone=True)
+    return _extract_research_chunked(nt, ctx, max_chunk_tokens=RESEARCH_CHUNK_TOKENS if prefer_chunked else None)
 
 
-def _extract_research_chunked(nt, ctx):
+def _extract_research_chunked(nt, ctx, max_chunk_tokens=None):
     import transcript_normalize as tn
 
     per_chunk = _research_chunk_tokens()
+    if max_chunk_tokens and per_chunk > 0:
+        per_chunk = min(per_chunk, max_chunk_tokens)
     if per_chunk < 500:
         return _failed("quota_deferred", "no_provider_with_input_capacity", ctx)
     chunks = tn.chunk_transcript(nt, per_chunk, token_budget.estimate_tokens)
     ok, problems = tn.validate_coverage(chunks, len(nt.text))
     if not ok:
         return _failed("failed_retryable", f"chunk_coverage:{problems}", ctx)
-    cache_key = nt.transcript_hash
     all_raw, processed, failed, stop_reason = [], [], [], None
     for chunk in chunks:
-        cached = _load_claims_partial(cache_key, chunk.chunk_id)
+        cached = _claims_partial(nt, chunk)
         if cached:
             all_raw.append((chunk, cached["raw_claims"]))
             processed.append(chunk.chunk_id)
@@ -442,9 +495,7 @@ def _extract_research_chunked(nt, ctx):
             failed.append(chunk.chunk_id)
             stop_reason = "malformed_claims"
             continue
-        write_json_atomic(_claims_partial_path(cache_key, chunk.chunk_id),
-                          {"chunk": chunk.to_dict(), "raw_claims": raw,
-                           "model": summarizer.LAST_CALL_TELEMETRY.get("model")})
+        _save_claims_partial(nt, chunk, raw)
         all_raw.append((chunk, raw))
         processed.append(chunk.chunk_id)
 
@@ -469,11 +520,19 @@ def _extract_research_chunked(nt, ctx):
             "chunks": len(chunks), "telemetry": dict(summarizer.LAST_CALL_TELEMETRY),
         }
     total_raw = sum(len(raw) for _, raw in all_raw)
-    status = "no_claims_found" if not total_raw else \
-        "needs_review" if all(c.get("review_required") for c in validated) else "complete"
+    failure_reason, signals_view = None, claims_mod.claims_to_legacy_signals(validated)
+    if not total_raw:
+        check = claims_mod.suspicious_empty_check(nt.text)
+        if check["suspicious"]:
+            status, failure_reason, signals_view = "needs_review", "suspicious_empty_extraction", None
+            warnings.append("suspicious_empty_extraction: " + "; ".join(check["strong"] or check["moderate"]))
+        else:
+            status = "no_claims_found"
+    else:
+        status = "needs_review" if all(c.get("review_required") for c in validated) else "complete"
     return {
-        "status": status, "failure_reason": None, "claims": validated,
-        "signals": claims_mod.claims_to_legacy_signals(validated), "warnings": warnings,
+        "status": status, "failure_reason": failure_reason, "claims": validated,
+        "signals": signals_view, "warnings": warnings,
         "coverage_status": "chunked_full", "run_key": ctx.get("run_key"),
         "extraction_model": ctx.get("extraction_model"), "processed_chunk_ids": processed,
         "failed_chunk_ids": [], "chunks": len(chunks), "telemetry": dict(summarizer.LAST_CALL_TELEMETRY),
@@ -500,8 +559,8 @@ def extract_signals(summary, video_title=None, channel_name=None):
     if text == QUOTA_EXHAUSTED_SENTINEL:
         log_warn("Signal extraction skipped: LLM quota exhausted.")
         return None
-    if not text:
-        log_warn("Signal extraction produced no output.")
+    if not text or text in (TRUNCATED_SENTINEL, INPUT_TOO_LARGE_SENTINEL):
+        log_warn("Signal extraction produced no usable output.")
         return None
 
     parsed = _parse_signals(text)

@@ -30,6 +30,10 @@ from helpers import env_int
 from signals_data import ASSET_ALIASES
 
 NORMALIZATION_VERSION = "1"
+# Version of the chunk-boundary algorithm below. Part of every partial-cache
+# record: a cached chunk result is only reused when the boundaries it was
+# computed for are the boundaries the current algorithm would produce.
+CHUNKING_VERSION = "1"
 
 # Segments: a new one starts on a speaker/asset/topic change once the current
 # one has this much text; an explicit paragraph break needs less; none grows
@@ -146,6 +150,10 @@ class NormalizedTranscript:
     segments: list
     quality_flags: dict
     offset_map: list = field(repr=False, default_factory=list)
+    # Caption cues as (normalized start, normalized end, seconds-or-None):
+    # the finest timing the source carried, so a claim's evidence can be
+    # stamped with the cue it sits in rather than its segment's first cue.
+    cues: list = field(repr=False, default_factory=list)
 
     @property
     def raw_char_count(self):
@@ -167,6 +175,46 @@ class NormalizedTranscript:
             if seg.start_character <= char_offset < seg.end_character:
                 return seg
         return self.segments[-1] if self.segments and char_offset >= len(self.text) else None
+
+    def _cue_index_at(self, char_offset):
+        for i, (s, e, _) in enumerate(self.cues):
+            if s <= char_offset < e:
+                return i
+        if self.cues and char_offset >= self.cues[-1][1]:
+            return len(self.cues) - 1
+        return None
+
+    def seconds_at(self, char_offset):
+        """
+        Seconds of the timestamped cue containing `char_offset`. A cue that
+        carried no time of its own inherits the nearest earlier timestamped
+        cue. None when the source had no timing at all (plain text), never a
+        guess.
+        """
+        if not self.timestamps_available:
+            return None
+        i = self._cue_index_at(char_offset)
+        if i is None:
+            return None
+        while i >= 0:
+            secs = self.cues[i][2]
+            if secs is not None:
+                return secs
+            i -= 1
+        return None
+
+    def end_seconds_at(self, char_offset):
+        """Seconds at which the cue containing `char_offset` ends: the next
+        timestamped cue's start, or None at the end of the source."""
+        if not self.timestamps_available:
+            return None
+        i = self._cue_index_at(char_offset)
+        if i is None:
+            return None
+        for s, e, secs in self.cues[i + 1:]:
+            if secs is not None:
+                return secs
+        return None
 
 
 def transcript_hash(raw_text):
@@ -346,6 +394,7 @@ def normalize_transcript(raw_text, video_id=""):
         normalization_version=NORMALIZATION_VERSION,
         timestamps_available=any(u["seconds"] is not None for u in units),
         segments=[], quality_flags=flags, offset_map=omap,
+        cues=[(s, e, u["seconds"]) for s, e, u in cue_spans],
     )
     nt.segments = _build_segments(nt, cue_spans, video_id)
     return nt
