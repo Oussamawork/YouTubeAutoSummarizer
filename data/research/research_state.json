@@ -1,6 +1,33 @@
 {
   "version": 1,
   "videos": {
+    "-kN_6j8wQTA": {
+      "active_run_key": "9cce8f836ee51f28:n1:p1:s1",
+      "attempt_count": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg",
+      "channel_name": "Parkev Tatevosian, CFA",
+      "coverage_status": "full",
+      "created_at": "2026-09-05T18:02:43+00:00",
+      "delivery_status": "sent",
+      "extraction_model": "gemini-3.6-flash",
+      "extraction_prompt_version": "1",
+      "failed_chunk_ids": [],
+      "failure_reason": null,
+      "last_attempt_at": "2026-09-05T18:02:43+00:00",
+      "next_eligible_at": null,
+      "normalization_version": "1",
+      "processed_chunk_ids": [],
+      "published_at": "2026-09-05T15:45:28+00:00",
+      "research_status": "complete",
+      "schema_version": "1",
+      "superseded_run_keys": [],
+      "transcript_hash": "9cce8f836ee51f28952f1d3fe555823cc1f8a7535a6db63175970fd1e3125f6a",
+      "transcript_source": "supadata",
+      "transcript_stored": true,
+      "updated_at": "2026-09-05T18:02:43+00:00",
+      "video_id": "-kN_6j8wQTA",
+      "video_title": "Is Lockheed Martin a Safe Defensive Dividend Stock to Buy Right Now? | LMT Stock Analysis"
+    },
     "iX3l4eykN-s": {
       "active_run_key": "f4c20807a5623db4:n1:p1:s1",
       "attempt_count": 0,
@@ -54,6 +81,33 @@
       "updated_at": "2026-09-05T14:58:15+00:00",
       "video_id": "vmN5za6bkFQ",
       "video_title": "Why Is Nio Stock Falling, and is it a Buying Opportunity?"
+    },
+    "yJsM2K8psG0": {
+      "active_run_key": "115049a72e5ef3dd:n1:p1:s1",
+      "attempt_count": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg",
+      "channel_name": "Parkev Tatevosian, CFA",
+      "coverage_status": "full",
+      "created_at": "2026-09-05T18:03:23+00:00",
+      "delivery_status": "sent",
+      "extraction_model": "gemini-3.6-flash",
+      "extraction_prompt_version": "1",
+      "failed_chunk_ids": [],
+      "failure_reason": null,
+      "last_attempt_at": "2026-09-05T18:03:23+00:00",
+      "next_eligible_at": null,
+      "normalization_version": "1",
+      "processed_chunk_ids": [],
+      "published_at": "2026-09-05T16:45:25+00:00",
+      "research_status": "complete",
+      "schema_version": "1",
+      "superseded_run_keys": [],
+      "transcript_hash": "115049a72e5ef3dd5db48393277a14a87595b039f9775b3c2b44b3a2d72c6f6d",
+      "transcript_source": "supadata",
+      "transcript_stored": true,
+      "updated_at": "2026-09-05T18:03:23+00:00",
+      "video_id": "yJsM2K8psG0",
+      "video_title": "Rubrik Stock Analysis: A Cybersecurity Stock You Need to Buy as AI Agents Proliferate?"
     }
   }
 }
