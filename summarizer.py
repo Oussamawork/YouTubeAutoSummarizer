@@ -1,9 +1,11 @@
+import json
 import os
 import time
 
 import requests
 import gemini_quota
-from helpers import env_int, env_float
+import token_budget
+from helpers import env_int, env_float, write_json_atomic
 from log import log_info, log_warn, log_error
 
 # Provider-agnostic summarization.
@@ -22,11 +24,15 @@ from log import log_info, log_warn, log_error
 # Generous because the prompt can now carry a very long transcript and the
 # response budget can escalate; 60s was sized for a 48k-char input.
 LLM_TIMEOUT = env_int("LLM_TIMEOUT", 120)
-# 4000, not 2000: Gemini 3 counts thinking tokens against this cap, and an
-# escalation re-sends the entire transcript as a second request — which now
-# costs one of a model's 20 free requests for the day. Paying a few hundred
-# tokens up front is cheaper than paying a whole request to retry.
-LLM_MAX_TOKENS = env_int("LLM_MAX_TOKENS", 4000)
+# OUTPUT allowance for a plain summary call. This caps what the model may
+# WRITE; it says nothing about how much transcript it may READ — input
+# capacity is the model's own input limit, checked per request in tokens by
+# token_budget (see _fits_provider). 4000, not 2000: Gemini 3 counts thinking
+# tokens against this cap, and an escalation re-sends the entire transcript as
+# a second request — which costs one of a model's 20 free requests for the
+# day. Paying a few hundred tokens up front is cheaper than a whole request.
+SUMMARY_MAX_OUTPUT_TOKENS = env_int("SUMMARY_MAX_OUTPUT_TOKENS", env_int("LLM_MAX_TOKENS", 4000))
+LLM_MAX_TOKENS = SUMMARY_MAX_OUTPUT_TOKENS  # legacy name, same meaning
 # A response cut off at max_tokens is retried with a bigger budget, doubling up
 # to this ceiling. Shipping a half-written summary is worse than spending a
 # second request: the reader can't tell it was cut, and the video is marked
@@ -44,17 +50,13 @@ LLM_MAX_ESCALATIONS = env_int("LLM_MAX_ESCALATIONS", 2)
 # Empty disables the parameter.
 LLM_REASONING_EFFORT = (os.getenv("LLM_REASONING_EFFORT") or "low").strip()
 LLM_TEMPERATURE = env_float("LLM_TEMPERATURE", 0.3)
-# ~4 chars/token, so 120k chars is ~30k tokens — over 6x the longest video
-# these channels publish, i.e. in practice nothing gets cut. The context window
-# is not the binding constraint: the free tier meters tokens PER MINUTE, and
-# because an escalation re-sends the whole input, a near-window request would
-# blow the minute's allowance and be rejected rather than buy a better summary.
-LLM_MAX_TRANSCRIPT_CHARS = env_int("LLM_MAX_TRANSCRIPT_CHARS", 120000)
-# Per-provider input ceilings. Sending more than a provider accepts fails
-# outright instead of degrading, and on free tiers the per-minute token budget
-# bites long before the context window does — so each provider declares what it
-# can actually take and the prompt is trimmed to fit at call time.
-GEMINI_MAX_INPUT_CHARS = env_int("GEMINI_MAX_INPUT_CHARS", 120000)  # 1M window, TPM-bound
+# There is deliberately NO character cap on the transcript any more. The old
+# LLM_MAX_TRANSCRIPT_CHARS (120,000) kept 60% of the head and 40% of the tail
+# and silently dropped the middle — the part of a long video that carries the
+# second asset, the price target or the condition on the forecast. Whether a
+# request fits is now decided per model, in tokens, over the complete request
+# (token_budget.context_budget); one that does not fit is chunked with full
+# coverage (see _summarize_chunked), never cut.
 # Summaries are the product, so they get the strongest Flash model; the
 # fallbacks exist because each model carries its own 20-requests-per-day free
 # tier, so a busy day can draw on four budgets instead of one. Transcription
@@ -76,10 +78,6 @@ GEMINI_DEFAULT_FALLBACKS = "gemini-3.6-flash"
 # SUMMARY_MODELS to a comma-separated roster to change it, or to "*" to allow
 # any configured provider.
 SUMMARY_MODELS_DEFAULT = f"{GEMINI_DEFAULT_MODEL},{GEMINI_DEFAULT_FALLBACKS}"
-# Groq reserves max_tokens against TPM at admission, so input AND requested
-# output must both fit the per-minute budget or the call is rejected before
-# inference. ~3k input tokens leaves room for the reserved output.
-GROQ_MAX_INPUT_CHARS = env_int("GROQ_MAX_INPUT_CHARS", 12000)
 LLM_MAX_RETRIES = 3
 # Rate limits get their own budget rather than sharing the failure retries
 # above. They shared it once, and an unrelated pair of 503s could then leave a
@@ -98,9 +96,22 @@ TRANSIENT_STATUS = {500, 502, 503, 504}  # 429 is handled separately (quota/rate
 # persistently, later channels skip it instead of re-hitting the dead endpoint.
 _EXHAUSTED_PROVIDERS = set()
 
-# Marker appended when a transcript is truncated, so the model (and a curious
-# human reading the raw input) knows the text was cut short.
-TRANSCRIPT_TRUNCATION_MARKER = "\n\n...[transcript truncated]"
+# Returned by _call_provider when the complete request does not fit the
+# provider's input capacity. The caller chooses a complete-coverage strategy
+# (chunking) or another provider; the transcript is never trimmed to fit.
+INPUT_TOO_LARGE_SENTINEL = "INPUT_TOO_LARGE"
+
+# Hierarchical (chunked) summarization is bounded: more chunks than this means
+# a transcript far outside anything a video produces, and each chunk is one
+# metered request. The cap is a guard, not a budget.
+MAX_SUMMARY_CHUNKS = env_int("MAX_SUMMARY_CHUNKS", 12)
+# Where intermediate chunk results are persisted so a run that stops halfway
+# resumes without repeating the chunks that already succeeded.
+PARTIALS_DIR = os.getenv("SUMMARY_PARTIALS_DIR") or "data/research/partials"
+
+# Telemetry of the most recent provider call (model, token counts, finish
+# reason, coverage). Read by the scraper to record the extraction run.
+LAST_CALL_TELEMETRY = {}
 
 # Sentinel the model is told to emit when the transcript is genuinely
 # unsummarizable. We detect it in code and treat it as "no summary" (so the
@@ -299,7 +310,6 @@ def _provider_configs():
             "base_url": os.getenv("LLM_BASE_URL").rstrip("/"),
             "api_key": os.getenv("LLM_API_KEY"),
             "model": os.getenv("LLM_MODEL") or "gpt-4o-mini",
-            "max_input_chars": env_int("LLM_MAX_INPUT_CHARS", LLM_MAX_TRANSCRIPT_CHARS),
         })
 
     if os.getenv("GEMINI_API_KEY"):
@@ -317,7 +327,6 @@ def _provider_configs():
                 "base_url": gemini_base,
                 "api_key": os.getenv("GEMINI_API_KEY"),
                 "model": model,
-                "max_input_chars": GEMINI_MAX_INPUT_CHARS,
             })
 
     if os.getenv("GROQ_API_KEY"):
@@ -326,7 +335,6 @@ def _provider_configs():
             "base_url": "https://api.groq.com/openai/v1",
             "api_key": os.getenv("GROQ_API_KEY"),
             "model": os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile",
-            "max_input_chars": GROQ_MAX_INPUT_CHARS,
         })
 
     allowed = _summary_allowlist()
@@ -390,20 +398,17 @@ def _extract_summary(data):
         return ""
 
 
-def _fit_to_provider(message, provider):
+def _fits_provider(provider, system_prompt, content, max_tokens, transcript_chars=0):
     """
-    Trim a prompt to what this provider can actually accept. The global
-    transcript cap is sized for the widest context in the chain, so a fallback
-    with a smaller window would otherwise get a prompt it must reject outright.
+    (fits, size, budget) for the exact request about to be sent — system
+    prompt, user message and output reservation — against THIS provider's own
+    capabilities. Replaces the old character trim: a request that does not
+    fit is reported, never cut down.
     """
-    limit = provider.get("max_input_chars") or 0
-    if limit <= 0 or len(message) <= limit:
-        return message
-    log_warn(
-        f"Prompt is {len(message)} chars, over {provider['name']}'s "
-        f"{limit}-char input budget; trimming to fit."
-    )
-    return _head_and_tail(message, limit)
+    size = token_budget.measure_request(provider, system_prompt, content,
+                                        transcript_chars=transcript_chars)
+    budget = token_budget.context_budget(provider, max_tokens)
+    return budget.fits(size), size, budget
 
 
 def _was_truncated(data):
@@ -420,45 +425,46 @@ def _was_truncated(data):
     return str(reason).lower() in {"length", "max_tokens"}
 
 
-def _truncate_transcript(transcript):
-    """
-    Cap the transcript at LLM_MAX_TRANSCRIPT_CHARS, appending a clear marker and
-    logging a warning when content is dropped. Returns the (possibly shorter)
-    transcript.
-    """
-    if len(transcript) <= LLM_MAX_TRANSCRIPT_CHARS:
-        return transcript
-
-    log_warn(
-        f"Transcript is {len(transcript)} chars, exceeding the "
-        f"{LLM_MAX_TRANSCRIPT_CHARS}-char cap; truncating before summarization."
-    )
-    return _head_and_tail(transcript, LLM_MAX_TRANSCRIPT_CHARS)
-
-
-def _head_and_tail(text, limit):
-    """
-    Cut the MIDDLE out of an over-long text, keeping both ends.
-
-    Keeping only the head is wrong for this content: a market video opens with
-    the setup and closes with the price targets, invalidation levels and "what
-    I am doing" — so a head-only cut discards exactly what the summary exists
-    to capture. Roughly 60% head / 40% tail keeps thesis and conclusion both.
-    """
-    marker = TRANSCRIPT_TRUNCATION_MARKER
-    budget = max(0, limit - len(marker))
-    head = int(budget * 0.6)
-    tail = budget - head
-    if tail <= 0:
-        return text[:budget] + marker
-    return text[:head] + marker + text[-tail:]
-
-
 def _build_user_message(transcript, title=None):
     """Render the user-message template, grounding on the video title if given."""
     title = (title or "").strip()
     title_line = f"Video title: {title}\n\n" if title else ""
     return SUMMARY_USER_TEMPLATE.format(title_line=title_line, transcript=transcript)
+
+
+def _note_telemetry(provider, size, budget, max_tokens):
+    """Record what is about to be sent (see LAST_CALL_TELEMETRY)."""
+    LAST_CALL_TELEMETRY.clear()
+    LAST_CALL_TELEMETRY.update({
+        "model": provider.get("model"), "provider": budget.provider,
+        "input_tokens": size.input_tokens, "token_count_method": size.method,
+        "transcript_chars": size.transcript_chars,
+        "available_input_tokens": budget.available_input_tokens,
+        "model_input_token_limit": budget.input_token_limit,
+        "capability_source": budget.capability_source,
+        "max_output_tokens": max_tokens,
+        "reported_input_tokens": None, "reported_output_tokens": None,
+        "finish_reason": None,
+    })
+    log_info(
+        f"Request to {provider.get('model')}: {size.input_tokens:,} input tokens "
+        f"({size.method}; transcript {size.transcript_chars:,} chars) of "
+        f"{budget.available_input_tokens:,} available; output cap {max_tokens}."
+    )
+
+
+def _note_response(data):
+    """Record what the provider reported back for the last call."""
+    prompt_tokens, completion_tokens = token_budget.usage_from_response(data)
+    try:
+        finish = (data["choices"][0].get("finish_reason") or None)
+    except (AttributeError, KeyError, IndexError, TypeError):
+        finish = None
+    LAST_CALL_TELEMETRY.update({
+        "reported_input_tokens": prompt_tokens,
+        "reported_output_tokens": completion_tokens,
+        "finish_reason": finish,
+    })
 
 
 def _parse_retry_after(resp):
@@ -496,14 +502,32 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
         "Content-Type": "application/json",
     }
     content = user_message if user_message is not None else _build_user_message(transcript, title)
+    system_prompt = system_prompt or SUMMARY_SYSTEM_PROMPT
+    max_tokens = max_tokens or LLM_MAX_TOKENS
+    # Token-aware admission: the complete request is measured against this
+    # model's own input capacity. Nothing is trimmed — an over-size request
+    # is reported so the caller can chunk with full coverage or move on.
+    fits, size, budget = _fits_provider(
+        provider, system_prompt, content, max_tokens,
+        transcript_chars=len(transcript or "") if user_message is None else 0,
+    )
+    _note_telemetry(provider, size, budget, max_tokens)
+    if not fits:
+        log_warn(
+            f"{provider['name']} request is {size.input_tokens:,} input tokens "
+            f"({size.method}) against an available {budget.available_input_tokens:,} "
+            f"(model limit {budget.input_token_limit:,}, {budget.capability_source}); "
+            "not sending — the transcript is never cut to fit."
+        )
+        return INPUT_TOO_LARGE_SENTINEL
     payload = {
         "model": provider["model"],
         "messages": [
-            {"role": "system", "content": system_prompt or SUMMARY_SYSTEM_PROMPT},
-            {"role": "user", "content": _fit_to_provider(content, provider)},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content},
         ],
         "temperature": LLM_TEMPERATURE,
-        "max_tokens": max_tokens or LLM_MAX_TOKENS,
+        "max_tokens": max_tokens,
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
@@ -545,6 +569,7 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
             except ValueError as e:
                 log_error(f"{provider['name']} returned invalid JSON: {e}")
                 return ""
+            _note_response(data)
             if _was_truncated(data):
                 # Cut off at the token cap: the text ends mid-sentence and, in
                 # JSON mode, isn't even parseable. Retry with room rather than
@@ -669,6 +694,7 @@ def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
         return ""
 
     quota_hit = False
+    too_large = False
     for provider in providers:
         skip = _skip_reason(provider)
         if skip:
@@ -680,6 +706,11 @@ def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
             provider, "", system_prompt=system_prompt, user_message=user_message,
             json_mode=json_mode, max_tokens=max_tokens,
         )
+        if text == INPUT_TOO_LARGE_SENTINEL:
+            # Another model in the chain may have a wider window; the request
+            # itself is never shrunk to fit this one.
+            too_large = True
+            continue
         if text == TRUNCATED_SENTINEL:
             log_warn(f"{provider['name']} response was truncated; trying next provider.")
             continue
@@ -694,10 +725,12 @@ def complete(system_prompt, user_message, json_mode=False, max_tokens=None):
 
     if quota_hit:
         return QUOTA_EXHAUSTED_SENTINEL
+    if too_large:
+        return INPUT_TOO_LARGE_SENTINEL
     return ""
 
 
-def summarize_transcript(transcript, title=None, compact=False):
+def summarize_transcript(transcript, title=None, compact=False, cache_key=None):
     """
     Summarize a transcript using the first configured LLM provider that succeeds.
 
@@ -706,6 +739,14 @@ def summarize_transcript(transcript, title=None, compact=False):
         title: Optional video title used to ground the model on the topic.
         compact: Produce a short digest entry (TL;DR + up to 3 bullets) instead
             of a full summary — used for digest-mode channels.
+
+        cache_key: Stable key (the transcript hash) under which intermediate
+            chunk results are persisted, so a chunked summary interrupted by
+            quota resumes instead of repeating finished chunks.
+
+    The COMPLETE transcript is sent whenever it fits the selected model; when
+    it does not, the transcript is summarized in complete-coverage chunks and
+    merged (_summarize_chunked). No part of it is ever dropped.
 
     Returns the summary text, or "" if the transcript is empty, no provider is
     configured, or every provider fails. Returns INSUFFICIENT_TRANSCRIPT_SENTINEL
@@ -716,8 +757,6 @@ def summarize_transcript(transcript, title=None, compact=False):
     if not transcript:
         log_warn("Transcript is empty. Nothing to summarize.")
         return ""
-
-    transcript = _truncate_transcript(transcript)
 
     providers = _provider_configs()
     if not providers:
@@ -744,6 +783,16 @@ def summarize_transcript(transcript, title=None, compact=False):
         log_info(f"Summarizing via {provider['name']} ({provider['model']})...")
         system_prompt = COMPACT_SUMMARY_SYSTEM_PROMPT if compact else SUMMARY_SYSTEM_PROMPT
         summary = _call_provider(provider, transcript, title, system_prompt=system_prompt)
+
+        if summary == INPUT_TOO_LARGE_SENTINEL:
+            # This model cannot read the whole transcript in one request.
+            # Cover it completely in ordered chunks and merge — the old
+            # behavior here was to cut the middle out, which is exactly the
+            # failure this module no longer permits.
+            summary = _summarize_chunked(provider, transcript, title, compact, cache_key)
+            if summary == INPUT_TOO_LARGE_SENTINEL:
+                log_warn(f"{provider['name']} cannot take the transcript even chunked; trying the next provider.")
+                continue
 
         if summary == QUOTA_EXHAUSTED_SENTINEL:
             log_warn(f"{provider['name']} quota/rate limit hit; skipping it for the rest of the run.")
@@ -788,3 +837,176 @@ def summarize_transcript(transcript, title=None, compact=False):
 
     log_warn("All configured LLM providers failed to produce a summary.")
     return ""
+
+
+# --- Complete-coverage chunked summarization --------------------------------
+#
+# Used only when the complete request does not fit the selected model. Every
+# chunk is summarized into a constrained intermediate record, the records are
+# persisted per chunk (resumable), and one merge call writes the final
+# Telegram summary from ALL of them, in order. A partial set of chunks never
+# produces a summary: the caller gets a retryable sentinel instead.
+
+CHUNK_NOTES_SYSTEM_PROMPT = (
+    "You are reading ONE PART of a longer market/investing video transcript. "
+    "Other parts are handled separately, so do not guess at what came before "
+    "or after. Extract faithful notes as ONE JSON object and nothing else:\n"
+    '{"key_points": ["<the speaker\'s actual points, with every number, level, '
+    'target, timeframe and condition they gave>"], '
+    '"assets": [{"name": "<as stated>", "ticker": "<only if spoken>", '
+    '"stance": "bullish|bearish|neutral|unclear", "levels": "<numbers given>", '
+    '"timeframe": "<as stated>", "reasoning": "<why>"}], '
+    '"positions": ["<positions the speaker discloses or changes>"], '
+    '"other": ["<anything else a reader who has not watched would need>"]}\n'
+    "Rules: never invent numbers, tickers, names or dates; keep negations, "
+    "conditions and hedges attached to the point they qualify; omit sponsor "
+    "reads and housekeeping; write in English; an empty list is fine."
+)
+
+MERGE_PREAMBLE = (
+    "The input below is NOT a transcript. It is the complete, ORDERED set of "
+    "notes extracted from every part of one video's transcript (part 1 first). "
+    "Together they cover the whole video. Write the summary described above "
+    "from ALL parts — an asset or number that appears in only one part still "
+    "belongs in the output. Do not mention the parts or the notes.\n\n"
+)
+
+
+def _partial_path(cache_key, chunk_id):
+    return os.path.join(PARTIALS_DIR, cache_key, f"{chunk_id}.json")
+
+
+def _load_partial(cache_key, chunk_id):
+    if not cache_key:
+        return None
+    try:
+        with open(_partial_path(cache_key, chunk_id), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) and data.get("notes") else None
+    except (OSError, ValueError):
+        return None
+
+
+def _save_partial(cache_key, chunk, notes, provider):
+    if not cache_key:
+        return
+    write_json_atomic(_partial_path(cache_key, chunk.chunk_id), {
+        "chunk": chunk.to_dict(), "notes": notes, "model": provider.get("model"),
+    })
+
+
+def _requests_remaining(provider):
+    """Requests this provider may still make today, or None when unmetered."""
+    model = _metered_model(provider)
+    if not model:
+        return None
+    return max(0, gemini_quota.GEMINI_REQUESTS_PER_DAY - gemini_quota.used(model))
+
+
+def _summarize_chunked(provider, transcript, title, compact, cache_key):
+    """
+    Complete-coverage hierarchical summary on one provider. Returns the
+    summary, QUOTA_EXHAUSTED_SENTINEL (predictably or actually out of
+    requests — partials are kept), TRUNCATED_SENTINEL, INPUT_TOO_LARGE_SENTINEL
+    (a chunk still does not fit), or "" on a hard failure.
+    """
+    import transcript_normalize as tn
+
+    nt = tn.normalize_transcript(transcript)
+    budget = token_budget.context_budget(provider, LLM_MAX_TOKENS)
+    # Room for the chunk text once the chunk prompt and title are in.
+    prompt_tokens = token_budget.estimate_tokens(CHUNK_NOTES_SYSTEM_PROMPT + (title or "")) + 64
+    per_chunk = budget.available_input_tokens - prompt_tokens
+    if per_chunk < 500:
+        log_warn(f"{provider['name']} has no usable input window ({budget.available_input_tokens} tokens).")
+        return INPUT_TOO_LARGE_SENTINEL
+    chunks = tn.chunk_transcript(nt, per_chunk, token_budget.estimate_tokens)
+    ok, problems = tn.validate_coverage(chunks, len(nt.text))
+    if not ok:
+        log_error(f"Chunk plan does not cover the transcript: {problems}")
+        return ""
+    if len(chunks) > MAX_SUMMARY_CHUNKS:
+        log_warn(f"Transcript needs {len(chunks)} chunks on {provider['name']}, over the "
+                 f"{MAX_SUMMARY_CHUNKS} cap; trying the next provider.")
+        return INPUT_TOO_LARGE_SENTINEL
+
+    done = {c.chunk_id: _load_partial(cache_key, c.chunk_id) for c in chunks}
+    todo = [c for c in chunks if not done[c.chunk_id]]
+    needed = len(todo) + 1  # + the merge call
+    remaining = _requests_remaining(provider)
+    if remaining is not None and remaining < needed:
+        # Starting would predictably leave the summary incomplete and spend
+        # requests for nothing. Defer whole; partials already on disk resume.
+        log_warn(
+            f"{provider['name']} needs {needed} request(s) for a {len(chunks)}-chunk "
+            f"summary but has {remaining} left today; deferring."
+        )
+        return QUOTA_EXHAUSTED_SENTINEL
+    log_info(
+        f"Transcript ({len(nt.text):,} chars) exceeds {provider['name']}'s window; "
+        f"summarizing in {len(chunks)} complete-coverage chunk(s), {len(todo)} to run."
+    )
+    LAST_CALL_TELEMETRY.update({"coverage_status": "chunked_full", "chunks": len(chunks),
+                                "chunks_cached": len(chunks) - len(todo)})
+
+    succeeded = 0
+    for chunk in todo:
+        user = (f"Video title: {title}\n\n" if title else "") + \
+               f"Transcript part {chunk.sequence_number} of {len(chunks)}:\n\n{chunk.text}"
+        text = _call_provider(provider, "", system_prompt=CHUNK_NOTES_SYSTEM_PROMPT,
+                              user_message=user, json_mode=True)
+        if text in (QUOTA_EXHAUSTED_SENTINEL, TRUNCATED_SENTINEL, INPUT_TOO_LARGE_SENTINEL):
+            log_warn(f"Chunk {chunk.chunk_id} stopped with {text}; {succeeded} of {len(todo)} "
+                     "new chunk(s) saved, the rest resume next run.")
+            LAST_CALL_TELEMETRY.update({"chunks_succeeded": succeeded, "chunks_failed": 1})
+            return text
+        if not text:
+            LAST_CALL_TELEMETRY.update({"chunks_succeeded": succeeded, "chunks_failed": 1})
+            return ""
+        notes = _parse_json_object(text)
+        if notes is None:
+            log_warn(f"Chunk {chunk.chunk_id} returned no usable JSON; failing this provider.")
+            LAST_CALL_TELEMETRY.update({"chunks_succeeded": succeeded, "chunks_failed": 1})
+            return ""
+        done[chunk.chunk_id] = {"notes": notes}
+        _save_partial(cache_key, chunk, notes, provider)
+        succeeded += 1
+
+    # Every chunk participated: assert it before merging.
+    missing = [c.chunk_id for c in chunks if not done.get(c.chunk_id)]
+    if missing:
+        log_error(f"Refusing to merge with missing chunks: {missing}")
+        return ""
+    parts = [
+        f"--- Part {c.sequence_number} of {len(chunks)} ---\n"
+        + json.dumps(done[c.chunk_id]["notes"], ensure_ascii=False)
+        for c in chunks
+    ]
+    base = COMPACT_SUMMARY_SYSTEM_PROMPT if compact else SUMMARY_SYSTEM_PROMPT
+    merge_user = (f"Video title: {title}\n\n" if title else "") + MERGE_PREAMBLE + "\n\n".join(parts)
+    summary = _call_provider(provider, "", system_prompt=base, user_message=merge_user)
+    LAST_CALL_TELEMETRY.update({"coverage_status": "chunked_full", "chunks": len(chunks),
+                                "chunks_succeeded": len(chunks), "chunks_failed": 0})
+    return summary
+
+
+def _parse_json_object(text):
+    """The outermost JSON object in `text`, or None."""
+    if not text:
+        return None
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if stripped.lower().startswith("json"):
+            stripped = stripped[4:]
+    try:
+        data = json.loads(stripped)
+    except (ValueError, TypeError):
+        start, end = stripped.find("{"), stripped.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            data = json.loads(stripped[start:end + 1])
+        except (ValueError, TypeError):
+            return None
+    return data if isinstance(data, dict) else None

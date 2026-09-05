@@ -114,11 +114,43 @@ jobs:
           # Market-signal recording to data/signals.jsonl (committed back
           # below) is ON by default; set the repo variable to false to disable.
           MARKET_SIGNALS: ${{ vars.MARKET_SIGNALS }}
+          # Research capture (all optional, defaults in code): raw transcripts
+          # are persisted gzip'd under data/transcripts/ (PERSIST_TRANSCRIPTS);
+          # model input limits come from the live metadata endpoint with a
+          # registry fallback (LLM_LIVE_CAPABILITIES); request size is counted
+          # with countTokens when available (LLM_LIVE_COUNT_TOKENS); the free
+          # tier's per-minute token cap bounds one request (GEMINI_FREE_TIER_TPM).
+          PERSIST_TRANSCRIPTS: ${{ vars.PERSIST_TRANSCRIPTS }}
+          LLM_LIVE_CAPABILITIES: ${{ vars.LLM_LIVE_CAPABILITIES }}
+          LLM_LIVE_COUNT_TOKENS: ${{ vars.LLM_LIVE_COUNT_TOKENS }}
+          GEMINI_FREE_TIER_TPM: ${{ vars.GEMINI_FREE_TIER_TPM }}
+          CONTEXT_SAFETY_MARGIN_TOKENS: ${{ vars.CONTEXT_SAFETY_MARGIN_TOKENS }}
+          EXHAUSTIVE_RESEARCH_MODE: ${{ vars.EXHAUSTIVE_RESEARCH_MODE }}
 
-      - name: Persist dedup state and signals
+      - name: Retry pending research extractions
+        # Videos whose summary went out but whose claims failed, were
+        # quota-deferred or only partially covered are retried here from
+        # their stored transcripts (no transcript credit). Bounded per run
+        # and quota-aware; never touches delivery state.
+        if: ${{ !inputs.video_url }}
+        run: python research_backfill.py --retry
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GEMINI_FALLBACK_MODELS: ${{ vars.GEMINI_FALLBACK_MODELS }}
+          GROQ_MODEL: ${{ vars.GROQ_MODEL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_LIVE_CAPABILITIES: ${{ vars.LLM_LIVE_CAPABILITIES }}
+          LLM_LIVE_COUNT_TOKENS: ${{ vars.LLM_LIVE_COUNT_TOKENS }}
+          RESEARCH_BACKFILL_MAX_VIDEOS: ${{ vars.RESEARCH_BACKFILL_MAX_VIDEOS }}
+
+      - name: Persist dedup state, signals and research data
         if: always()  # commit progress even if the scraper step failed mid-run
         run: |
-          if git status --porcelain seen_videos.json data/signals.jsonl data/supadata_usage.json data/gemini_usage.json | grep -q .; then
+          if git status --porcelain seen_videos.json data/ | grep -q .; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add seen_videos.json
@@ -134,7 +166,16 @@ jobs:
             if [ -f data/gemini_usage.json ]; then
               git add data/gemini_usage.json
             fi
-            git commit -m "chore: update seen videos and signals [skip ci]"
+            # Research products: raw transcripts (gzip), the research ledger,
+            # claims and their run history, and the cached model limits. All
+            # append-only or atomically written; committed so the next run
+            # (a fresh runner) can retry research without refetching.
+            for path in data/transcripts data/research data/model_capabilities.json; do
+              if [ -e "$path" ]; then
+                git add "$path"
+              fi
+            done
+            git commit -m "chore: update seen videos, signals and research data [skip ci]"
             # Rebase onto any concurrent change, then push — retry on rejection,
             # and fail loudly if it never lands (so dedup drift / re-sends are visible).
             pushed=false

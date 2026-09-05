@@ -130,10 +130,28 @@ def test_extract_requests_json_mode(monkeypatch):
     assert captured.get("json_mode") is True
 
 
-# --- Combined summarize + extract (one call instead of two) ---
+# --- Combined summarize + claims (one call, two products) ---
 
 
-COMBINED_OK = {"summary": "TL;DR line\n\n• bullet one", "signals": VALID}
+def _nt(text="Nvidia will hit $200 by year end I think. I own Tesla shares."):
+    import transcript_normalize as tn
+    return tn.normalize_transcript(text, "v1")
+
+
+CLAIM_OK = {
+    "attribution_type": "speaker_personal_view", "claim_type": "price_target",
+    "is_forward_looking": True, "subject_mention": "Nvidia", "stance": "bullish",
+    "target_kind": "absolute_value", "target_value": 200, "currency": "USD",
+    "horizon_original": "by year end", "certainty_original": "I think", "certainty_level": "medium",
+    "evidence_text": "Nvidia will hit $200 by year end I think", "extraction_confidence": "high",
+}
+COMBINED_OK = {"summary": "TL;DR line\n\n• bullet one", "claims": [CLAIM_OK],
+               "extraction_metadata": {"warnings": []}}
+
+
+def _ctx():
+    return {"video_id": "v1", "channel_id": "c1", "channel_name": "Chan", "video_title": "T",
+            "published_at": "2026-07-01T00:00:00+00:00", "normalized": _nt()}
 
 
 def test_summarize_with_signals_success(monkeypatch):
@@ -144,58 +162,80 @@ def test_summarize_with_signals_success(monkeypatch):
         return json.dumps(COMBINED_OK)
 
     monkeypatch.setattr(signals, "complete", fake)
-    summary, sig = signals.summarize_with_signals("a transcript", "Title")
+    summary, research = signals.summarize_with_signals("a transcript", "Title", context=_ctx())
     assert summary == "TL;DR line\n\n• bullet one"
-    assert sig["assets"][0]["ticker"] == "TSLA"
+    assert research["status"] == "complete"
+    assert research["claims"][0]["ticker"] == "NVDA"          # curated mapping, not a guess
+    assert research["claims"][0]["ticker_source"] == "curated_mapping"
+    assert research["signals"]["assets"][0]["ticker"] == "NVDA"  # compatibility view
+    assert research["signals"]["assets"][0]["price_target"] == 200
     assert captured["json_mode"] is True
-    assert captured["max_tokens"] == signals.COMBINED_MAX_TOKENS
+    assert captured["max_tokens"] == signals.COMBINED_MAX_OUTPUT_TOKENS
     assert "a transcript" in captured["um"]
-    # Prompt carries both the summary rules and the signals schema.
-    assert "TL;DR" in captured["sp"] and '"market_sentiment"' in captured["sp"]
+    # Prompt carries both the summary rules and the claims contract.
+    assert "TL;DR" in captured["sp"] and '"claims"' in captured["sp"]
 
 
 def test_summarize_with_signals_compact_prompt(monkeypatch):
     seen = {}
     monkeypatch.setattr(signals, "complete",
                         lambda sp, um, **kw: seen.update(sp=sp) or json.dumps(COMBINED_OK))
-    signals.summarize_with_signals("t", "T", compact=True)
+    signals.summarize_with_signals("t", "T", compact=True, context=_ctx())
     assert "COMPACT digest entries" in seen["sp"]
 
 
 def test_summarize_with_signals_bad_json_falls_back(monkeypatch):
     # None tells the caller to use the separate summarize/extract calls.
     monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: "not json at all")
-    assert signals.summarize_with_signals("t") is None
-    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: json.dumps({"signals": VALID}))
-    assert signals.summarize_with_signals("t") is None  # no summary field
+    assert signals.summarize_with_signals("t", context=_ctx()) is None
+    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: json.dumps({"claims": []}))
+    assert signals.summarize_with_signals("t", context=_ctx()) is None  # no summary field
     monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: "")
-    assert signals.summarize_with_signals("t") is None
+    assert signals.summarize_with_signals("t", context=_ctx()) is None
+    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: signals.INPUT_TOO_LARGE_SENTINEL)
+    assert signals.summarize_with_signals("t", context=_ctx()) is None  # chunked paths take over
 
 
 def test_summarize_with_signals_quota_propagates(monkeypatch):
     # Quota is the provider chain's verdict — don't burn a second request.
     monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: signals.QUOTA_EXHAUSTED_SENTINEL)
-    summary, sig = signals.summarize_with_signals("t")
-    assert summary == signals.QUOTA_EXHAUSTED_SENTINEL and sig is None
+    summary, research = signals.summarize_with_signals("t", context=_ctx())
+    assert summary == signals.QUOTA_EXHAUSTED_SENTINEL and research is None
 
 
 def test_summarize_with_signals_insufficient_sentinel(monkeypatch):
     monkeypatch.setattr(
         signals, "complete",
-        lambda sp, um, **kw: json.dumps({"summary": "INSUFFICIENT_TRANSCRIPT", "signals": {}}),
+        lambda sp, um, **kw: json.dumps({"summary": "INSUFFICIENT_TRANSCRIPT", "claims": []}),
     )
-    summary, sig = signals.summarize_with_signals("t")
-    assert summary == signals.INSUFFICIENT_TRANSCRIPT_SENTINEL and sig is None
+    summary, research = signals.summarize_with_signals("t", context=_ctx())
+    assert summary == signals.INSUFFICIENT_TRANSCRIPT_SENTINEL and research is None
 
 
-def test_summarize_with_signals_summary_survives_bad_signals(monkeypatch):
-    # A malformed signals object must not cost us the summary.
+def test_valid_summary_with_malformed_claims_keeps_summary_and_flags_research(monkeypatch):
+    # The summary is delivered; the claims failure is a retryable research
+    # state — never an empty-signal success.
     monkeypatch.setattr(
         signals, "complete",
-        lambda sp, um, **kw: json.dumps({"summary": "Good summary", "signals": "oops"}),
+        lambda sp, um, **kw: json.dumps({"summary": "Good summary", "claims": "oops"}),
     )
-    summary, sig = signals.summarize_with_signals("t")
-    assert summary == "Good summary" and sig is None
+    summary, research = signals.summarize_with_signals("t", context=_ctx())
+    assert summary == "Good summary"
+    assert research["status"] == "failed_retryable"
+    assert research["failure_reason"] == "malformed_claims"
+    assert research["signals"] is None                  # not {"assets": []}
+    assert research["claims"] == []
+
+
+def test_genuinely_no_claims_is_distinct_from_failure(monkeypatch):
+    monkeypatch.setattr(
+        signals, "complete",
+        lambda sp, um, **kw: json.dumps({"summary": "S", "claims": [], "extraction_metadata": {"warnings": []}}),
+    )
+    summary, research = signals.summarize_with_signals("t", context=_ctx())
+    assert research["status"] == "no_claims_found"
+    assert research["signals"] == {"assets": [], "market_sentiment": "neutral", "topics": [],
+                                   "derived_from": "claims"}
 
 
 def test_summarize_with_signals_empty_transcript_skips_call(monkeypatch):
@@ -215,51 +255,84 @@ def test_combined_prompt_has_one_output_contract():
     combined = signals._build_combined_prompt()
     assert signals.TRAILING_OUTPUT_RULE not in combined
     assert "ONE JSON object" in combined
-    # The rule must still exist in the standalone prompt, and must still match
-    # it exactly — a reworded prompt would silently stop being stripped.
     assert summarizer.SUMMARY_SYSTEM_PROMPT.endswith(signals.TRAILING_OUTPUT_RULE)
     assert summarizer.COMPACT_SUMMARY_SYSTEM_PROMPT.endswith(signals.TRAILING_OUTPUT_RULE)
     assert signals._build_combined_prompt(compact=True).count("OUTPUT ENVELOPE") == 1
 
 
 def test_combined_prompt_routes_the_insufficient_sentinel_into_json():
-    # In json_mode "output the single token and nothing else" is not valid
-    # JSON, so the sentinel could never come back in a parseable form.
     combined = signals._build_combined_prompt()
     assert '"summary": "INSUFFICIENT_TRANSCRIPT"' in combined
 
 
-def test_signals_are_scoped_to_the_transcript_not_the_summary():
-    # Scoping them to the summary made the structured record a strict subset of
-    # the prose, so any asset the prose had no room for vanished from the data
-    # that market_pulse and channel_scorecard read.
-    assert "market content of the TRANSCRIPT" in signals.COMBINED_SUFFIX
+def test_claims_are_scoped_to_the_transcript_not_the_summary():
+    assert "built from the whole TRANSCRIPT" in signals.COMBINED_SUFFIX
 
 
 def test_ticker_rule_forbids_supplying_one_from_model_knowledge():
     assert "or unambiguous" not in signals.SIGNALS_SCHEMA
     assert "Never supply one from your own knowledge" in signals.SIGNALS_SCHEMA
-
-
-def test_combined_envelope_uses_slim_schema_but_standalone_keeps_catalysts():
-    # Catalysts restate the summary bullets, no aggregator reads them, and at
-    # ~17 assets their token cost is what made the model stop listing assets
-    # partway through the array (observed: 17-line roster, 5 signal assets).
-    combined = signals._build_combined_prompt()
-    envelope = combined.split("OUTPUT ENVELOPE")[1]
-    assert "catalysts" not in envelope
-    assert "catalysts" in signals.SIGNALS_SYSTEM_PROMPT
-
-
-def test_signals_require_one_entry_per_roster_asset():
-    combined = signals._build_combined_prompt()
-    assert "MUST have a matching entry" in combined
-    # Passing mentions must land as neutral, not be silently omitted.
-    assert 'stance "neutral" rather' in combined
+    assert "Never invent a ticker" in signals.COMBINED_SUFFIX
 
 
 def test_conviction_cannot_be_forced_into_a_guess():
-    # The old enum offered only low|medium|high, so 100% of stored assets had
-    # a conviction "specified" — i.e. invented whenever the speaker gave none.
     assert '"unspecified"' in signals.SIGNALS_SCHEMA.split('"conviction"')[1].split("\n")[0]
     assert "never guess one" in signals.SIGNALS_SCHEMA
+
+
+# --- Standalone research extraction (separate call / retry) ---
+
+
+def test_extract_research_single_call(monkeypatch):
+    monkeypatch.setattr(signals, "complete",
+                        lambda sp, um, **kw: json.dumps({"claims": [CLAIM_OK], "extraction_metadata": {}}))
+    out = signals.extract_research(_nt(), _ctx())
+    assert out["status"] == "complete" and out["coverage_status"] == "full"
+    assert len(out["claims"]) == 1
+
+
+def test_extract_research_quota_is_deferred_not_failed(monkeypatch):
+    monkeypatch.setattr(signals, "complete", lambda sp, um, **kw: signals.QUOTA_EXHAUSTED_SENTINEL)
+    out = signals.extract_research(_nt(), _ctx())
+    assert out["status"] == "quota_deferred" and out["signals"] is None
+
+
+def test_extract_research_chunks_when_too_large_and_resumes(monkeypatch, tmp_path):
+    # Over-limit research runs in complete-coverage chunks; a quota stop
+    # midway leaves the finished chunks on disk and reports partial coverage;
+    # the next attempt reruns only what is missing.
+    import transcript_normalize as tn
+    text = " ".join(f"Sentence {i} says Nvidia will hit ${100 + i} by year end I think." for i in range(120))
+    nt = tn.normalize_transcript(text, "v1")
+    ctx = dict(_ctx(), normalized=nt)
+    monkeypatch.setattr(signals, "_research_chunk_tokens", lambda: 600)
+    calls = {"n": 0}
+
+    def fake_complete(sp, um, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return signals.INPUT_TOO_LARGE_SENTINEL   # the single call does not fit
+        if calls["n"] == 3:
+            return signals.QUOTA_EXHAUSTED_SENTINEL   # second chunk hits quota
+        claim = dict(CLAIM_OK, evidence_text="Sentence 0 says Nvidia will hit $100 by year end I think",
+                     target_value=100)
+        return json.dumps({"claims": [claim] if calls["n"] == 2 else []})
+
+    monkeypatch.setattr(signals, "complete", fake_complete)
+    out = signals.extract_research(nt, ctx)
+    assert out["status"] == "quota_deferred"
+    assert out["coverage_status"] == "partial"
+    assert len(out["processed_chunk_ids"]) == 1 and out["chunks"] > 1
+    assert out["signals"] is None                       # partial claims never feed headline data
+    assert all(c["coverage_status"] == "partial" for c in out["claims"])
+
+    # Resume: the first chunk is served from disk, only the rest run.
+    before = calls["n"]
+    monkeypatch.setattr(signals, "complete",
+                        lambda sp, um, **kw: json.dumps({"claims": []}) if "part 1 of" not in um
+                        else (_ for _ in ()).throw(AssertionError("chunk 1 must not rerun")))
+    monkeypatch.setattr(signals, "EXHAUSTIVE_RESEARCH_MODE", True)  # go straight to chunks
+    out2 = signals.extract_research(nt, ctx)
+    assert out2["status"] == "complete" and out2["coverage_status"] == "chunked_full"
+    assert len(out2["processed_chunk_ids"]) == out2["chunks"]
+    assert calls["n"] == before  # the fake above never touched the counter, and chunk 1 was cached

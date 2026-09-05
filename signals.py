@@ -3,14 +3,22 @@ import re
 
 from helpers import env_int
 from log import log_info, log_warn
+import os
+
+import claims as claims_mod
+import research_state
+import summarizer
+import token_budget
+from helpers import env_flag, write_json_atomic
 from summarizer import (
     complete,
     QUOTA_EXHAUSTED_SENTINEL,
     INSUFFICIENT_TRANSCRIPT_SENTINEL,
+    INPUT_TOO_LARGE_SENTINEL,
+    TRUNCATED_SENTINEL,
     SUMMARY_SYSTEM_PROMPT,
     COMPACT_SUMMARY_SYSTEM_PROMPT,
     _build_user_message,
-    _truncate_transcript,
 )
 
 # Structured market-signal extraction from finance-video summaries.
@@ -187,40 +195,25 @@ def _parse_signals(text):
     return {"assets": assets, "market_sentiment": sentiment, "topics": topics}
 
 
-# Combined summarize+extract: one call returns both the Telegram summary and
-# the structured signals, halving per-video LLM requests (which is what the
-# per-minute rate limit actually counts). It carries the summary AND the signals
-# object AND the JSON escaping of both, so it needs more room than a plain
-# summary call — but not much more: observed summaries run well under 2.5k chars
-# and the signals object adds ~1k tokens. The truncations this budget was once
-# blamed for came from thinking tokens (see LLM_REASONING_EFFORT), not from the
-# summary competing with the signals for space.
-COMBINED_MAX_TOKENS = env_int("LLM_COMBINED_MAX_TOKENS", 3000)
-
-COMBINED_SUFFIX = (
-    "\n\n"
-    "=== OUTPUT ENVELOPE ===\n"
-    "Everything above describes the TEXT that belongs in the \"summary\" field: "
-    "still plain text with \"• \" bullets and the asset roster, no markdown, no "
-    "preamble. The RESPONSE as a whole is ONE JSON object and nothing else (no "
-    "fences, no prose outside it):\n"
-    '{"summary": "<the summary described above, as a single JSON string using '
-    '\\n for line breaks>", "signals": <the object described below>}\n'
-    "\n"
-    "If the transcript is unsummarizable, the single-token rule above applies "
-    "to the \"summary\" FIELD, not to the response. Return exactly: "
-    '{"summary": "INSUFFICIENT_TRANSCRIPT", "signals": {"assets": [], '
-    '"market_sentiment": "neutral", "topics": []}}\n'
-    "\n"
-    "The \"signals\" value captures the market content of the TRANSCRIPT — "
-    "including assets the summary text had no room to spell out in prose. It "
-    "is the complete record; the summary is the readable one. Every asset in "
-    "the summary's roster MUST have a matching entry in \"assets\" — if the "
-    "roster has 17 lines, \"assets\" has at least 17 entries. Finish the whole "
-    "array before closing the object; a shortened array is a wrong answer, "
-    "not a shorter one. Exactly this shape:\n" + _signals_schema(include_catalysts=False)
-)
-
+# --- Combined summarize + claims: one call, two products ---------------------
+#
+# The ordinary fast path: one request returns the Telegram summary AND the
+# atomic claims for the research dataset. The two are validated independently
+# — a malformed claims array never costs the summary, and a valid summary
+# never makes a failed extraction look like "no claims" (see build_research).
+# Output caps are separate from input capacity: this cap bounds what the
+# model may WRITE; how much transcript it may READ is the model's own input
+# limit, checked per request by the summarizer.
+COMBINED_MAX_OUTPUT_TOKENS = env_int("COMBINED_MAX_OUTPUT_TOKENS", env_int("LLM_COMBINED_MAX_TOKENS", 8000))
+COMBINED_MAX_TOKENS = COMBINED_MAX_OUTPUT_TOKENS  # legacy name
+# Standalone claim extraction (research retry, chunked research) writes claims
+# only, so it needs less than the combined envelope.
+CLAIMS_MAX_OUTPUT_TOKENS = env_int("CLAIMS_MAX_OUTPUT_TOKENS", 6000)
+# High-recall research: split even a fitting transcript into chunks of this
+# many tokens for claim extraction. Off by default — it multiplies requests —
+# and only affects the research branch, never the summary.
+EXHAUSTIVE_RESEARCH_MODE = env_flag("EXHAUSTIVE_RESEARCH_MODE", default=False)
+RESEARCH_CHUNK_TOKENS = env_int("RESEARCH_CHUNK_TOKENS", 12000)
 
 # The base prompts close by saying "output only the summary itself". Appending a
 # JSON envelope after that leaves two contradictory answers to "what is the
@@ -229,70 +222,262 @@ TRAILING_OUTPUT_RULE = (
     "\n\nOutput only the summary itself — no preamble, no sign-off, and no "
     "phrases like \"Here is the summary\"."
 )
+COMBINED_SUFFIX = claims_mod.COMBINED_ENVELOPE
 
 
 def _build_combined_prompt(compact=False):
-    """Summary rules + the JSON envelope that also carries the signals."""
+    """Summary rules + the JSON envelope that also carries the claims."""
     base = COMPACT_SUMMARY_SYSTEM_PROMPT if compact else SUMMARY_SYSTEM_PROMPT
     return base.replace(TRAILING_OUTPUT_RULE, "") + COMBINED_SUFFIX
 
 
-def summarize_with_signals(transcript, title=None, compact=False, channel_name=None):
-    """
-    One LLM call producing both the summary and its market signals.
+def _research_context(context, coverage_status="full"):
+    ctx = dict(context or {})
+    nt = ctx.get("normalized")
+    if nt is not None:
+        ctx.setdefault("run_key", research_state.run_key(
+            nt.transcript_hash, nt.normalization_version,
+            claims_mod.EXTRACTION_PROMPT_VERSION, claims_mod.SCHEMA_VERSION))
+    ctx.setdefault("extraction_model", summarizer.LAST_CALL_TELEMETRY.get("model"))
+    return ctx
 
-    Returns (summary, signals) on success — where `summary` may be the
-    INSUFFICIENT_TRANSCRIPT sentinel and `signals` may be None — or None when
-    the combined path didn't work, telling the caller to fall back to the
-    separate summarize/extract calls. Never raises.
+
+def _failed(status, reason, context=None, **extra):
+    out = {"status": status, "failure_reason": reason, "claims": [], "signals": None,
+           "warnings": [], "coverage_status": None, "run_key": (context or {}).get("run_key"),
+           "telemetry": dict(summarizer.LAST_CALL_TELEMETRY)}
+    out.update(extra)
+    return out
+
+
+def build_research(data, context, coverage_status="full", chunk_id=None):
+    """
+    Validate the claims half of a model response independently of the
+    summary. Returns a research result dict:
+      status: complete | no_claims_found | needs_review | failed_retryable
+      claims: canonical records (may be empty)
+      signals: the legacy compatibility object, or None when extraction failed
+    A missing/malformed claims array is failed_retryable — never an empty
+    success — and an empty array is no_claims_found only after validation.
+    """
+    ctx = _research_context(context, coverage_status)
+    nt = ctx.get("normalized")
+    raw = claims_mod.raw_claims_from(data)
+    if raw is None:
+        return _failed("failed_retryable", "malformed_claims", ctx)
+    if nt is None:
+        return _failed("failed_retryable", "no_transcript_for_validation", ctx)
+    validated, warnings = claims_mod.validate_claims(raw, nt, ctx, coverage_status, chunk_id)
+    meta = data.get("extraction_metadata") if isinstance(data, dict) else None
+    if isinstance(meta, dict) and isinstance(meta.get("warnings"), list):
+        warnings.extend(str(w) for w in meta["warnings"] if w)
+    if not raw:
+        status = "no_claims_found"
+    elif all(c.get("review_required") for c in validated):
+        status = "needs_review"
+    else:
+        status = "complete"
+    return {
+        "status": status, "failure_reason": None, "claims": validated,
+        "signals": claims_mod.claims_to_legacy_signals(validated),
+        "warnings": warnings, "coverage_status": coverage_status,
+        "run_key": ctx.get("run_key"), "extraction_model": ctx.get("extraction_model"),
+        "telemetry": dict(summarizer.LAST_CALL_TELEMETRY),
+    }
+
+
+def summarize_with_signals(transcript, title=None, compact=False, channel_name=None, context=None):
+    """
+    One LLM call producing both the summary and the research claims.
+
+    Returns (summary, research) on success — `summary` may be the
+    INSUFFICIENT_TRANSCRIPT sentinel, `research` is a build_research() result
+    (or None when the summary was the sentinel / quota) — or None when the
+    combined path didn't work, telling the caller to fall back to the
+    separate summarize/extract calls. The complete transcript is sent; a
+    transcript too large for every model returns None so the summary takes
+    the chunked path and research runs separately. Never raises.
     """
     transcript = (transcript or "").strip()
     if not transcript:
         return None
+    ctx = dict(context or {})
+    ctx.setdefault("video_title", title)
+    ctx.setdefault("channel_name", channel_name)
 
     text = complete(
         _build_combined_prompt(compact),
-        _build_user_message(_truncate_transcript(transcript), title),
+        _build_user_message(transcript, title),
         json_mode=True,
-        max_tokens=COMBINED_MAX_TOKENS,
+        max_tokens=COMBINED_MAX_OUTPUT_TOKENS,
     )
-    if not text or text == QUOTA_EXHAUSTED_SENTINEL:
-        # Quota/failure is the provider chain's verdict, not a parsing problem:
+    if text == QUOTA_EXHAUSTED_SENTINEL:
+        # Quota is the provider chain's verdict, not a parsing problem:
         # falling back would just burn another request against the same wall.
-        return (text, None) if text == QUOTA_EXHAUSTED_SENTINEL else None
+        return text, None
+    if text == INPUT_TOO_LARGE_SENTINEL:
+        log_info("Combined request exceeds every model's input capacity; using the chunked paths.")
+        return None
+    if not text:
+        return None
 
-    stripped = _strip_code_fences(text)
-    try:
-        data = json.loads(stripped)
-    except (ValueError, TypeError):
-        start, end = stripped.find("{"), stripped.rfind("}")
-        if start == -1 or end <= start:
-            log_warn("Combined summary+signals call returned no JSON; using the separate calls.")
-            return None
-        try:
-            data = json.loads(stripped[start:end + 1])
-        except (ValueError, TypeError) as e:
-            log_warn(f"Combined summary+signals JSON unparseable ({e}); using the separate calls.")
-            return None
-
-    if not isinstance(data, dict):
+    data = claims_mod.parse_json_object(text)
+    if data is None:
+        log_warn("Combined summary+claims call returned no JSON; using the separate calls.")
         return None
     summary = data.get("summary")
     if not isinstance(summary, str) or not summary.strip():
         log_warn("Combined call produced no summary; using the separate calls.")
         return None
-
     summary = summary.strip()
     if summary.upper().startswith(INSUFFICIENT_TRANSCRIPT_SENTINEL):
         return INSUFFICIENT_TRANSCRIPT_SENTINEL, None
 
-    raw_signals = data.get("signals")
-    signals = _parse_signals(json.dumps(raw_signals)) if isinstance(raw_signals, dict) else None
+    research = build_research(data, ctx, coverage_status="full")
     log_info(
-        "Combined summary+signals call succeeded"
-        + (f" ({len(signals['assets'])} asset(s))." if signals else " (no signals).")
+        f"Combined summary+claims call succeeded: research {research['status']}"
+        + (f" ({len(research['claims'])} claim(s))" if research["claims"] else "")
+        + (f" — {research['failure_reason']}" if research["failure_reason"] else "") + "."
     )
-    return summary, signals
+    return summary, research
+
+
+# --- Standalone / chunked claim extraction -----------------------------------
+
+
+def _claims_user_message(ctx, transcript, part=""):
+    return claims_mod.CLAIMS_USER_TEMPLATE.format(
+        channel_name=(ctx.get("channel_name") or "unknown"),
+        video_title=(ctx.get("video_title") or "unknown"),
+        published_at=(ctx.get("published_at") or "unknown"),
+        part=part, transcript=transcript,
+    )
+
+
+def _claims_partial_path(cache_key, chunk_id):
+    return os.path.join(summarizer.PARTIALS_DIR, cache_key, f"claims-{chunk_id}.json")
+
+
+def _load_claims_partial(cache_key, chunk_id):
+    try:
+        with open(_claims_partial_path(cache_key, chunk_id), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) and isinstance(data.get("raw_claims"), list) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _research_chunk_tokens():
+    """Input tokens per research chunk: the first usable provider's budget
+    (less prompt overhead), or the exhaustive-mode size when smaller."""
+    providers = [p for p in summarizer._provider_configs() if not summarizer._provider_is_spent(p)]
+    budgets = [token_budget.context_budget(p, CLAIMS_MAX_OUTPUT_TOKENS).available_input_tokens
+               for p in providers]
+    prompt_tokens = token_budget.estimate_tokens(claims_mod.CLAIMS_SYSTEM_PROMPT) + 128
+    per = (max(budgets) if budgets else 0) - prompt_tokens
+    if EXHAUSTIVE_RESEARCH_MODE:
+        per = min(per, RESEARCH_CHUNK_TOKENS) if per > 0 else RESEARCH_CHUNK_TOKENS
+    return per
+
+
+def extract_research(nt, context):
+    """
+    Claim extraction from the (complete) normalized transcript, independent
+    of the summary: used when the combined path did not yield usable claims
+    and by the research retry job. One request when the transcript fits;
+    otherwise complete-coverage chunks with per-chunk resume. Returns a
+    build_research()-shaped result whose status is quota_deferred /
+    failed_retryable / partial when it could not finish. Never raises.
+    """
+    ctx = _research_context(context)
+    ctx["normalized"] = nt
+    if not nt or not nt.text.strip():
+        return _failed("failed_final", "empty_transcript", ctx)
+
+    if not EXHAUSTIVE_RESEARCH_MODE:
+        text = complete(claims_mod.CLAIMS_SYSTEM_PROMPT, _claims_user_message(ctx, nt.text),
+                        json_mode=True, max_tokens=CLAIMS_MAX_OUTPUT_TOKENS)
+        if text == QUOTA_EXHAUSTED_SENTINEL:
+            return _failed("quota_deferred", "llm_quota", ctx)
+        if text == INPUT_TOO_LARGE_SENTINEL:
+            return _extract_research_chunked(nt, ctx)
+        if not text:
+            return _failed("failed_retryable", "no_output", ctx)
+        data = claims_mod.parse_json_object(text)
+        if data is None:
+            return _failed("failed_retryable", "unparseable_json", ctx)
+        ctx["extraction_model"] = summarizer.LAST_CALL_TELEMETRY.get("model")
+        return build_research(data, ctx, coverage_status="full")
+    return _extract_research_chunked(nt, ctx)
+
+
+def _extract_research_chunked(nt, ctx):
+    import transcript_normalize as tn
+
+    per_chunk = _research_chunk_tokens()
+    if per_chunk < 500:
+        return _failed("quota_deferred", "no_provider_with_input_capacity", ctx)
+    chunks = tn.chunk_transcript(nt, per_chunk, token_budget.estimate_tokens)
+    ok, problems = tn.validate_coverage(chunks, len(nt.text))
+    if not ok:
+        return _failed("failed_retryable", f"chunk_coverage:{problems}", ctx)
+    cache_key = nt.transcript_hash
+    all_raw, processed, failed, stop_reason = [], [], [], None
+    for chunk in chunks:
+        cached = _load_claims_partial(cache_key, chunk.chunk_id)
+        if cached:
+            all_raw.append((chunk, cached["raw_claims"]))
+            processed.append(chunk.chunk_id)
+            continue
+        part = f" (part {chunk.sequence_number} of {len(chunks)}; other parts are handled separately)"
+        text = complete(claims_mod.CLAIMS_SYSTEM_PROMPT, _claims_user_message(ctx, chunk.text, part),
+                        json_mode=True, max_tokens=CLAIMS_MAX_OUTPUT_TOKENS)
+        if text in (QUOTA_EXHAUSTED_SENTINEL, INPUT_TOO_LARGE_SENTINEL, TRUNCATED_SENTINEL) or not text:
+            failed.append(chunk.chunk_id)
+            stop_reason = text or "no_output"
+            break  # the remaining chunks would hit the same wall this run
+        data = claims_mod.parse_json_object(text)
+        raw = claims_mod.raw_claims_from(data)
+        if raw is None:
+            failed.append(chunk.chunk_id)
+            stop_reason = "malformed_claims"
+            continue
+        write_json_atomic(_claims_partial_path(cache_key, chunk.chunk_id),
+                          {"chunk": chunk.to_dict(), "raw_claims": raw,
+                           "model": summarizer.LAST_CALL_TELEMETRY.get("model")})
+        all_raw.append((chunk, raw))
+        processed.append(chunk.chunk_id)
+
+    ctx["extraction_model"] = summarizer.LAST_CALL_TELEMETRY.get("model")
+    complete_coverage = len(processed) == len(chunks) and not failed
+    coverage = "chunked_full" if complete_coverage else "partial"
+    validated, warnings = [], []
+    for chunk, raw in all_raw:
+        v, w = claims_mod.validate_claims(raw, nt, ctx, coverage, chunk.chunk_id)
+        validated.extend(v)
+        warnings.extend(w)
+    claims_mod.dedupe_across_chunks(validated)
+    if not complete_coverage:
+        # A quota stop is a deferral (nothing is wrong with the video); any
+        # other stop leaves the run partial and retryable.
+        status = "quota_deferred" if stop_reason == QUOTA_EXHAUSTED_SENTINEL else "partial"
+        return {
+            "status": status, "failure_reason": stop_reason, "claims": validated,
+            "signals": None, "warnings": warnings, "coverage_status": "partial",
+            "run_key": ctx.get("run_key"), "extraction_model": ctx.get("extraction_model"),
+            "processed_chunk_ids": processed, "failed_chunk_ids": failed,
+            "chunks": len(chunks), "telemetry": dict(summarizer.LAST_CALL_TELEMETRY),
+        }
+    total_raw = sum(len(raw) for _, raw in all_raw)
+    status = "no_claims_found" if not total_raw else \
+        "needs_review" if all(c.get("review_required") for c in validated) else "complete"
+    return {
+        "status": status, "failure_reason": None, "claims": validated,
+        "signals": claims_mod.claims_to_legacy_signals(validated), "warnings": warnings,
+        "coverage_status": "chunked_full", "run_key": ctx.get("run_key"),
+        "extraction_model": ctx.get("extraction_model"), "processed_chunk_ids": processed,
+        "failed_chunk_ids": [], "chunks": len(chunks), "telemetry": dict(summarizer.LAST_CALL_TELEMETRY),
+    }
 
 
 def extract_signals(summary, video_title=None, channel_name=None):

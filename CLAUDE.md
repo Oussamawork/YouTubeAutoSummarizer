@@ -21,6 +21,52 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   Gemini runs `GEMINI_MODEL` then `GEMINI_FALLBACK_MODELS` — each model is a
   separate daily quota, and the list must stay disjoint from
   `GEMINI_TRANSCRIPT_MODELS` so video calls can't spend the summary budget.
+  **The complete transcript is always sent.** There is no character cap and no
+  head/tail cut any more (the old `LLM_MAX_TRANSCRIPT_CHARS` dropped the middle
+  of long videos); every request is measured in tokens against the selected
+  model's own input limit (`token_budget`), and one that does not fit is
+  summarized in complete-coverage chunks and merged (`_summarize_chunked`,
+  resumable via `data/research/partials/`, quota-checked before it starts).
+  `SUMMARY_MAX_OUTPUT_TOKENS` caps what the model writes, never what it reads.
+- `model_capabilities.py` — per-model input/output token limits: live Gemini
+  `models.get` (cached in `data/model_capabilities.json`), `MODEL_CAPABILITIES_JSON`
+  override, then the dated registry, then a small default for unknown models.
+  Each fallback model is judged on its own window.
+- `token_budget.py` — sizes the exact request (system + user + title +
+  transcript + envelope) with Gemini `countTokens` when available, else a
+  conservative estimate (3 chars/token), and computes the available input as
+  `min(input_limit, context - output, TPM - output) - CONTEXT_SAFETY_MARGIN_TOKENS`.
+- `transcript_normalize.py` — deterministic normalization (formatting only:
+  line endings, whitespace, caption-line joins, auto-caption overlap), stable
+  segments with offsets/seconds/speaker/category, and complete-coverage
+  overlapping chunks with a coverage validator. Raw text and an offset map
+  are kept so evidence traces back to the source.
+- `transcript_store.py` — raw transcripts persisted gzip'd under
+  `data/transcripts/` before any cleaning, indexed in
+  `data/research/transcript_records.jsonl`; hash-idempotent.
+- `claims.py` — the canonical research unit: atomic, evidence-backed claims
+  (schema v1), the extraction prompt with few-shots, deterministic validation
+  (evidence located in the transcript, numbers present in evidence, spoken
+  tickers only, curated entity resolution, documented horizon rules,
+  attribution rules for questions / third-party targets / retrospectives /
+  ownership / praise, testability), and `claims_to_legacy_signals`, the
+  documented reduction that keeps `signals.jsonl` consumers working.
+- `research_state.py` — research state independent of delivery
+  (`data/research/research_state.json`) plus the append-only products:
+  `claims.jsonl`, `extraction_runs.jsonl`, `review_queue.jsonl`,
+  `segments.jsonl`, `gate_outcomes.jsonl`, `video_records.jsonl`. Runs are
+  keyed by (transcript hash, normalization, prompt, schema) versions, so a
+  rerun appends nothing and a newer run supersedes the older one.
+- `research_backfill.py` — `--retry` (pending / failed / quota-deferred /
+  partial research from stored transcripts), `--reprocess` (stale versions),
+  `--import-legacy` (old signals rows as `schema_version="legacy"`,
+  review-required, no fabricated evidence). Bounded, quota-aware, resumable.
+- `research_analytics.py` — analytics over validated claims: data-quality
+  header with denominators, descriptive counts (claims vs segments vs videos
+  vs sources), consensus of one current view per source/asset/horizon bucket,
+  flips (same source, asset and bucket), and a scorecard over matured testable
+  forecasts with documented entry/evaluation rules. `market_pulse` appends the
+  quality header to the weekly pulse.
 - `gemini_quota.py` — per-model daily free-tier accounting in
   `data/gemini_usage.json` (20 requests/day per model, resets midnight Pacific);
   also classifies a 429 as a per-day or per-minute limit, which decides whether
@@ -29,8 +75,12 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   each repeat) and then re-probed, because the API has written a model off after
   three requests — see `docs/tdd-gemini-transcripts.md` § 9. Only the locally
   counted cap is final.
-- `signals.py` — LLM extraction of structured market signals from summaries
-  (opt-in via `MARKET_SIGNALS`; appends to `data/signals.jsonl`).
+- `signals.py` — the combined summary+claims fast path (one request, two
+  products, validated independently: a malformed claims array never costs the
+  summary and is recorded as `failed_retryable`, never as an empty result),
+  standalone/chunked `extract_research`, and the legacy summary-based
+  extractor kept for compatibility. `data/signals.jsonl` rows are now derived
+  from validated claims (`research_status` says how).
 - `signals_data.py` — the dataset layer every analytics module reads:
   `load_signals`, asset identity (`ASSET_ALIASES`, `TICKER_ALIASES`,
   `UNPRICEABLE_TICKERS`, the learned map, `canonical_ticker`), date windows and
@@ -122,6 +172,11 @@ workflow timeout.
   per-model free-tier limits (20 requests/day, not 1,500), measured cost of a
   Gemini video transcript, and why the transcript and summary model pools must
   stay disjoint. Read before changing either model list.
+- `docs/tdd-full-transcript-claims.md` — why the 120k-char head/tail cut was
+  removed, the token-budget algorithm, capability discovery, the chunked
+  paths, the claim schema and prompt, the research-state design, the
+  `signals.jsonl` compatibility reduction, migration, and limitations. Read
+  before touching request sizing, `claims.py` or the research data products.
 
 ## Dev workflow
 ```bash

@@ -319,6 +319,30 @@ def generate_charts(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None,
         return []
 
 
+def research_quality_section(days, today):
+    """
+    The data-quality header over the canonical claims dataset (coverage,
+    exclusions, denominators), so the pulse never implies more was analyzed
+    than was. Best-effort: "" when the research ledger is empty or anything
+    fails, so the legacy pulse is never blocked by its companion.
+    """
+    try:
+        import research_analytics
+        import research_state
+        state = research_state.load_state()
+        claims = research_state.load_active_claims(state)
+        if not state.get("videos") and not claims:
+            return ""
+        header = research_analytics.quality_header(
+            claims, research_state.load_gate_outcomes(), state, research_state.load_runs(),
+            today - timedelta(days=days), today,
+        )
+        return research_analytics.format_quality_header(header)
+    except Exception as e:
+        log_warn(f"Research quality section unavailable this week: {e}")
+        return ""
+
+
 CHART_ALBUM_CAPTION = (
     "This week in charts - how to read each one is written on the image."
 )
@@ -349,6 +373,9 @@ def main():
 
     if args.dry_run:
         print(pulse)
+        quality = research_quality_section(args.days, today)
+        if quality:
+            print("\n" + quality)
         if chart_paths:
             log_info(f"Charts written: {', '.join(chart_paths)}")
         return 0
@@ -362,6 +389,9 @@ def main():
     if not send_telegram_text(token, chat_id, pulse):
         return 1
     log_info("Weekly market pulse sent.")
+    quality = research_quality_section(args.days, today)
+    if quality and not send_telegram_text(token, chat_id, quality):
+        log_warn("Research quality section failed to send; the pulse went out without it.")
     # The charts illustrate the pulse; failing to send them shouldn't fail the
     # run once the text is out.
     if chart_paths and not send_telegram_photo_album(

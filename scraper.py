@@ -14,15 +14,20 @@ from helpers import (
     read_channels, clean_summary, load_state, save_state, env_int, env_float,
     env_flag, append_jsonl, title_matches,
 )
-from signals import extract_signals, summarize_with_signals
+from signals import extract_research, summarize_with_signals
 from summarizer import (
     summarize_transcript,
     INSUFFICIENT_TRANSCRIPT_SENTINEL,
     QUOTA_EXHAUSTED_SENTINEL,
     TRUNCATED_SENTINEL,
+    LAST_CALL_TELEMETRY,
 )
 from log import log_info, log_error, log_warn, log_debug, redact
 import gemini_quota
+import research_state
+import transcript_store
+from claims import SCHEMA_VERSION, EXTRACTION_PROMPT_VERSION
+from transcript_normalize import normalize_transcript
 from sendToTelegram import (
     send_telegram_message, send_telegram_digest, send_telegram_teaser,
     send_telegram_text, build_teaser,
@@ -94,6 +99,10 @@ MIN_VIDEO_SECONDS = env_int("MIN_VIDEO_SECONDS", 90)
 # mid-flight, and the run still gets to flush its digests and save its state.
 # 0 disables the deadline.
 RUN_DEADLINE_MINUTES = env_float("RUN_DEADLINE_MINUTES", 35.0)
+# Raw transcripts are persisted (gzip, data/transcripts/) before any cleaning
+# so research can be reprocessed without another transcript credit. Off
+# disables only the storage; the research state then records it as unstored.
+PERSIST_TRANSCRIPTS = env_flag("PERSIST_TRANSCRIPTS", default=True)
 
 
 def _hours_since(timestamp, now=None):
@@ -531,14 +540,19 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     request instead of two), falling back to a plain summary call if the
     combined response isn't usable.
 
-    Returns (telegram_body, outcome, decided, signals):
+    Returns (telegram_body, outcome, decided, research):
       telegram_body — text to deliver, or None when nothing should be sent yet
         (silent deferral while waiting for captions to appear);
       outcome — key for the run-summary tally;
       decided — True when the video is final (advance dedup state), False when
         it must be retried on a later run;
-      signals — extracted signals dict when the combined call produced them,
-        else None (the caller can extract separately).
+      research — the research result from the combined call (see
+        signals.build_research) when it produced one, else None (the caller
+        extracts separately, or later).
+
+    The transcript is normalized (formatting only) and, when enabled, the raw
+    text is persisted BEFORE anything else touches it. The COMPLETE normalized
+    transcript goes to the model — nothing is cut to fit.
     """
     log_info(f"Fetching transcript for {video_details['video_url']} ...")
     transcript = get_transcript_from_video(video_details['video_url'])
@@ -586,19 +600,44 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
         )
 
     video_details['transcript'] = transcript
+    video_details['transcript_source'] = _transcript_source(video_details.get('transcript_reason'))
     log_info("Transcript fetched successfully. Summarizing...")
-    raw_summary, signals = None, None
+
+    # Research capture happens before any destructive step: raw text on disk,
+    # then a deterministic normalization whose output is what every model
+    # call reads. Neither can block the summary — failures are recorded.
+    nt = normalize_transcript(transcript_text, video_details.get('video_id') or "")
+    video_details['normalized'] = nt
+    video_details['transcript_record'] = None
+    if PERSIST_TRANSCRIPTS and want_signals and video_details.get('video_id'):
+        try:
+            video_details['transcript_record'] = transcript_store.store_transcript(
+                video_details, transcript_text, video_details['transcript_source'],
+                video_details.get('transcript_reason'),
+            )
+        except Exception as e:  # persistence is best-effort by contract
+            log_error(f"Transcript persistence failed for {video_details.get('video_id')}: {e}")
+            video_details['transcript_record'] = {"stored": False, "error": str(e)}
+    log_info(
+        f"Transcript: {nt.raw_char_count:,} raw chars, {nt.normalized_char_count:,} normalized, "
+        f"{len(nt.segments)} segment(s), flags {nt.quality_flags}."
+    )
+    transcript_text = nt.text
+
+    raw_summary, research = None, None
     if want_signals:
         # One call for both; None means "not usable" — fall back to the plain
         # summary call so a combined-format hiccup can never cost a summary.
         combined = summarize_with_signals(
             transcript_text, video_details['video_title'], compact=compact,
             channel_name=video_details.get('channel_name'),
+            context=_research_context(video_details),
         )
         if combined is not None:
-            raw_summary, signals = combined
+            raw_summary, research = combined
     if raw_summary is None:
-        raw_summary = summarize_transcript(transcript_text, video_details['video_title'], compact=compact)
+        raw_summary = summarize_transcript(transcript_text, video_details['video_title'],
+                                           compact=compact, cache_key=nt.transcript_hash)
 
     if raw_summary == INSUFFICIENT_TRANSCRIPT_SENTINEL:
         # A transcript existed but was too garbled/incomplete for the model to
@@ -658,8 +697,9 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     summary = clean_summary(raw_summary)
     if summary:
         video_details['summary'] = summary
+        video_details['summary_telemetry'] = dict(LAST_CALL_TELEMETRY)
         log_info("Summary generated.")
-        return summary, "sent", True, signals
+        return summary, "sent", True, research
 
     # Transcript existed but the summarizer produced nothing.
     video_details['summary'] = "Summary not available."
@@ -699,33 +739,148 @@ def _alert_delivery_stalled(token, chat_id, outcomes, transcript_reasons):
     return True
 
 
-def _record_market_signals(channel_id, video_details, summary, signals=None):
+def _transcript_source(reason):
+    """Which source produced the transcript, from its reason tag."""
+    if reason == "ok":
+        return "supadata"
+    if reason == "gemini_ok":
+        return "gemini_video"
+    if reason == "fallback_ok":
+        return "youtube_transcript_api"
+    return None
+
+
+def _research_context(video_details, channel_id=None):
+    return {
+        "video_id": video_details.get("video_id"),
+        "channel_id": channel_id or video_details.get("channel_id"),
+        "channel_name": video_details.get("channel_name"),
+        "video_title": video_details.get("video_title"),
+        "published_at": video_details.get("published_at"),
+        "transcript_source": video_details.get("transcript_source"),
+        "normalized": video_details.get("normalized"),
+    }
+
+
+def _record_market_signals(channel_id, video_details, summary, research=None):
     """
-    Best-effort: append the delivered summary plus its market signals to
-    SIGNALS_FILE. `signals` comes free from the combined summarize+extract
-    call; when it's None (combined path unavailable or unusable) a separate
-    extraction call is made. Any failure is logged and swallowed — signal
-    recording must never affect delivery, outcomes, or dedup state.
+    Best-effort research capture for a delivered summary. `research` comes
+    free from the combined summarize+claims call; when it is None (combined
+    path unavailable or unusable) one separate extraction call is made from
+    the complete transcript. Whatever the result, the research ledger records
+    it — complete, no_claims_found, needs_review, quota_deferred or
+    failed_retryable — and the legacy signals row is written from the
+    validated claims. A failed extraction is written as `signals: null` with
+    the research status beside it, never as an empty asset list. Any failure
+    here is logged and swallowed: research must never affect delivery,
+    outcomes, or dedup state.
     """
     try:
-        if signals is None:
-            signals = extract_signals(
-                summary, video_details.get("video_title"), video_details.get("channel_name")
-            )
-        record = {
-            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            "video_id": video_details.get("video_id"),
-            "channel_id": channel_id,
-            "channel_name": video_details.get("channel_name"),
-            "video_title": video_details.get("video_title"),
-            "video_url": video_details.get("video_url"),
-            "published_at": video_details.get("published_at"),
-            "summary": summary,
-            "signals": signals,
-        }
-        append_jsonl(SIGNALS_FILE, record)
+        nt = video_details.get("normalized")
+        if research is None and nt is not None:
+            research = extract_research(nt, _research_context(video_details, channel_id))
+        _persist_research(channel_id, video_details, summary, research)
     except Exception as e:
-        log_error(f"Market-signal recording failed for {video_details.get('video_url')}: {e}")
+        log_error(f"Market-signal recording failed for {video_details.get('video_url')}: {e}", exc_info=True)
+
+
+def _persist_research(channel_id, video_details, summary, research):
+    """Write the research state, canonical products and the legacy signals row."""
+    video_id = video_details.get("video_id")
+    status = (research or {}).get("status") or "pending"
+    signals = (research or {}).get("signals")
+    row = {
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "video_id": video_id,
+        "channel_id": channel_id,
+        "channel_name": video_details.get("channel_name"),
+        "video_title": video_details.get("video_title"),
+        "video_url": video_details.get("video_url"),
+        "published_at": video_details.get("published_at"),
+        "summary": summary,
+        "signals": signals,
+        "research_status": status,
+        "coverage_status": (research or {}).get("coverage_status"),
+    }
+    append_jsonl(SIGNALS_FILE, row)
+
+    if not video_id:
+        return  # on-demand runs carry no id; nothing to key research state by
+    nt = video_details.get("normalized")
+    state = research_state.load_state()
+    stored = video_details.get("transcript_record") or {}
+    fields = {
+        "delivery_status": "sent",
+        "research_status": status,
+        "transcript_hash": nt.transcript_hash if nt else None,
+        "transcript_source": video_details.get("transcript_source"),
+        "transcript_stored": bool(stored.get("stored")) if stored else False,
+        "schema_version": SCHEMA_VERSION,
+        "normalization_version": nt.normalization_version if nt else None,
+        "extraction_prompt_version": EXTRACTION_PROMPT_VERSION,
+        "extraction_model": (research or {}).get("extraction_model")
+        or ((research or {}).get("telemetry") or {}).get("model"),
+        "coverage_status": (research or {}).get("coverage_status"),
+        "failure_reason": (research or {}).get("failure_reason"),
+        "processed_chunk_ids": (research or {}).get("processed_chunk_ids") or [],
+        "failed_chunk_ids": (research or {}).get("failed_chunk_ids") or [],
+        "channel_id": channel_id,
+        "channel_name": video_details.get("channel_name"),
+        "video_title": video_details.get("video_title"),
+        "published_at": video_details.get("published_at"),
+    }
+    entry = research_state.update(state, video_id, **fields)
+    if status != "quota_deferred":
+        research_state.note_attempt(state, video_id, counts=status not in ("complete", "no_claims_found"))
+    if status in ("failed_retryable", "partial") and entry["attempt_count"] >= research_state.MAX_RESEARCH_ATTEMPTS:
+        research_state.update(state, video_id, research_status="failed_final")
+    research_state.record_run({
+        "video_id": video_id, "run_key": (research or {}).get("run_key"), "status": status,
+        "coverage_status": (research or {}).get("coverage_status"),
+        "claims": len((research or {}).get("claims") or []),
+        "warnings": (research or {}).get("warnings") or [],
+        "failure_reason": (research or {}).get("failure_reason"),
+        "telemetry": (research or {}).get("telemetry") or {},
+        "summary_telemetry": video_details.get("summary_telemetry") or {},
+        "transcript_stored": fields["transcript_stored"],
+        "recorded_at": research_state.now_iso(),
+    })
+    if nt is not None:
+        research_state.store_segments(video_id, nt)
+    research_state.record_video(video_details, channel_id, {
+        "transcript_source": video_details.get("transcript_source"),
+        "transcript_hash": nt.transcript_hash if nt else None,
+        "raw_char_count": nt.raw_char_count if nt else None,
+        "normalized_char_count": nt.normalized_char_count if nt else None,
+        "transcript_quality_flags": nt.quality_flags if nt else None,
+    })
+    claims = (research or {}).get("claims") or []
+    if claims and status in ("complete", "needs_review", "no_claims_found", "partial"):
+        research_state.store_claims(claims, state, video_id, (research or {}).get("run_key"))
+    research_state.save_state(state)
+
+
+def _gate(channel_id, video, outcome, channel=None, **kw):
+    """Record why a discovered video was or was not analyzed. Best-effort."""
+    try:
+        research_state.record_gate_outcome(
+            channel_id, video, outcome, channel_config=channel,
+            discovery_source="rss", min_duration=MIN_VIDEO_SECONDS, **kw,
+        )
+    except Exception as e:  # never let bookkeeping touch the run
+        log_warn(f"Could not record gate outcome for {video.get('video_id')}: {e}")
+
+
+def _newer_than_watermark(video, channel_state):
+    """True for a feed video the watermark has not passed yet (the ones a
+    filter decision is worth recording for)."""
+    if not channel_state:
+        return True
+    watermark = _parse_timestamp(channel_state.get("last_published"))
+    ts = _parse_timestamp(video.get("published_at"))
+    if watermark is None or ts is None:
+        return video.get("video_id") != channel_state.get("last_video_id")
+    return ts > watermark
 
 
 # --- Delivery -----------------------------------------------------------------
@@ -739,6 +894,15 @@ def _record_market_signals(channel_id, video_details, summary, signals=None):
 # that text, with no transcript or LLM cost.
 
 _ENTRY_FIELDS = ("channel_name", "video_title", "video_url", "published_at")
+
+# Per-video outcome -> the gate outcome recorded for the research universe.
+_GATE_BY_OUTCOME = {
+    "sent": "included", "no_transcript_deferred": "transcript_unavailable",
+    "no_transcript": "transcript_unavailable", "budget_deferred": "budget_deferred",
+    "quota_deferred": "model_quota_deferred", "truncated_deferred": "model_quota_deferred",
+    "truncated": "manual_review", "insufficient": "manual_review",
+    "summary_failed": "manual_review",
+}
 
 
 def _undelivered(record):
@@ -1009,6 +1173,9 @@ def main():
                         kept = [v for v in videos if title_matches(v["video_title"], channel.get("only"))]
                         if len(kept) != len(videos):
                             filtered_out += len(videos) - len(kept)
+                            for v in videos:
+                                if v not in kept and _newer_than_watermark(v, channels_state.get(channel_id)):
+                                    _gate(channel_id, v, "title_filtered", channel)
                             log_info(
                                 f"Title filter kept {len(kept)}/{len(videos)} videos for "
                                 f"channel {channel_id} (only={','.join(channel.get('only') or [])})."
@@ -1027,9 +1194,13 @@ def main():
                         details = fetch_video_details(
                             YOUTUBE_API_KEY, [v["video_id"] for v in videos]
                         )
+                        before_gate = list(videos)
                         videos, n_short, n_uncaptioned = filter_by_duration(
                             videos, details, MIN_VIDEO_SECONDS, skip_uncaptioned
                         )
+                        for v in before_gate:
+                            if v not in videos and _newer_than_watermark(v, channels_state.get(channel_id)):
+                                _gate(channel_id, v, "duration_filtered", channel)
                         skipped_short += n_short
                         skipped_uncaptioned += n_uncaptioned
                         if n_short or n_uncaptioned:
@@ -1096,6 +1267,7 @@ def main():
                                 )
                             if deadline_hit:
                                 outcomes["deadline_deferred"] += 1
+                                _gate(channel_id, video_details, "deadline_deferred", channel)
                                 continue
                             wait = _retry_wait_remaining(record)
                             if wait > 0:
@@ -1104,6 +1276,7 @@ def main():
                                     "before spending another transcript credit on it."
                                 )
                                 outcomes["retry_backoff"] += 1
+                                _gate(channel_id, video_details, "retry_backoff", channel)
                                 continue
                             log_info(
                                 f"Processing video: {video_details['video_title']} "
@@ -1116,6 +1289,9 @@ def main():
                                 hours_since_first=_hours_since(record.get("first_attempt")),
                             )
                             outcomes[outcome] += 1
+                            _gate(channel_id, video_details, _GATE_BY_OUTCOME.get(outcome, "other"),
+                                  channel, latest_only=not channels_state.get(channel_id),
+                                  reason=video_details.get("transcript_reason"))
                             reason = video_details.get("transcript_reason")
                             if reason and reason not in TRANSCRIPT_SUCCESS_REASONS:
                                 transcript_reasons[reason] = transcript_reasons.get(reason, 0) + 1
