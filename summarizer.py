@@ -889,6 +889,15 @@ def _model_policy():
     return partial_cache.model_policy_string(_provider_configs())
 
 
+def model_config_string():
+    """The generation settings every request is made with, for run identity
+    and partial-cache keys: a changed temperature or reasoning effort is a
+    different extraction."""
+    return (f"temperature={LLM_TEMPERATURE};reasoning_effort={LLM_REASONING_EFFORT};"
+            f"summary_max_output={SUMMARY_MAX_OUTPUT_TOKENS};ceiling={LLM_MAX_TOKENS_CEILING};"
+            f"escalations={LLM_MAX_ESCALATIONS}")
+
+
 def _load_partial(nt, chunk):
     """The cached notes for this chunk, only when every input that shaped
     them (transcript, normalization, chunking, boundaries, prompt, schema,

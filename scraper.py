@@ -24,6 +24,8 @@ from summarizer import (
 )
 from log import log_info, log_error, log_warn, log_debug, redact
 import gemini_quota
+import language_detect
+import research_budget
 import research_state
 import transcript_store
 from claims import SCHEMA_VERSION, EXTRACTION_PROMPT_VERSION
@@ -608,12 +610,16 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     # call reads. Neither can block the summary — failures are recorded.
     nt = normalize_transcript(transcript_text, video_details.get('video_id') or "")
     video_details['normalized'] = nt
+    # The transcript's language decides which suspicious-empty rule set the
+    # research side may use (English and German are covered); recorded with
+    # the stored transcript, the claims and the research context.
+    video_details['transcript_language'] = language_detect.detect_language(nt.text)["language"]
     video_details['transcript_record'] = None
     if PERSIST_TRANSCRIPTS and want_signals and video_details.get('video_id'):
         try:
             video_details['transcript_record'] = transcript_store.store_transcript(
                 video_details, transcript_text, video_details['transcript_source'],
-                video_details.get('transcript_reason'),
+                video_details.get('transcript_reason'), language=video_details['transcript_language'],
             )
         except Exception as e:  # persistence is best-effort by contract
             log_error(f"Transcript persistence failed for {video_details.get('video_id')}: {e}")
@@ -761,8 +767,62 @@ def _research_context(video_details, channel_id=None):
         "video_title": video_details.get("video_title"),
         "published_at": video_details.get("published_at"),
         "transcript_source": video_details.get("transcript_source"),
+        "transcript_language": video_details.get("transcript_language"),
         "normalized": video_details.get("normalized"),
     }
+
+
+def _queue_research(queue, channel_id, video_details, summary, research=None):
+    """
+    Hold a delivered video's separate claim extraction until the delivery
+    loop is done (research_budget). The research ledger records the video
+    as pending with the reason right away, so a run that dies before the
+    queue is drained leaves the video for the retry job — delivery state is
+    already final and is never touched again.
+    """
+    reason = "deferred_to_run_end"
+    if research and research.get("retry_separately"):
+        reason = f"{research.get('failure_reason') or 'combined_output_truncated'};deferred_to_run_end"
+    try:
+        _persist_research(channel_id, video_details, summary, {"status": "pending", "failure_reason": reason},
+                          signals_row=False)
+    except Exception as e:
+        log_error(f"Could not record pending research for {video_details.get('video_url')}: {e}", exc_info=True)
+    queue.append((channel_id, video_details, summary, research))
+
+
+def _drain_research(queue, run_started=None):
+    """
+    Run the queued separate extractions once every eligible video has been
+    processed, each only when the reserve check passes; the rest are left
+    quota_deferred / summary_reserve_protected for the retry job. Returns
+    {"extracted": n, "reserve_protected": n, "deadline_deferred": n}.
+    """
+    tally = {"extracted": 0, "reserve_protected": 0, "deadline_deferred": 0}
+    for channel_id, video_details, summary, research in queue:
+        nt = video_details.get("normalized")
+        prefer_chunked = bool(research and research.get("retry_separately"))
+        try:
+            if (run_started is not None and RUN_DEADLINE_MINUTES > 0
+                    and (time.monotonic() - run_started) / 60.0 >= RUN_DEADLINE_MINUTES):
+                tally["deadline_deferred"] += 1
+                _persist_research(channel_id, video_details, summary,
+                                  {"status": "pending", "failure_reason": "deferred_run_deadline"})
+                continue
+            verdict = research_budget.check(nt, prefer_chunked=prefer_chunked)
+            if not verdict["allowed"]:
+                tally["reserve_protected"] += 1
+                _persist_research(channel_id, video_details, summary, {
+                    "status": "quota_deferred", "failure_reason": "summary_reserve_protected",
+                    "budget_check": verdict, "run_key": (research or {}).get("run_key"),
+                })
+                continue
+        except Exception as e:
+            log_error(f"Research budget check failed for {video_details.get('video_url')}: {e}", exc_info=True)
+        tally["extracted"] += 1
+        _record_market_signals(channel_id, video_details, summary, research)
+    queue.clear()
+    return tally
 
 
 def _record_market_signals(channel_id, video_details, summary, research=None):
@@ -770,7 +830,8 @@ def _record_market_signals(channel_id, video_details, summary, research=None):
     Best-effort research capture for a delivered summary. `research` comes
     free from the combined summarize+claims call; when it is None (combined
     path unavailable or unusable) one separate extraction call is made from
-    the complete transcript. Whatever the result, the research ledger records
+    the complete transcript — inside `main` only after the delivery loop and
+    only past the summary reserve (see _queue_research / research_budget). Whatever the result, the research ledger records
     it — complete, no_claims_found, needs_review, quota_deferred or
     failed_retryable — and the legacy signals row is written from the
     validated claims. A failed extraction is written as `signals: null` with
@@ -799,8 +860,10 @@ def _record_market_signals(channel_id, video_details, summary, research=None):
         log_error(f"Market-signal recording failed for {video_details.get('video_url')}: {e}", exc_info=True)
 
 
-def _persist_research(channel_id, video_details, summary, research):
-    """Write the research state, canonical products and the legacy signals row."""
+def _persist_research(channel_id, video_details, summary, research, signals_row=True):
+    """Write the research state, canonical products and the legacy signals
+    row (`signals_row=False` while the extraction is merely queued: the row
+    is written once, when the research result — or its deferral — is known)."""
     video_id = video_details.get("video_id")
     status = (research or {}).get("status") or "pending"
     signals = (research or {}).get("signals")
@@ -817,7 +880,8 @@ def _persist_research(channel_id, video_details, summary, research):
         "research_status": status,
         "coverage_status": (research or {}).get("coverage_status"),
     }
-    append_jsonl(SIGNALS_FILE, row)
+    if signals_row:
+        append_jsonl(SIGNALS_FILE, row)
 
     if not video_id:
         return  # on-demand runs carry no id; nothing to key research state by
@@ -839,18 +903,24 @@ def _persist_research(channel_id, video_details, summary, research):
         "failure_reason": (research or {}).get("failure_reason"),
         "processed_chunk_ids": (research or {}).get("processed_chunk_ids") or [],
         "failed_chunk_ids": (research or {}).get("failed_chunk_ids") or [],
+        "run_identity": (research or {}).get("run_identity"),
+        "budget_check": (research or {}).get("budget_check"),
         "channel_id": channel_id,
         "channel_name": video_details.get("channel_name"),
         "video_title": video_details.get("video_title"),
         "published_at": video_details.get("published_at"),
     }
+    previous = research_state.get(state, video_id) or {}
+    already_recorded = bool(nt) and previous.get("transcript_hash") == nt.transcript_hash
     entry = research_state.update(state, video_id, **fields)
-    if status != "quota_deferred":
+    if status not in ("quota_deferred", "pending"):
         research_state.note_attempt(state, video_id, counts=status not in ("complete", "no_claims_found"))
     if status in ("failed_retryable", "partial") and entry["attempt_count"] >= research_state.MAX_RESEARCH_ATTEMPTS:
         research_state.update(state, video_id, research_status="failed_final")
     research_state.record_run({
         "video_id": video_id, "run_key": (research or {}).get("run_key"), "status": status,
+        "identity": (research or {}).get("run_identity"),
+        "chunk_boundaries": (research or {}).get("chunk_boundaries"),
         "coverage_status": (research or {}).get("coverage_status"),
         "claims": len((research or {}).get("claims") or []),
         "warnings": (research or {}).get("warnings") or [],
@@ -862,13 +932,15 @@ def _persist_research(channel_id, video_details, summary, research):
     })
     if nt is not None:
         research_state.store_segments(video_id, nt)
-    research_state.record_video(video_details, channel_id, {
-        "transcript_source": video_details.get("transcript_source"),
-        "transcript_hash": nt.transcript_hash if nt else None,
-        "raw_char_count": nt.raw_char_count if nt else None,
-        "normalized_char_count": nt.normalized_char_count if nt else None,
-        "transcript_quality_flags": nt.quality_flags if nt else None,
-    })
+    if not already_recorded:
+        research_state.record_video(video_details, channel_id, {
+            "transcript_source": video_details.get("transcript_source"),
+            "transcript_language": video_details.get("transcript_language"),
+            "transcript_hash": nt.transcript_hash if nt else None,
+            "raw_char_count": nt.raw_char_count if nt else None,
+            "normalized_char_count": nt.normalized_char_count if nt else None,
+            "transcript_quality_flags": nt.quality_flags if nt else None,
+        })
     claims = (research or {}).get("claims") or []
     if claims and status in ("complete", "needs_review", "no_claims_found", "partial"):
         research_state.store_claims(claims, state, video_id, (research or {}).get("run_key"))
@@ -1113,6 +1185,10 @@ def main():
             # (channel_id, video_details): they are finalized only once the
             # digest they belong to has been accepted by Telegram.
             awaiting_run_digest = []
+            # Separate claim extractions held until every eligible video has
+            # been delivered (see research_budget): (channel_id,
+            # video_details, summary, research-so-far).
+            deferred_research = []
 
             def settle(awaiting, delivered):
                 """Finalize buffered videos after their digest went out, or
@@ -1331,7 +1407,15 @@ def main():
                             delivered = outbox.send(video_details, telegram_body, teaser, buffer)
 
                         if market_signals and outcome == "sent" and not redelivery:
-                            _record_market_signals(channel_id, video_details, telegram_body, signals)
+                            if signals is not None and not signals.get("retry_separately"):
+                                # Research came free with the combined call:
+                                # nothing more is spent by recording it.
+                                _record_market_signals(channel_id, video_details, telegram_body, signals)
+                            else:
+                                # A separate extraction would spend summary
+                                # requests mid-run; it waits for the queue.
+                                _queue_research(deferred_research, channel_id, video_details,
+                                                telegram_body, signals)
 
                         if decided and delivered is True:
                             # Final outcome, accepted by Telegram: advance the
@@ -1386,8 +1470,14 @@ def main():
 
             settle(awaiting_run_digest, outbox.flush_run())
 
+            # Every eligible video has been delivered or deferred; only now
+            # may research spend requests, and only above the reserve.
+            research_tally = _drain_research(deferred_research, run_started) if deferred_research else {}
+
             # End-of-run report: one line summarizing what happened this run.
             summary_line = ", ".join(f"{k}={v}" for k, v in outcomes.items() if v)
+            if research_tally:
+                summary_line += ", research " + ", ".join(f"{k}={v}" for k, v in research_tally.items() if v)
             if evicted_pending:
                 summary_line += f", pending_evicted={evicted_pending}"
             if filtered_out:

@@ -291,11 +291,25 @@ failed chunk ids, coverage, failure reason, `active_run_key`,
 with failed claims ends as delivery `sent` / research `failed_retryable`
 with the watermark advanced exactly as before.
 
-Idempotency: `run_key = hash16:nN:pP:sS`. `store_claims` appends nothing for a
-run key already active and skips claim ids already stored; a new run key
-becomes active and the previous one is listed as superseded, so
-`load_active_claims` counts one version per video while the history stays in
-`claims.jsonl`.
+Idempotency and run identity: `run_key =
+<hash16>:n<normalization>:p<prompt>:s<schema>:c<chunking>:m<mode>:k<policy10>`
+(`research_state.RUN_KEY_FORMAT`). The `m` segment is the extraction mode
+(combined | standalone | chunked | exhaustive) and `k` is a SHA-1 prefix of
+the policy string `chunk_policy | model_policy | model_config`: the chunk
+size ("full" or `tokens=N`), the provider/model chain the run was configured
+with (`partial_cache.model_policy_string`) and the generation settings
+(temperature, reasoning effort, output caps — `summarizer.model_config_string`
+plus the claims/combined output caps). The full identity dict is recorded on
+every run (`identity` in `extraction_runs.jsonl`, `run_identity` on the state
+entry, `chunk_boundaries` for chunked runs), so the hashed part can always
+be validated. Changing the extraction model, the chunk size or a generation
+setting therefore yields a NEW key: the retry job runs a new extraction that
+supersedes the old one instead of treating the video as already done
+(`research_backfill.current_run_key` → `signals.planned_run`). `store_claims`
+appends nothing for a run key already active and skips claim ids already
+stored; a new run key becomes active and the previous one is listed as
+superseded, so `load_active_claims` counts one version per video while the
+history stays in `claims.jsonl`. Legacy four-part keys still parse.
 
 ## 11. `signals.jsonl` compatibility and who reads what
 
@@ -322,7 +336,7 @@ current view per source.
 | `weekly-scorecard.yml` (Fri) | `channel_scorecard.main` → `generate_canonical_scorecard` | canonical claims scored by `research_analytics.scorecard` under `scorecard_pricing`; experimental / unranked by default; conditional-forecast report appended |
 | research report (`research_analytics.main`) | `build_report` | canonical claims; quality header, consensus, flips, disclosures, conditional report, scorecard |
 | `warm-prices.yml` (Sun) | `warm_prices.needed_ranges` | canonical forecast + benchmark ranges (`canonical_ranges`) **plus** the legacy ranges, so both the production jobs and the legacy consumers find their closes cached |
-| `daily-summary.yml` | `scraper.py`, `research_backfill.py --retry` | writes claims, state and the compatibility row; reads neither |
+| `daily-summary.yml` | `scraper.py`, `research_backfill.py --retry` | writes claims, state and the compatibility row; reads neither. Separate claim extractions are queued until every eligible video has been delivered and run only above the summary reserve (§ 13.8) |
 
 **Legacy consumers that remain** (compatibility only, never the headline
 result): `market_pulse.build_pulse` / `aggregate_assets` (run only with
@@ -374,9 +388,24 @@ trading date, and the evaluation's. A series whose adjustment is unknown or
 unadjusted is refused (`unadjusted_or_unknown_prices`), so a fetcher without
 `price_provenance` cannot score anything.
 
-*Publication-time rule* (`entry_point`). The instrument's exchange is
-resolved from the symbol suffix (`EXCHANGES`: XNYS with full NYSE holiday
-rules; XLON/XETR/XAMS/XTKS/XHKG/XKRX/XSHG/XSHE with weekday-only calendars,
+*Instrument metadata* (`instruments.py`). Before anything is priced, the
+claim's asset is resolved to a canonical instrument: `instrument_id`
+(`<MIC>:<ticker>`), ticker, internal price symbol, exchange key, MIC, asset
+type, listing country, trading currency, GICS sector and benchmark rule,
+from the curated registry (every ticker the alias tables can produce, plus
+BTC/ETH/SOL and the broad and sector ETFs) or, failing that, from the
+provider-verified learned ticker map (listing exchange, no sector →
+country benchmark). A claim's model-written `sector` / `asset_type` are
+recorded on the scored record as `speaker_sector` / `speaker_asset_type`
+and never select a benchmark or a calendar; an explicit asset type that
+contradicts the registry, an unpriceable name, or an unknown ticker leaves
+the instrument unresolved and the claim excluded (`unresolved_instrument`)
+— nothing is guessed. OTC ADRs (BAESY, SFTBY, ADYEY, BASFY) are priced on
+their US quote with `benchmark=None`.
+
+*Publication-time rule* (`entry_point`). The instrument's exchange comes
+from its metadata (`EXCHANGES`: XNYS with full NYSE holiday rules; XLON/
+XETR/XAMS/XTKS/XHKG/XKRX/XSHG/XSHE with weekday-only calendars,
 `calendar_confidence=weekdays_only`; crypto = continuous). The publication
 instant is placed in the exchange's timezone against the session:
 before open / during session → that day's close; after close, weekend,
@@ -388,18 +417,59 @@ is never used. Crypto: no session; entry = the close of the publication's
 UTC day (the first daily close after publication). Evaluation = the first
 trading-day close on or after `forecast_end_date`; both within 5 days.
 
-*Benchmarks* (`resolve_benchmark`). Per claim, from (asset type, exchange
-country, sector) through `BENCHMARKS` (sector ETFs for US sectors, SPY for
-US stocks/ETFs, BTC for crypto other than BTC itself; `BENCHMARKS_JSON`
-overrides). No defensible benchmark (non-US venue, unresolved exchange,
-self-benchmark) → raw performance only, `excess_return = null`,
-`benchmark_method` says why. `rankable_sources` ranks only sources that
-share one benchmark method and meet `MIN_SCORECARD_SAMPLE`, and only when
+*Calendar confidence.* Only NYSE closures are modelled by rule
+(`calendar_confidence=full`); crypto is continuous; every other exchange
+is `weekdays_only`. On a weekday-only calendar a local holiday is invisible:
+the "next trading day" may be a closed day with no close, and the entry or
+evaluation then resolves to whatever close the provider next returns within
+the 5-day lag (Xetra 24–25 December: a Wednesday-evening publication
+resolves to Monday 28th; Hong Kong's three-day Lunar New Year: three days
+later; a longer closure → no entry at all), or to a carried-forward quote
+some providers print on holidays. **No bound on that error is claimed.**
+Such claims are scored and each record carries `calendar_confidence`,
+`rankable=false` and `calendar_note`; they are excluded from source
+rankings by default: `ranked_n` / `ranked_direction_hits` count only
+full-confidence calendars, `rankable_sources` and the pulse's track-record
+weights use those, and `SCORECARD_RANK_WEEKDAY_CALENDARS=true` is the
+explicit opt-in.
+
+*Benchmarks* (`instruments.benchmark_for` → `resolve_benchmark`). Per
+claim, from the INSTRUMENT's (asset type, listing country, GICS sector)
+through `BENCHMARKS` (sector ETFs for US sectors, SPY for US stocks/ETFs,
+BTC for crypto other than BTC itself; `BENCHMARKS_JSON` overrides; a
+per-instrument override or `None`). No defensible benchmark (OTC ADR,
+unresolved instrument or exchange, self-benchmark) → raw performance only,
+`excess_return = null`, `benchmark_method` says why. `rankable_sources`
+ranks only sources that share one benchmark method and meet
+`MIN_SCORECARD_SAMPLE` with full-confidence forecasts, and only when
 rankings are enabled.
 
-*Unresolved exchange* → excluded (`unresolved_exchange`). *Conditional
-forecasts* → excluded from the unconditional scorecard (`conditional`);
-scored only with `include_conditional=True` and `condition_status == met`.
+*Price-target success* (`evaluate_target`). Three methods are defined and
+the record says which was used:
+
+| method | rule | needs |
+| --- | --- | --- |
+| `intraday_touch` | the daily HIGH (bullish) / LOW (bearish) reached the target on any session in [entry, evaluation] | daily bars (highs/lows) |
+| `daily_close` | a session CLOSE reached the target on any day in the window | closes |
+| `horizon_close` | the evaluation-date close is at/beyond the target | closes |
+
+Twelve Data bars are parsed into a `Bars` closes dict carrying `.highs` /
+`.lows`; `price_cache` stores them beside the closes (`highs`, `lows`,
+optional) and `channel_scorecard.fetch_price_series` serves a `PriceSeries`
+whose `granularity` is `daily_ohlc` when every close has a high and a low,
+else `daily_close`. Each scored target records `target_test_method`
+(`intraday_touch` with bars, else `daily_close`), `target_reached`,
+`target_first_reached_date`, `target_reached_within_window`,
+`horizon_close_target_met`, `intraday_target_reached` (**null = unknown**
+with closes only, never false), `daily_close_target_reached` and
+`price_data_granularity`. A target reached inside the window is reached
+even when the horizon close has moved away again. Per-source
+`target_test_methods` counts are shown in the scorecard line.
+
+*Unresolved instrument / exchange* → excluded (`unresolved_instrument`,
+`unresolved_exchange`). *Conditional forecasts* → excluded from the
+unconditional scorecard (`conditional`); scored only with
+`include_conditional=True` and `condition_status == met`.
 
 ### 13.2 Conditional-forecast model
 
@@ -450,6 +520,27 @@ suspicious empty result: combined path → `failed_retryable` /
 matching sentences are logged in the run's warnings. Never
 `no_claims_found`.
 
+*Language awareness.* The vocabulary above is one rule set per language
+(`claims.SUSPICIOUS_RULES`): **English** and **German** — the two languages
+the channel list carries (HKCM and Phantom by HKCM publish in German; the
+German set has its own prediction, recommendation, bullish/bearish,
+exclusion, generic-asset and price-move vocabularies). The transcript's
+language is detected deterministically (`language_detect.detect_language`,
+a stop-word ratio; `unknown` unless clearly one of the two) when the video
+is processed, stored with the raw transcript (`transcript_language`), put
+on every claim and carried in the research context; declared metadata wins
+over detection. For a transcript in any other (or an undetectable)
+language the guard is UNAVAILABLE and an empty result is **never
+certified**: `research_status = needs_review`, `failure_reason =
+empty_extraction_language_guard_unavailable`, `signals: null` — with one
+language-independent exception, `claims.asset_free`: a transcript that
+names no asset the dataset can identify (no curated or learned name, no
+ticker-like token) and no amount (currency, percentage, magnitude) cannot
+carry a price forecast, target or recommendation this pipeline could have
+captured, and is recorded as `no_claims_found` with the reason in the
+warnings. The verdict lives in one place, `claims.empty_extraction_verdict`,
+used by the combined, standalone and chunked paths.
+
 ### 13.4 Evidence timestamps
 
 `NormalizedTranscript.cues` keeps every caption cue's normalized span and
@@ -482,14 +573,100 @@ recommendation accuracy, false no-claims rate, duplicate rate; errors
 grouped by category with representative false positives/negatives.
 Matching is stable (evidence overlap or same segment, same asset, claim-type
 family, direction/target/bucket where labelled), never exact JSON. The
-fixture format and expansion steps are in `evals/claims/README.md`. The
-five shipped fixtures are hand-written caption-style segments with
-hand-written model outputs; **no live model quality has been measured** by
-this work.
+fixture format and expansion steps are in `evals/claims/README.md`.
+
+Every metric is also broken down by transcript length (short < 10k
+normalized chars, medium < 30k, long), transcript source, language and
+quality (noisy = caption overlap / duplicate cues / unintelligible markers
+found), and `--compare-chunked` scores the chunked extraction beside the
+full-context one (live: a second `prefer_chunked` call per fixture; offline:
+a stored `model_output_chunked`). The report header checks the fixture set
+against the **real-benchmark specification** (`BENCHMARK_SPEC`: ≥ 20 real
+videos from ≥ 2 channels, ≥ 200 labelled atomic claims, questions,
+third-party views, retrospectives, recommendations, conditional forecasts,
+several horizons, ≥ 1 no-claim video, short and long, noisy and clean, real
+transcript sources) and prints `Production extraction quality: NOT
+ESTABLISHED` until the specification is met AND live mode has run on it.
+`--export-transcripts DIR` writes one labelling skeleton per stored real
+transcript (`expected_claims: null`, ignored by the loader until labelled).
+
+**Status (2026-09-05):** the five shipped fixtures are hand-written
+caption-style segments with hand-written model outputs; the specification
+is NOT met (0 real videos, 14 labelled claims, all short, English only, no
+real source) and **no live model quality has been measured**. The sandbox
+this work ran in cannot fetch transcripts (YouTube blocks its IP, no
+Supadata key) and has no Gemini key, so the real benchmark could not be
+built or run here. `SCORECARD_RANKINGS` stays `false` until it has been and
+the results have been reviewed by hand.
+
+### 13.7 Non-view claim normalization (`claims._normalize_non_view`)
+
+A candidate the rules reclassify as a question, a portfolio disclosure, a
+retrospective (`historical_claim`), a reported third-party view or news
+item, a hypothetical or a fact is not the speaker's forecast, and the
+forecast slots (`claims.FORECAST_FIELDS`: forecast metric/direction, target
+kind/value/low/high/unit, baseline and expected change, horizon wording and
+bucket, forecast dates, condition fields, trigger, stance, stance basis,
+recommendation action) are cleared on it: `is_forward_looking=false`,
+`testable=false`, `testability_type=not_testable`, `stance=not_applicable`,
+`recommendation_action=none`, `target_kind=none`, everything else null.
+Nothing the model said is lost: a `third_party_view` / `news_report` keeps
+the values under `reported_*` (`reported_target_value`,
+`reported_forecast_direction`, `reported_horizon_bucket`,
+`reported_condition`, `reported_stance` — the model's raw stance — …), a
+`hypothetical` under `hypothetical_*`, and a question / retrospective /
+disclosure / fact in `displaced_fields`. Claim ids and the cross-chunk
+dedup key read the slots through `claims._slot`, so two reported targets
+from different houses stay two claims. `claims.non_view_invariant_violations`
+states the invariant (empty for every record `validate_claims` produces;
+`tests/test_non_view_invariants.py`). Consumers that read `condition` or
+`target_value` therefore see only the speaker's own forecasts.
+
+### 13.8 Summary-request reserve (`research_budget.py`)
+
+Summaries and claim extraction share one provider chain and, on the Gemini
+free tier, one per-model daily budget. Two rules keep research from
+spending what a later video's summary needs:
+
+1. **Deferral.** `scraper.main` never extracts claims separately while
+   videos are still being delivered. A combined summary+claims call is the
+   summary call and runs in place; a failed or truncated combined call gets
+   its summary-only fallback immediately; the separate research extraction
+   is queued (`_queue_research`: the research ledger records the video as
+   `pending` / `deferred_to_run_end`, delivery state is final) and drained
+   only after every eligible video has been processed (`_drain_research`,
+   after the run digest is flushed; past `RUN_DEADLINE_MINUTES` the queue
+   is left `pending` / `deferred_run_deadline`).
+2. **Reserve.** Before each queued extraction, and before every retry in
+   `research_backfill`, `research_budget.check` requires
+   `remaining_requests − estimated_research_requests ≥
+   SUMMARY_REQUEST_RESERVE (+ the run's remaining delivery workload)`.
+   `remaining_requests` sums the unspent daily requests of the metered
+   (Gemini) models in the chain — `None` (no cap binds) when an unmetered
+   provider or no provider is configured; the estimate is one request for
+   a transcript that fits a single claims request, else the number of
+   complete-coverage chunks. A failed check records `quota_deferred` /
+   `summary_reserve_protected` with the verdict (`budget_check`) and costs
+   nothing; the retry job picks the video up. `SUMMARY_REQUEST_RESERVE`
+   defaults to 4. `tests/test_research_budget.py` drives `main()` with two
+   videos and proves that the first video's multi-chunk extraction runs only
+   after the second video's summary, and that with a day budget the first
+   video's extraction would have exhausted, both summaries still go out and
+   no claims request is made.
 
 ## 14. Tests
 
-`./scripts/check.sh` → 575 passed. Review corrections:
+`./scripts/check.sh` → 619 passed. Hardening pass (2026-09-05):
+`test_research_budget.py` (reserve + deferral, multi-video `main()`),
+`test_run_identity.py` (run key: model, chunking and mode changes),
+`test_instruments.py` (registry, model sector never picks a benchmark,
+null on unresolved), `test_calendar_confidence.py` (consecutive local
+holidays, ranking exclusion), `test_price_targets.py` (intraday touch /
+daily close / horizon close, bars through the cache),
+`test_language_guard.py` (English and German rule sets, unknown language
+→ review), `test_non_view_invariants.py` (schema invariant per non-view
+type), `test_claims_eval.py` (breakdowns, chunked comparison, benchmark
+spec, skeleton export). Review corrections:
 `test_portfolio_disclosures.py` (1), `test_truncation_fallback.py` (2, 10),
 `test_canonical_analytics.py` (3), `test_scorecard_pricing.py` (4),
 `test_conditional_forecasts.py` (5), `test_attribution_coreference.py` (6),
@@ -575,18 +752,32 @@ What changed against the previous example:
   Supadata is fetched as plain text, so most segments have no seconds at
   all — `missing_timestamps` is reported in the quality header.
 - Non-US exchange calendars are weekday-only (`calendar_confidence=
-  weekdays_only`); a local holiday there shifts an entry by a day at most,
-  and the scored record says which calendar was used.
-- The suspicious-empty check is a keyword scan: it is tuned to be quiet on
-  explainers and loud on forecasts, but it cannot read meaning. A flagged
-  video costs one standalone extraction request or a review, never a
-  fabricated claim.
+  weekdays_only`): local holidays are not modelled, the resulting date
+  error is unbounded (a closure longer than the price lag yields no entry
+  at all), and such claims are scored and labelled but never ranked unless
+  `SCORECARD_RANK_WEEKDAY_CALENDARS=true`. Authoritative calendars for
+  XLON/XETR/XAMS/XTKS/XHKG/XKRX/XSHG/XSHE remain future work.
+- Instrument metadata covers the curated registry (the alias tables' ~80
+  tickers, BTC/ETH/SOL, broad and sector ETFs) and the provider-verified
+  learned map (US venues only, no sector); anything else is excluded from
+  the scorecard rather than guessed.
+- Intraday target tests need daily bars; series cached before this change
+  carry closes only and report intraday reach as unknown until the warm
+  job refetches them.
+- The suspicious-empty check is a keyword scan with English and German
+  rule sets: it is tuned to be quiet on explainers and loud on forecasts,
+  but it cannot read meaning. A flagged video costs one standalone
+  extraction request or a review, never a fabricated claim. Any other
+  language sends an empty extraction to review unless the transcript is
+  provably asset-free; language detection is a stop-word ratio and reports
+  short transcripts as unknown.
 - Local coreference only resolves to names the curated tables or the
   verified learned map already know; a company the dataset has never seen
   stays unresolved even when the context is unambiguous.
-- The evaluation fixtures are hand-authored; the harness measures live
-  model quality only when run with `--live` and `CLAIMS_EVAL_LIVE=1`, which
-  this work did not do.
+- The evaluation fixtures are hand-authored and the real benchmark
+  (§ 13.6) has not been built: no real transcripts are stored yet, this
+  sandbox cannot fetch any, and no live run has been made. Production
+  extraction quality is not established and rankings stay off.
 - `countTokens` measures the native request shape; the OpenAI-compatible
   layer may add a few tokens of scaffolding. The 2,048-token margin covers
   it. The 250k TPM value is this project's measured free-tier limit, not a

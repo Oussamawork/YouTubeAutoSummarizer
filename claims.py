@@ -785,6 +785,55 @@ _SUSP_EXCLUDE = re.compile(
     re.IGNORECASE)
 _SUSP_GENERIC_ASSET = re.compile(r"\b(the stock|this stock|the shares|the coin|this coin|the token|"
                                  r"bitcoin|ethereum|s&p ?500|nasdaq|gold|oil)\b", re.IGNORECASE)
+_SUSP_MOVE = re.compile(r"\b(fall|drop|rise|rally|double|triple|crash|soar|climb|surge|plunge|reach|hit)\b",
+                        re.IGNORECASE)
+
+# German rule set (HKCM and Phantom by HKCM publish in German). Same shape
+# as the English one: prediction wording, recommendation wording, bullish /
+# bearish vocabulary, educational / historical exclusions, generic asset
+# references, and the price-move verbs that make a prediction "strong".
+_SUSP_PREDICT_DE = re.compile(
+    r"\b(wird|werden|dürfte|dürften|sollte|sollten|könnte|könnten|ich erwarte|wir erwarten|erwarte ich|"
+    r"ich rechne|wir rechnen|rechne ich|ich gehe davon aus|kursziel|kursziele|zielzone|zielbereich|"
+    r"mein ziel|unser ziel|bis (ende|jahresende|mitte|zum)|nächste[snm]? (jahr|quartal|monat|woche)|"
+    r"in den nächsten|innerhalb (der nächsten|von)|richtung|auf dem weg (zu|nach)|"
+    r"ich sehe (sie|ihn|es|die aktie|den kurs|bitcoin) (bei|auf|in richtung))\b", re.IGNORECASE)
+_SUSP_RECO_DE = re.compile(
+    r"\b(ich kaufe|wir kaufen|kaufe ich|ich verkaufe|wir verkaufen|verkaufe ich|nachkaufen|nachgekauft|"
+    r"aufstocken|aufgestockt|einsteigen|eingestiegen|einstieg|ausstieg|aussteigen|ausgestiegen|"
+    r"kaufempfehlung|verkaufsempfehlung|ich empfehle|finger weg|nicht (kaufen|anfassen)|gewinne mitnehmen|"
+    r"position (aufgebaut|eröffnet|geschlossen)|ich bin (long|short|investiert)|ich halte|wir halten|"
+    r"kaufzone|kaufbereich|ein (klarer |ganz klarer )?(kauf|verkauf)|jetzt (kaufen|verkaufen)|"
+    r"(über|unter)gewichten|(un)?bedingt (kaufen|verkaufen)|würde ich (kaufen|verkaufen|meiden))\b",
+    re.IGNORECASE)
+_SUSP_BULLBEAR_DE = re.compile(
+    r"\b(bullisch|bärisch|bullish|bearish|unterbewertet|überbewertet|überkauft|überverkauft|"
+    r"aufwärtspotenzial|potenzial|upside|downside|abwärtsrisiko|günstig|teuer|top[- ]pick|überzeugung|"
+    r"schnäppchen|kursrakete)\b", re.IGNORECASE)
+_SUSP_EXCLUDE_DE = re.compile(
+    r"\b(historisch|zum beispiel|beispielsweise|stell dir vor|stellen sie sich vor|angenommen|nehmen wir an|"
+    r"hypothetisch|was ist|was bedeutet|wie funktioniert|bedeutet,? dass|im allgemeinen|im schnitt|"
+    r"im durchschnitt|typischerweise|die formel|letztes? (jahr|quartal|monat|woche)|letzte woche|damals|"
+    r"im jahr (19|20)\d\d|war|waren|hatte|hatten|früher|sponsor|werbung|rabattcode|gutscheincode)\b",
+    re.IGNORECASE)
+_SUSP_GENERIC_ASSET_DE = re.compile(
+    r"\b(die aktie|diese aktie|der aktie|die aktien|der kurs|den kurs|der coin|der token|bitcoin|ethereum|"
+    r"s&p ?500|nasdaq|dax|gold|öl|der markt)\b", re.IGNORECASE)
+_SUSP_MOVE_DE = re.compile(
+    r"\b(steigen|steigt|fallen|fällt|sinken|sinkt|rally|rallye|verdoppeln|verdreifachen|crash|abstürzen|"
+    r"klettern|explodieren|einbrechen|erreichen|erreicht|erholen|ausbrechen|durchstarten|korrigieren)\b",
+    re.IGNORECASE)
+
+# One rule set per language the dataset contains. A transcript in any other
+# language has NO guard: an empty extraction there is never certified.
+SUSPICIOUS_RULES = {
+    "en": {"predict": _SUSP_PREDICT, "reco": _SUSP_RECO, "bullbear": _SUSP_BULLBEAR, "exclude": _SUSP_EXCLUDE,
+           "generic_asset": _SUSP_GENERIC_ASSET, "move": _SUSP_MOVE},
+    "de": {"predict": _SUSP_PREDICT_DE, "reco": _SUSP_RECO_DE, "bullbear": _SUSP_BULLBEAR_DE,
+           "exclude": _SUSP_EXCLUDE_DE, "generic_asset": _SUSP_GENERIC_ASSET_DE, "move": _SUSP_MOVE_DE},
+}
+_AMOUNT_RE = re.compile(r"([$€£]\s?\d|\d+(\.\d+)?\s?(%|\b(percent|prozent)\b)|\b\d+(\.\d+)?\s?(k|thousand|million|"
+                        r"billion|trillion|tausend|millionen|milliarden|dollars?|euros?)\b)", re.IGNORECASE)
 
 
 # Auto-captions carry little punctuation, so a "sentence" can run for
@@ -808,8 +857,14 @@ def _sentences(text):
     return out
 
 
-def _has_asset(sentence, allow_ticker_like):
-    if _asset_mentions(sentence) or _SUSP_GENERIC_ASSET.search(sentence):
+def _allow_ticker_like(text):
+    letters = [c for c in text if c.isalpha()]
+    # An all-caps transcript would make every word look like a ticker.
+    return bool(letters) and sum(1 for c in letters if c.isupper()) / len(letters) < 0.6
+
+
+def _has_asset(sentence, allow_ticker_like, generic_asset=_SUSP_GENERIC_ASSET):
+    if _asset_mentions(sentence) or generic_asset.search(sentence):
         return True
     if allow_ticker_like:
         import transcript_normalize as tn
@@ -817,46 +872,198 @@ def _has_asset(sentence, allow_ticker_like):
     return False
 
 
-def suspicious_empty_check(text):
+def asset_free(text):
     """
-    {"suspicious": bool, "strong": [...], "moderate": [...], "score": n}:
-    whether an empty claims array is believable for this transcript.
-    Suspicious when at least one strong sentence exists (asset + forecast or
-    recommendation language, no educational/historical marker, not a
-    question) or two moderate ones (asset + bullish/bearish wording, or
-    asset + number + prediction wording). Deterministic; never raises.
+    True when the transcript names no asset the dataset can identify (no
+    curated or learned name, no ticker-like token) and no amount (currency,
+    percentage, magnitude) — the one language-independent fact that makes
+    an empty extraction believable when no language guard is available. A
+    claim needs an identifiable asset; a transcript with none and with no
+    number cannot carry a price forecast, target or recommendation this
+    pipeline could have captured.
     """
     text = text or ""
-    letters = [c for c in text if c.isalpha()]
-    # An all-caps transcript would make every word look like a ticker.
-    allow_ticker_like = bool(letters) and sum(1 for c in letters if c.isupper()) / len(letters) < 0.6
+    if _asset_mentions(text) or _AMOUNT_RE.search(text):
+        return False
+    if _allow_ticker_like(text):
+        import transcript_normalize as tn
+        if tn._TICKER_LIKE.search(text) and tn._assets_in(text):
+            return False
+    return True
+
+
+def suspicious_empty_check(text, language=None):
+    """
+    Whether an empty claims array is believable for this transcript:
+    {"suspicious": bool | None, "language", "guard": "available" |
+    "unavailable", "strong": [...], "moderate": [...], "score": n,
+    "asset_free": bool}.
+
+    The vocabulary is language-specific (SUSPICIOUS_RULES: English and
+    German, the languages in the channel list). `language` is the
+    transcript's language metadata; without it the language is detected.
+    For a language with no rule set the guard is UNAVAILABLE: "suspicious"
+    is None (unknown, not False) and the caller must not certify the empty
+    result as no_claims_found — unless `asset_free` proves the transcript
+    names no asset and no amount at all.
+
+    With a rule set: suspicious when at least one strong sentence exists
+    (asset + forecast or recommendation language, no educational /
+    historical marker, not a question) or two moderate ones (asset +
+    bullish/bearish wording, or asset + number + prediction wording).
+    Deterministic; never raises.
+    """
+    from language_detect import language_of
+    text = text or ""
+    lang = language_of(text, language)
+    rules = SUSPICIOUS_RULES.get(lang)
+    if rules is None:
+        return {"suspicious": None, "language": lang, "guard": "unavailable", "strong": [], "moderate": [],
+                "score": 0, "asset_free": asset_free(text)}
+    allow_ticker_like = _allow_ticker_like(text)
     strong, moderate = [], []
     for sentence in _sentences(text):
-        if sentence.endswith("?") or _SUSP_EXCLUDE.search(sentence):
+        if sentence.endswith("?") or rules["exclude"].search(sentence):
             continue
-        if not _has_asset(sentence, allow_ticker_like):
+        if not _has_asset(sentence, allow_ticker_like, rules["generic_asset"]):
             continue
-        predict, reco = bool(_SUSP_PREDICT.search(sentence)), bool(_SUSP_RECO.search(sentence))
-        number, bullbear = bool(_SUSP_NUMBER.search(sentence)), bool(_SUSP_BULLBEAR.search(sentence))
-        if reco or (predict and (number or bullbear)) or (predict and re.search(
-                r"\b(fall|drop|rise|rally|double|triple|crash|soar|climb|surge|plunge|reach|hit)\b",
-                sentence, re.IGNORECASE)):
+        predict, reco = bool(rules["predict"].search(sentence)), bool(rules["reco"].search(sentence))
+        number, bullbear = bool(_SUSP_NUMBER.search(sentence)), bool(rules["bullbear"].search(sentence))
+        if reco or (predict and (number or bullbear)) or (predict and rules["move"].search(sentence)):
             strong.append(sentence[:200])
         elif bullbear or (predict and number) or predict:
             moderate.append(sentence[:200])
     suspicious = bool(strong) or len(moderate) >= 2
-    return {"suspicious": suspicious, "strong": strong[:5], "moderate": moderate[:5],
-            "score": 2 * len(strong) + len(moderate)}
+    return {"suspicious": suspicious, "language": lang, "guard": "available", "strong": strong[:5],
+            "moderate": moderate[:5], "score": 2 * len(strong) + len(moderate), "asset_free": None}
+
+
+def empty_extraction_verdict(text, language=None, standalone=False):
+    """
+    The research status an EMPTY claims array earns for this transcript:
+    (status, failure_reason, warning). no_claims_found only when a
+    language guard exists and finds no claim-bearing language, or when the
+    transcript is provably asset-free; suspicious_empty_extraction is
+    retried (combined call) or reviewed (standalone call); a transcript in
+    a language without a guard goes to review as
+    empty_extraction_language_guard_unavailable.
+    """
+    check = suspicious_empty_check(text, language)
+    if check["guard"] == "unavailable":
+        if check["asset_free"]:
+            return "no_claims_found", None, (f"language_guard_unavailable:{check['language']}; "
+                                             "transcript names no asset and no amount")
+        return ("needs_review", "empty_extraction_language_guard_unavailable",
+                f"empty_extraction_language_guard_unavailable: language {check['language']}")
+    if check["suspicious"]:
+        return ("needs_review" if standalone else "failed_retryable", "suspicious_empty_extraction",
+                "suspicious_empty_extraction: " + "; ".join(check["strong"] or check["moderate"]))
+    return "no_claims_found", None, None
+
+
+# --- Non-view field normalization --------------------------------------------
+#
+# A candidate the rules reclassify as a question, a portfolio disclosure, a
+# retrospective, a reported third-party view / news item, a hypothetical or
+# a fact is NOT the speaker's forecast. Leaving `forecast_direction`,
+# targets, a horizon and a condition on such a record would let any consumer
+# that forgets to filter read it as a scored prediction. So those fields are
+# moved off the forecast slots: a reported view keeps them under `reported_*`
+# (it is somebody's forecast, just not the speaker's), a hypothetical under
+# `hypothetical_*`, and the rest (question, retrospective, disclosure, fact)
+# in `displaced_fields`. The forecast slots themselves are cleared, the
+# claim is not forward-looking and not testable, and carries no stance or
+# recommendation. `non_view_invariant_violations` states the invariant.
+
+FORECAST_FIELDS = (
+    "forecast_metric", "forecast_direction", "target_kind", "target_value", "target_low", "target_high",
+    "target_unit", "baseline_value", "expected_change_value", "expected_change_unit", "horizon_original",
+    "horizon_bucket", "forecast_start_date", "forecast_end_date", "condition", "condition_text",
+    "condition_observable", "condition_kind", "condition_status", "condition_evaluation_date",
+    "condition_evidence", "condition_data_source", "trigger", "stance", "stance_basis",
+    "recommendation_action",
+)
+_FORECAST_DEFAULTS = {"target_kind": "none", "stance": "not_applicable", "stance_basis": "not_applicable",
+                      "recommendation_action": "none"}
+NON_VIEW_PREFIX = {"third_party_view": "reported_", "news_report": "reported_", "hypothetical": "hypothetical_"}
+DISPLACED_CLAIM_TYPES = {"question", "historical_claim", "portfolio_disclosure", "fact"}
+
+
+def _normalize_non_view(claim, raw_stance=None, raw_action=None):
+    """Move forecast-implying fields off a non-view claim (see above).
+    `raw_stance` / `raw_action` are what the model said before the
+    attribution rules cleared them, kept as the REPORTED stance of a
+    third-party view."""
+    claim_type = claim.get("claim_type")
+    prefix = NON_VIEW_PREFIX.get(claim_type)
+    if prefix is None and claim_type not in DISPLACED_CLAIM_TYPES:
+        return claim
+    moved = {}
+    for field in FORECAST_FIELDS:
+        value = claim.get(field)
+        default = _FORECAST_DEFAULTS.get(field)
+        if value not in (None, default):
+            moved[field] = value
+        claim[field] = default
+    if prefix:
+        if raw_stance in ("bullish", "bearish", "neutral", "mixed"):
+            moved.setdefault("stance", raw_stance)
+        if raw_action not in (None, "none", "unclear"):
+            moved.setdefault("recommendation_action", raw_action)
+        for field, value in moved.items():
+            claim[prefix + field] = value
+        claim["displaced_fields"] = None
+    else:
+        claim["displaced_fields"] = moved or None
+    claim["is_forward_looking"] = False
+    claim["testable"] = False
+    claim["testability_type"] = "not_testable"
+    return claim
+
+
+def non_view_invariant_violations(claim):
+    """
+    The schema invariant for non-view claims: a question, disclosure,
+    retrospective, reported view, news item, hypothetical or fact carries no
+    stance, recommendation, forecast direction, target, horizon, dates or
+    condition on the forecast slots, is not forward-looking and not
+    testable. Returns the violated field names ([] when the invariant holds
+    or the claim is a view-bearing type).
+    """
+    claim_type = claim.get("claim_type")
+    if claim_type not in NON_VIEW_PREFIX and claim_type not in DISPLACED_CLAIM_TYPES:
+        return []
+    bad = [f for f in FORECAST_FIELDS if claim.get(f) not in (None, _FORECAST_DEFAULTS.get(f))]
+    if claim.get("is_forward_looking"):
+        bad.append("is_forward_looking")
+    if claim.get("testable") or claim.get("testability_type") != "not_testable":
+        bad.append("testability_type")
+    return bad
+
+
+def _slot(claim, field):
+    """The value of a forecast slot, wherever normalization put it: the
+    plain field on a view claim; the reported_* / hypothetical_* field or
+    the displaced_fields entry on a non-view claim (else the cleared slot)."""
+    claim_type = claim.get("claim_type")
+    if claim_type in NON_VIEW_PREFIX or claim_type in DISPLACED_CLAIM_TYPES:
+        prefix = NON_VIEW_PREFIX.get(claim_type)
+        if prefix and claim.get(prefix + field) is not None:
+            return claim[prefix + field]
+        displaced = claim.get("displaced_fields") or {}
+        if field in displaced:
+            return displaced[field]
+    return claim.get(field)
 
 
 # --- Validation ---------------------------------------------------------------
 
 
 def claim_id_for(video_id, run_key, claim):
-    basis = "|".join(str(claim.get(k)) for k in (
+    basis = "|".join(str(_slot(claim, k) if k in FORECAST_FIELDS else claim.get(k)) for k in (
         "chunk_id", "evidence_start_character", "subject_mention", "claim_type", "stance",
         "forecast_metric", "forecast_direction", "target_value", "target_low", "target_high",
-        "horizon_bucket", "condition",
+        "horizon_bucket", "condition", "attributed_person_or_organization",
     ))
     return "clm_" + hashlib.sha1(f"{video_id}|{run_key}|{basis}".encode("utf-8")).hexdigest()[:20]
 
@@ -864,10 +1071,11 @@ def claim_id_for(video_id, run_key, claim):
 def _dedup_key(claim):
     return (
         (claim.get("ticker") or _norm_name(claim.get("subject_mention"))),
-        claim.get("claim_type"), claim.get("stance"), claim.get("forecast_metric"),
-        claim.get("forecast_direction"), claim.get("target_value"), claim.get("target_low"),
-        claim.get("target_high"), claim.get("horizon_bucket"),
-        _norm_name(claim.get("condition")) or None,
+        claim.get("claim_type"), _slot(claim, "stance"), _slot(claim, "forecast_metric"),
+        _slot(claim, "forecast_direction"), _slot(claim, "target_value"), _slot(claim, "target_low"),
+        _slot(claim, "target_high"), _slot(claim, "horizon_bucket"),
+        _norm_name(_slot(claim, "condition")) or None,
+        _norm_name(claim.get("attributed_person_or_organization")) or None,
     )
 
 
@@ -904,8 +1112,8 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
         claim_type = _enum(raw.get("claim_type"), CLAIM_TYPES, "other")
         forward = bool(raw.get("is_forward_looking")) if isinstance(raw.get("is_forward_looking"), bool) \
             else claim_type in ("forecast", "price_target")
-        stance = _enum(raw.get("stance"), STANCES, "unclear")
-        action = _enum(raw.get("recommendation_action"), ACTIONS, "none")
+        stance = raw_stance = _enum(raw.get("stance"), STANCES, "unclear")
+        action = raw_action = _enum(raw.get("recommendation_action"), ACTIONS, "none")
         certainty = _enum(raw.get("certainty_level"), CERTAINTY, "not_stated")
         condition = _s(raw.get("condition"))
 
@@ -1104,6 +1312,7 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
             "video_title": context.get("video_title"),
             "published_at": context.get("published_at") or None,
             "transcript_source": context.get("transcript_source"),
+            "transcript_language": context.get("transcript_language"),
             "transcript_hash": nt.transcript_hash,
             "normalization_version": nt.normalization_version,
             "segment_id": seg.segment_id if seg else None,
@@ -1182,6 +1391,7 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
             "extraction_prompt_version": EXTRACTION_PROMPT_VERSION,
             "extracted_at": now,
         }
+        _normalize_non_view(claim, raw_stance, raw_action)
         claim["claim_id"] = claim_id_for(context.get("video_id"), context.get("run_key"), claim)
         key = _dedup_key(claim)
         if key in seen:

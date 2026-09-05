@@ -32,10 +32,27 @@ PRICE SERIES PROVENANCE (`PriceSeries`)
 BENCHMARKS (`resolve_benchmark`)
   No universal SPY. The benchmark comes from asset type, geography (the
   exchange's country) and sector through a configurable table
-  (BENCHMARKS, overridable with the BENCHMARKS_JSON env var). When no
+  (BENCHMARKS, overridable with the BENCHMARKS_JSON env var). The asset
+  type, country and sector are the INSTRUMENT's (instruments.py, curated
+  or provider-verified), never a claim's model-written sector. When no
   defensible benchmark exists the comparison is null — raw performance
   only, nothing fabricated — and sources scored under different benchmark
   methods are never ranked against each other.
+
+CALENDAR CONFIDENCE
+  Only NYSE closures are modelled by rule (calendar_confidence=full);
+  crypto is continuous. Every other exchange is weekday-only
+  (weekdays_only): its local holidays are NOT known here, so a publication
+  or evaluation date on one resolves to whatever close the provider next
+  returns — possibly days later, possibly a carried-forward quote — and no
+  bound on that error is claimed. Such claims are scored and labelled but
+  excluded from source rankings unless SCORECARD_RANK_WEEKDAY_CALENDARS
+  is set.
+
+PRICE TARGETS (`evaluate_target`)
+  Reach/hit targets are judged by intraday_touch (daily high/low) when
+  bars are available and by daily_close otherwise; the horizon close is
+  recorded separately and never turns a reached target into a miss.
 """
 import json
 import os
@@ -46,9 +63,20 @@ from zoneinfo import ZoneInfo
 from helpers import env_flag
 
 # Rankings stay off until the methodology below is the one in production
-# for every scored claim. The scorecard itself is reported as experimental.
+# for every scored claim AND the live extraction evaluation has been run and
+# reviewed by hand (docs/tdd-full-transcript-claims.md § 13.6). The scorecard
+# itself is reported as experimental.
 SCORECARD_RANKINGS_ENABLED = env_flag("SCORECARD_RANKINGS", default=False)
 SCORECARD_EXPERIMENTAL_LABEL = "EXPERIMENTAL — unranked"
+# Claims whose exchange calendar is only weekday-based are scored (with the
+# calendar confidence recorded) but kept OUT of source rankings unless this
+# is set: a local holiday there is invisible, so the entry may resolve days
+# late or to a stale close and the comparison is not like-for-like.
+RANK_WEEKDAY_CALENDARS = env_flag("SCORECARD_RANK_WEEKDAY_CALENDARS", default=False)
+RANKABLE_CALENDAR_CONFIDENCE = {"full", "continuous"}
+WEEKDAY_CALENDAR_NOTE = ("weekday-only calendar: local holidays are not modelled; the entry or evaluation "
+                         "may have resolved to the first close the provider returned after a closure of "
+                         "unknown length, or to a carried-forward quote")
 # What the provider is asked to adjust for. "splits" (Twelve Data's default)
 # is the minimum this scorecard accepts; "all" adds dividends (a total-return
 # proxy). Recorded on every series so a reader knows which they are looking at.
@@ -282,7 +310,17 @@ class PriceSeries:
     currency: str = None
     requested_start: date = None
     requested_end: date = None
+    highs: dict = None                   # {date: high}, when the provider returned bars
+    lows: dict = None
     notes: list = field(default_factory=list)
+
+    @property
+    def granularity(self):
+        """daily_ohlc when every close in the series has a high and a low
+        beside it, else daily_close (intraday touches are then unknown)."""
+        if self.highs and self.lows and all(d in self.highs and d in self.lows for d in self.closes):
+            return "daily_ohlc"
+        return "daily_close"
 
     def provenance(self):
         return {
@@ -290,6 +328,7 @@ class PriceSeries:
             "corporate_action_status": self.corporate_action_status, "currency": self.currency,
             "requested_start": self.requested_start.isoformat() if self.requested_start else None,
             "requested_end": self.requested_end.isoformat() if self.requested_end else None,
+            "price_data_granularity": self.granularity,
         }
 
     def scorable(self):
@@ -317,10 +356,71 @@ def series_from_fetcher(fetcher, symbol, start, end, exchange=None):
         prov = fetcher.price_provenance
         provider, adjustment = prov.get("provider", provider), prov.get("adjustment", adjustment)
         status = prov.get("corporate_action_status", status)
-    return PriceSeries(symbol=symbol, closes=closes, provider=provider, adjustment=adjustment,
+    # A closes dict that carries bars beside it (channel_scorecard.Bars)
+    # gives the intraday range; a plain dict gives closes only.
+    highs, lows = getattr(result, "highs", None), getattr(result, "lows", None)
+    return PriceSeries(symbol=symbol, closes=dict(closes), provider=provider, adjustment=adjustment,
                        corporate_action_status=status,
                        currency=exchange.currency if exchange else None,
-                       requested_start=start, requested_end=end)
+                       requested_start=start, requested_end=end,
+                       highs=dict(highs) if highs else None, lows=dict(lows) if lows else None)
+
+
+# --- Price-target success ---------------------------------------------------------
+#
+# "Reach $200 by year end" can be judged three ways, and they disagree
+# whenever the price touches the target and moves away again:
+#   intraday_touch   the daily HIGH (bullish) / LOW (bearish) reached the
+#                    target on any session in the window — needs bars
+#   daily_close      a session CLOSE reached the target on any day in the window
+#   horizon_close    the close on the evaluation date is at/beyond the target
+# The recorded method is intraday_touch when bars are available and
+# daily_close otherwise; horizon_close is always recorded beside it. A
+# target reached inside the window is reached, whatever the horizon close
+# did afterwards. With closes only, intraday reach is UNKNOWN (None), never
+# False.
+
+TARGET_TEST_METHODS = ("intraday_touch", "daily_close", "horizon_close")
+
+
+def evaluate_target(series, target, direction, entry_day, eval_day):
+    """
+    The price-target record for one claim over [entry_day, eval_day]:
+    target_test_method, target_reached, target_first_reached_date,
+    target_reached_within_window, horizon_close_target_met,
+    intraday_target_reached, intraday_first_reached_date,
+    daily_close_target_reached, daily_close_first_reached_date,
+    price_data_granularity. Direction is "bullish" (reach at or above) or
+    "bearish" (reach at or below).
+    """
+    up = direction == "bullish"
+
+    def hit(value):
+        return value is not None and (value >= target if up else value <= target)
+
+    days = [d for d in sorted(series.closes) if entry_day <= d <= eval_day]
+    close_first = next((d for d in days if hit(series.closes[d])), None)
+    ohlc = series.granularity == "daily_ohlc"
+    intraday_first = None
+    if ohlc:
+        extremes = series.highs if up else series.lows
+        intraday_first = next((d for d in days if hit(extremes.get(d))), None)
+    horizon_met = hit(series.closes.get(eval_day)) if eval_day in series.closes else None
+    method = "intraday_touch" if ohlc else "daily_close"
+    first = intraday_first if ohlc else close_first
+    return {
+        "target_value": target, "target_test_method": method,
+        "target_reached": first is not None,
+        "target_first_reached_date": first.isoformat() if first else None,
+        "target_reached_within_window": first is not None,
+        "horizon_close_target_met": horizon_met,
+        "intraday_target_reached": (intraday_first is not None) if ohlc else None,
+        "intraday_first_reached_date": intraday_first.isoformat() if intraday_first else None,
+        "daily_close_target_reached": close_first is not None,
+        "daily_close_first_reached_date": close_first.isoformat() if close_first else None,
+        "price_data_granularity": series.granularity,
+        "window": [entry_day.isoformat(), eval_day.isoformat()],
+    }
 
 
 # --- Benchmarks -----------------------------------------------------------------
@@ -386,5 +486,21 @@ def resolve_benchmark(asset_type, exchange, sector=None, symbol=None):
     return None, "no_benchmark_for_asset_type"
 
 
+def exchange_for_instrument(instrument):
+    """The Exchange an Instrument trades on, or None when its venue is not
+    one this module has session rules for."""
+    if instrument is None:
+        return None
+    if instrument.exchange_key == "crypto":
+        return CRYPTO
+    return EXCHANGES.get(instrument.exchange_key)
+
+
 def exchange_for_claim(claim, symbol):
     return resolve_exchange(symbol, claim.get("asset_type"))
+
+
+def rankable_calendar(exchange):
+    """Whether claims on this exchange may enter source rankings."""
+    return exchange is not None and (RANK_WEEKDAY_CALENDARS
+                                     or exchange.calendar_confidence in RANKABLE_CALENDAR_CONFIDENCE)

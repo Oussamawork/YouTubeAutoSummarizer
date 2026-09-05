@@ -15,9 +15,11 @@ Research retry / backfill job: resumable, idempotent, quota-aware.
                                                 (no evidence, review_required)
 
 Every mode is safe to stop and restart: state is saved per video, an
-extraction run is keyed by (transcript hash, normalization, prompt, schema)
-versions so a repeat appends nothing, and a quota deferral ends the run
-without counting an attempt. Transcripts are never re-fetched here: a video
+extraction run is keyed by its complete identity (transcript hash,
+normalization / prompt / schema / chunking versions, extraction mode, chunk
+policy, model policy and configuration — research_state.run_key) so a
+repeat appends nothing while a changed model or chunk policy is a new run,
+and a quota deferral ends the run without counting an attempt. Transcripts are never re-fetched here: a video
 without a stored transcript stays failed_retryable with reason
 transcript_not_stored, to be re-captured only under the daily job's existing
 budget policy.
@@ -27,12 +29,15 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 import claims as claims_mod
+import research_budget
 import research_state
 import transcript_store
 from helpers import env_int
 from log import log_info, log_warn
+import signals
 from signals import extract_research
 from signals_data import load_signals, SIGNALS_FILE
+import transcript_normalize as tn
 from transcript_normalize import normalize_transcript
 
 # Bound one run: each video is at least one model request from the shared
@@ -43,8 +48,10 @@ RETRY_BACKOFF_HOURS = 6
 
 
 def current_run_key(nt):
-    return research_state.run_key(nt.transcript_hash, nt.normalization_version,
-                                  claims_mod.EXTRACTION_PROMPT_VERSION, claims_mod.SCHEMA_VERSION)
+    """The run key a retry of `nt` would get NOW: the complete identity
+    (versions, chunking, mode, model policy and configuration), so a video
+    extracted under another model or chunk policy is not "already done"."""
+    return signals.planned_run_key(nt)
 
 
 def _context(entry, stored):
@@ -54,6 +61,7 @@ def _context(entry, stored):
         "video_title": entry.get("video_title") or stored.get("video_title"),
         "published_at": entry.get("published_at") or stored.get("published_at"),
         "transcript_source": entry.get("transcript_source") or stored.get("transcript_source"),
+        "transcript_language": stored.get("transcript_language") or entry.get("transcript_language"),
     }
 
 
@@ -75,7 +83,14 @@ def process_video(state, video_id, extractor=extract_research):
         return entry["research_status"]
     ctx = _context(entry, stored)
     ctx["normalized"] = nt
-    ctx["run_key"] = key
+    ctx["run_key"], ctx["run_identity"] = signals.planned_run(nt)
+    # The same reserve the daily run applies: a backlog never eats the
+    # requests today's summaries still need.
+    verdict = research_budget.check(nt)
+    if not verdict["allowed"]:
+        research_state.update(state, video_id, research_status="quota_deferred",
+                              failure_reason="summary_reserve_protected", budget_check=verdict)
+        return "quota_deferred"
     research_state.update(state, video_id, research_status="extracting")
     result = extractor(nt, ctx)
     status = result["status"]
@@ -88,8 +103,12 @@ def process_video(state, video_id, extractor=extract_research):
         failure_reason=result.get("failure_reason"),
         processed_chunk_ids=result.get("processed_chunk_ids") or [],
         failed_chunk_ids=result.get("failed_chunk_ids") or [], transcript_stored=True,
-        next_eligible_at=None,
+        next_eligible_at=None, run_identity=result.get("run_identity"),
     )
+    # The extraction may have changed mode on the way (a standalone call
+    # that overflowed and re-ran chunked): the key it actually ran under is
+    # the one the claims carry.
+    key = result.get("run_key") or key
     if status == "quota_deferred":
         research_state.update(state, video_id, **fields)
     else:
@@ -106,6 +125,7 @@ def process_video(state, video_id, extractor=extract_research):
                 ).replace(microsecond=0).isoformat())
     research_state.record_run({
         "video_id": video_id, "run_key": key, "status": status, "job": "backfill",
+        "identity": result.get("run_identity"), "chunk_boundaries": result.get("chunk_boundaries"),
         "coverage_status": result.get("coverage_status"), "claims": len(result.get("claims") or []),
         "warnings": result.get("warnings") or [], "failure_reason": result.get("failure_reason"),
         "telemetry": result.get("telemetry") or {}, "recorded_at": research_state.now_iso(),
@@ -156,9 +176,11 @@ def run_reprocess(max_videos=None, extractor=extract_research, state=None):
     max_videos = MAX_VIDEOS_PER_RUN if max_videos is None else max_videos
     stale = []
     for video_id, entry in state["videos"].items():
+        identity = entry.get("run_identity") or {}
         if (entry.get("extraction_prompt_version") != claims_mod.EXTRACTION_PROMPT_VERSION
                 or entry.get("schema_version") != claims_mod.SCHEMA_VERSION
-                or entry.get("normalization_version") != normalize_transcript("").normalization_version):
+                or entry.get("normalization_version") != normalize_transcript("").normalization_version
+                or (identity and identity.get("chunking_version") != tn.CHUNKING_VERSION)):
             stale.append(video_id)
     done = {}
     for video_id in stale[:max_videos] if max_videos > 0 else stale:

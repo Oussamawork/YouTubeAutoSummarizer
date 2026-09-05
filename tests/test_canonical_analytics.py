@@ -115,7 +115,7 @@ def test_warm_prices_covers_canonical_forecasts_and_their_benchmarks():
                    forecast_end_date="2026-07-20", target_kind="absolute_value", target_value=150.0)
     ranges = warm_prices.canonical_ranges([claim], date(2026, 8, 1))
     symbols = {s for s, _, _ in ranges}
-    assert {"nvda.us", "spy.us"} <= symbols
+    assert {"nvda.us", "xlk.us"} <= symbols  # the instrument registry's sector benchmark, not SPY
 
 
 def test_canonical_scorecard_job_is_experimental_and_unranked_by_default():

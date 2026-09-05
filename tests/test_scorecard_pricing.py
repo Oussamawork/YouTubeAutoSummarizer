@@ -114,22 +114,20 @@ def test_cryptocurrency_uses_the_utc_day_close_and_no_session():
     assert sc["A"]["excess_returns"] == []
 
 
-def test_unresolved_exchange_excludes_the_claim():
+def test_unresolved_exchange_excludes_the_claim(monkeypatch):
+    import instruments
     assert sp.resolve_exchange("nvda.xyz") is None and sp.resolve_exchange("", "stock") is None
     claim = _claim("2026-07-02T14:00:00+00:00", end="2026-07-20", asset_type="commodity", ticker="GOLD")
     sc = ra.scorecard([claim], date(2026, 8, 1), _fetch({}), min_sample=1)
-    assert sc["_excluded"] == {"missing_inputs": 1}  # no priceable symbol at all
-    # A priceable symbol on an unknown venue is refused explicitly.
-    import canonical_claims
+    assert sc["_excluded"] == {"unresolved_instrument": 1}  # no instrument metadata at all
     sc = ra.scorecard([_claim("2026-07-02T14:00:00+00:00", end="2026-07-20", asset_type="stock", ticker="NVDA")],
                       date(2026, 8, 1), _fetch({}), min_sample=1)
     assert sc["_excluded"] == {"no_prices": 1}
-    orig = canonical_claims.priceable_symbol
-    canonical_claims.priceable_symbol = lambda c: "nvda.unknownvenue"
-    try:
-        sc = ra.scorecard([claim], date(2026, 8, 1), _fetch({}), min_sample=1)
-    finally:
-        canonical_claims.priceable_symbol = orig
+    # A resolved instrument on a venue without session rules is refused explicitly.
+    odd = instruments.Instrument("XXXX:NVDA", "NVDA", "nvda.unknownvenue", "unknownvenue", "XXXX", "stock",
+                                 "ZZ", "ZZZ", None)
+    monkeypatch.setattr(instruments, "resolve_instrument", lambda *a, **k: odd)
+    sc = ra.scorecard([claim], date(2026, 8, 1), _fetch({}), min_sample=1)
     assert sc["_excluded"] == {"unresolved_exchange": 1}
 
 

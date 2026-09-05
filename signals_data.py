@@ -180,7 +180,34 @@ def reset_learned_tickers(value=None):
     """Test seam for the process-wide learned map."""
     global _LEARNED
     _LEARNED = value
+    _LEARNED_ENTRIES.clear()
     return _LEARNED
+
+
+_LEARNED_ENTRIES = {}
+
+
+def learned_ticker_entries(path=LEARNED_TICKERS_FILE):
+    """
+    The learned map's full records — {NAME: {"ticker", "exchange", "company",
+    "via", "checked"}} — for consumers that need the verified listing venue
+    (instruments.py). Empty when the process-wide map has been replaced by a
+    test seam, so a test never reads the committed file by accident.
+    """
+    if _LEARNED is not None and not _LEARNED:
+        return {}
+    if not _LEARNED_ENTRIES:
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                if isinstance(payload, dict) and payload.get("version") == 1:
+                    for key, entry in (payload.get("tickers") or {}).items():
+                        if isinstance(entry, dict) and entry.get("ticker"):
+                            _LEARNED_ENTRIES[key.strip().upper()] = dict(entry)
+        except (OSError, ValueError) as e:
+            log_warn(f"Could not read the learned ticker map: {e}")
+    return _LEARNED_ENTRIES
 
 
 def canonical_ticker(asset):

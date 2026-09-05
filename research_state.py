@@ -14,12 +14,17 @@ whether claims were captured. This module keeps that second ledger.
   data/research/video_records.jsonl   one row per video seen by the research side
   data/research/condition_evaluations.jsonl  observed outcomes of forecast conditions
 
-Idempotency: an extraction run is keyed by (transcript_hash,
-normalization_version, extraction_prompt_version, schema_version). Rerunning
-the same key appends nothing. A run with a new key supersedes the older one:
-the state records the active run, and `load_active_claims` returns only that
-run's claims, so two versions are never counted together.
+Idempotency: an extraction run is keyed by its complete identity — the
+transcript hash, normalization version, extraction prompt version, schema
+version, chunking version, extraction mode (combined / standalone / chunked /
+exhaustive), chunk policy, provider-model policy and model configuration
+(`run_key`). Rerunning the same key appends nothing. A run with a new key —
+a new prompt, but equally a different extraction model or chunking policy —
+is a NEW run that supersedes the older one: the state records the active
+run, and `load_active_claims` returns only that run's claims, so two
+versions are never counted together.
 """
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -68,8 +73,52 @@ def now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def run_key(transcript_hash, normalization_version, prompt_version, schema_version):
-    return f"{transcript_hash[:16]}:n{normalization_version}:p{prompt_version}:s{schema_version}"
+RUN_KEY_FORMAT = "<hash16>:n<normalization>:p<prompt>:s<schema>:c<chunking>:m<mode>:k<policy10>"
+# The identity fields hashed into the trailing `k` segment, in order. They are
+# recorded in full on every extraction run (`identity` on the runs file and
+# `run_identity` on the state entry) so a key can always be validated.
+POLICY_FIELDS = ("chunk_policy", "model_policy", "model_config")
+
+
+def policy_digest(identity):
+    policy = "|".join(str((identity or {}).get(k) or "") for k in POLICY_FIELDS)
+    return hashlib.sha1(policy.encode("utf-8")).hexdigest()[:10]
+
+
+def run_key(transcript_hash, normalization_version, prompt_version, schema_version, identity=None):
+    """
+    The run identity string (see RUN_KEY_FORMAT). `identity` carries the
+    processing inputs beyond the four versions: `chunking_version`,
+    `extraction_mode` (combined | standalone | chunked | exhaustive),
+    `chunk_policy` ("full" or the chunk token size), `model_policy` (the
+    provider/model chain) and `model_config` (temperature, reasoning effort,
+    output caps). Two runs that differ in any of them get different keys, so
+    changing the extraction model or the chunking policy permits a new
+    active run instead of reading as the same extraction. Without an
+    identity the legacy four-part key is returned (old rows stay readable).
+    """
+    base = f"{transcript_hash[:16]}:n{normalization_version}:p{prompt_version}:s{schema_version}"
+    if not identity:
+        return base
+    return (f"{base}:c{identity.get('chunking_version')}:m{identity.get('extraction_mode')}"
+            f":k{policy_digest(identity)}")
+
+
+def parse_run_key(key):
+    """The segments of a run key as a dict (legacy keys have no mode)."""
+    out = {"transcript_hash_prefix": None, "normalization_version": None, "prompt_version": None,
+           "schema_version": None, "chunking_version": None, "extraction_mode": None, "policy_digest": None}
+    parts = (key or "").split(":")
+    if not parts or not parts[0]:
+        return out
+    out["transcript_hash_prefix"] = parts[0]
+    for part in parts[1:]:
+        tag, value = part[:1], part[1:]
+        name = {"n": "normalization_version", "p": "prompt_version", "s": "schema_version",
+                "c": "chunking_version", "m": "extraction_mode", "k": "policy_digest"}.get(tag)
+        if name:
+            out[name] = value
+    return out
 
 
 # --- State ------------------------------------------------------------------

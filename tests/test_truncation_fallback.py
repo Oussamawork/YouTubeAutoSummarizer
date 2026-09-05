@@ -130,6 +130,10 @@ def test_truncated_combined_call_still_delivers_the_summary_and_queues_claims(is
                 "signals": cm.claims_to_legacy_signals(validated), "warnings": [], "coverage_status": "full",
                 "run_key": ctx["run_key"], "extraction_model": "m", "telemetry": {}}
     state = research_state.load_state()
+    # The fake provider's daily budget is spent, so the retry job's own
+    # summary-reserve check would (correctly) defer the video; the later run
+    # this stands for has budget again.
+    monkeypatch.setattr(research_backfill.research_budget, "remaining_requests", lambda providers=None: None)
     assert research_backfill.process_video(state, "v1", extractor) == "complete"
     assert research_state.get(state, "v1")["delivery_status"] == "sent"
     assert [c["stance"] for c in research_state.load_active_claims(state)] == ["bearish"]

@@ -53,9 +53,27 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   `host_position` / retrospectives / praise, **portfolio disclosures are never
   views** (`carries_view` is the one stance filter), three-valued
   `testability_type` with observable-condition detection, cue-level evidence
-  timestamps, the deterministic **suspicious-empty check**), and
+  timestamps, the deterministic **language-aware suspicious-empty check**
+  (English and German rule sets; any other language → `needs_review` /
+  `empty_extraction_language_guard_unavailable` unless provably asset-free),
+  **non-view normalization** (a question / disclosure / retrospective /
+  reported view / hypothetical / fact keeps no forecast slots: values move
+  to `reported_*`, `hypothetical_*` or `displaced_fields`)), and
   `claims_to_legacy_signals`, the documented reduction that keeps the
   `signals.jsonl` compatibility view working.
+- `language_detect.py` — deterministic stop-word language detection (en / de /
+  unknown) for the suspicious-empty guard; stored as `transcript_language`.
+- `research_budget.py` — keeps research from spending summary requests:
+  `scraper.main` queues every separate claim extraction until all eligible
+  videos are delivered, then runs each only when
+  `remaining − estimated ≥ SUMMARY_REQUEST_RESERVE`; the retry job applies
+  the same check (`quota_deferred` / `summary_reserve_protected` otherwise).
+- `instruments.py` — canonical instrument metadata (id, ticker, symbol,
+  exchange/MIC, asset type, country, currency, GICS sector, benchmark rule)
+  from a curated registry or the provider-verified ticker map. The scorecard
+  resolves exchange and benchmark from here only; a claim's model-written
+  sector is recorded as `speaker_sector` and never chooses either; an
+  unresolved instrument is excluded, never guessed.
 - `canonical_claims.py` — **the one loader every production analytics job
   reads**: active runs only, no legacy rows, no repeats, condition outcomes
   overlaid; `view_claims`, `aggregate_views` (per asset AND horizon bucket,
@@ -66,9 +84,16 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   rule** (never a close that printed before the video; crypto = UTC-day
   close), `PriceSeries` provenance (provider, adjustment — split-adjusted at
   minimum, `PRICE_ADJUSTMENT=all` for total return — corporate-action status,
-  currency, requested/resolved dates), per-claim benchmark resolution with an
-  honest null, and `SCORECARD_RANKINGS` (off by default: scorecards are
-  experimental and unranked).
+  currency, requested/resolved dates, daily highs/lows when the provider
+  returned bars), per-claim benchmark resolution with an honest null,
+  **calendar confidence** (only NYSE closures are modelled; weekday-only
+  exchanges are scored but excluded from rankings unless
+  `SCORECARD_RANK_WEEKDAY_CALENDARS=true`, and no error bound is claimed),
+  **price-target methods** (`evaluate_target`: intraday_touch with bars,
+  daily_close otherwise, horizon_close beside them; intraday reach is null,
+  not false, without bars), and `SCORECARD_RANKINGS` (off by default, and
+  it stays off until the live extraction benchmark has been run and
+  reviewed).
 - `partial_cache.py` — versioned per-chunk partials for both chunked paths:
   a record is reused only when task type, transcript hash, normalization and
   chunking versions, chunk boundaries, prompt and schema versions and the
@@ -76,14 +101,21 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `claims_eval.py` + `evals/claims/` — the optional extraction-quality
   harness (precision/recall, numeric, grounding, attribution, entity, stance,
   horizon, recommendation accuracy, false no-claims and duplicate rates;
-  errors by category). Offline replay by default; live only with `--live`
-  and `CLAIMS_EVAL_LIVE=1`. Never runs in CI.
+  errors by category; breakdowns by length / source / language / quality;
+  `--compare-chunked`; a real-benchmark specification check that prints
+  "NOT ESTABLISHED" until ≥ 20 real videos / ≥ 200 labelled claims have
+  been evaluated live; `--export-transcripts` writes labelling skeletons
+  from stored transcripts). Offline replay by default; live only with
+  `--live` and `CLAIMS_EVAL_LIVE=1`. Never runs in CI. The real benchmark
+  has not been built yet (no stored transcripts, no live run).
 - `research_state.py` — research state independent of delivery
   (`data/research/research_state.json`) plus the append-only products:
   `claims.jsonl`, `extraction_runs.jsonl`, `review_queue.jsonl`,
   `segments.jsonl`, `gate_outcomes.jsonl`, `video_records.jsonl`. Runs are
-  keyed by (transcript hash, normalization, prompt, schema) versions, so a
-  rerun appends nothing and a newer run supersedes the older one.
+  keyed by their complete identity — transcript hash, normalization / prompt
+  / schema / chunking versions, extraction mode, chunk policy, model policy
+  and generation settings (`RUN_KEY_FORMAT`) — so a rerun appends nothing
+  while a changed model or chunk size is a new run that supersedes the old.
 - `research_backfill.py` — `--retry` (pending / failed / quota-deferred /
   partial research from stored transcripts), `--reprocess` (stale versions),
   `--import-legacy` (old signals rows as `schema_version="legacy"`,
