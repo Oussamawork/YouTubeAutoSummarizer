@@ -1,0 +1,25 @@
+{
+  "models": {
+    "gemini-3.6-flash": {
+      "capability_checked_at": "2026-09-05T14:57:41+00:00",
+      "context_window_limit": null,
+      "input_token_limit": 1048576,
+      "output_token_limit": 65536,
+      "supports_chat_completions": true,
+      "supports_count_tokens": true,
+      "supports_structured_output": true,
+      "tokens_per_minute_limit": null
+    },
+    "gemini-3.7-flash": {
+      "capability_checked_at": "2026-09-05T14:57:16+00:00",
+      "context_window_limit": null,
+      "input_token_limit": 1048576,
+      "output_token_limit": 65536,
+      "supports_chat_completions": true,
+      "supports_count_tokens": true,
+      "supports_structured_output": true,
+      "tokens_per_minute_limit": null
+    }
+  },
+  "version": 1
+}
