@@ -266,13 +266,15 @@ def _canonical_weights(claims, today, price_fetcher):
         return {}, {}
     try:
         import research_analytics as ra
-        sc = ra.scorecard(claims, today, price_fetcher or cs.fetch_prices)
+        sc = ra.scorecard(claims, today, price_fetcher or cs.fetch_price_series)
         weights, details = {}, {}
         for source, v in sc.items():
-            if source.startswith("_") or v["n"] < MIN_TRACK_CALLS:
+            # Only claims on a full-confidence calendar count toward a
+            # ranking-style weight (scorecard_pricing.rankable_calendar).
+            if source.startswith("_") or v["ranked_n"] < MIN_TRACK_CALLS:
                 continue
-            weights[source] = 0.5 + v["direction_hits"] / v["n"]
-            details[source] = (v["direction_hits"], v["n"])
+            weights[source] = 0.5 + v["ranked_direction_hits"] / v["ranked_n"]
+            details[source] = (v["ranked_direction_hits"], v["ranked_n"])
         return weights, details
     except Exception as e:
         log_warn(f"Track-record weighting unavailable this week: {e}")

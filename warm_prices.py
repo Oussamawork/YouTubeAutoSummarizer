@@ -144,8 +144,11 @@ def canonical_ranges(claims, today):
     import scorecard_pricing as sp
     from datetime import date as _date
     out = []
+    import instruments
     for c in canonical_claims.headline_claims(claims):
-        symbol = canonical_claims.priceable_symbol(c)
+        inst = instruments.resolve_instrument(c.get("ticker"), c.get("canonical_entity_name") or c.get("subject_mention"),
+                                              c.get("asset_type"))
+        symbol = inst.symbol if inst else canonical_claims.priceable_symbol(c)
         if not symbol:
             continue
         pub = canonical_claims.claim_date(c)
@@ -156,8 +159,7 @@ def canonical_ranges(claims, today):
                 continue
             start, stop = pub - timedelta(days=1), end + timedelta(days=cs.MAX_PRICE_LAG_DAYS)
             out.append((symbol, start, stop))
-            exchange = sp.exchange_for_claim(c, symbol)
-            bench, _ = sp.resolve_benchmark(c.get("asset_type"), exchange, c.get("sector"), symbol)
+            bench, _ = instruments.benchmark_for(inst, sp.exchange_for_instrument(inst), symbol)
             if bench:
                 out.append((bench, start, stop))
     window_start = today - timedelta(days=PULSE_WINDOW_DAYS)

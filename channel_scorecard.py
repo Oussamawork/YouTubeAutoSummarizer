@@ -239,10 +239,22 @@ def _twelvedata_pace(now=None, _calls=[]):
     _calls.append(now)
 
 
+class Bars(dict):
+    """A {date: close} dict that also carries the day's high and low
+    (`.highs`, `.lows`, {date: value}) when the provider returned bars. Every
+    existing caller keeps reading closes; the scorecard's price-target
+    methods read the range (scorecard_pricing.evaluate_target)."""
+
+    def __init__(self, closes=None, highs=None, lows=None):
+        super().__init__(closes or {})
+        self.highs = dict(highs or {})
+        self.lows = dict(lows or {})
+
+
 def _parse_twelvedata(payload, symbol):
-    """{date: close} from a Twelve Data time_series body. The API reports its
-    own errors inside a 200 body (status="error"), so that is checked before
-    the values are read."""
+    """Daily closes (a Bars dict, highs/lows beside them) from a Twelve Data
+    time_series body. The API reports its own errors inside a 200 body
+    (status="error"), so that is checked before the values are read."""
     if not isinstance(payload, dict):
         log_warn(f"Unexpected Twelve Data response for {symbol}.")
         return {}
@@ -250,7 +262,7 @@ def _parse_twelvedata(payload, symbol):
         log_warn(f"Twelve Data error for {symbol}: "
                  f"{payload.get('code')} {payload.get('message', '')[:120]}")
         return {}
-    prices = {}
+    prices, highs, lows = {}, {}, {}
     for row in payload.get("values") or []:
         day = _parse_date((row.get("datetime") or "")[:10])
         try:
@@ -259,9 +271,14 @@ def _parse_twelvedata(payload, symbol):
             continue
         if day:
             prices[day] = close
+            try:
+                highs[day], lows[day] = float(row.get("high")), float(row.get("low"))
+            except (TypeError, ValueError):
+                highs.pop(day, None), lows.pop(day, None)
     if not prices:
         log_warn(f"No usable price data from Twelve Data for {symbol}.")
-    return prices
+        return {}
+    return Bars(prices, highs, lows)
 
 
 def _spend_request_budget(_state=[0]):
@@ -381,6 +398,28 @@ fetch_prices.price_provenance = {
     "provider": "twelvedata", "adjustment": sp.adjustment_label(),
     "corporate_action_status": sp.adjustment_label(),
 }
+
+
+def fetch_price_series(symbol, start, end, cache=None):
+    """
+    The scorecard's price fetcher: a scorecard_pricing.PriceSeries with the
+    closes from fetch_prices (cache first, live for gaps) plus the daily
+    highs and lows the cache holds for the same days, so price targets can
+    be tested by intraday touch where bars exist and are reported as
+    closes-only where they do not.
+    """
+    cache = price_cache.active() if cache is None else cache
+    closes = fetch_prices(symbol, start, end, cache)
+    entry = cache.get(symbol) or {}
+    return sp.PriceSeries(
+        symbol=symbol, closes=dict(closes), provider="twelvedata", adjustment=sp.adjustment_label(),
+        corporate_action_status=sp.adjustment_label(), requested_start=start, requested_end=end,
+        highs=price_cache.slice_range(entry, start, end, "highs") or None,
+        lows=price_cache.slice_range(entry, start, end, "lows") or None,
+    )
+
+
+fetch_price_series.price_provenance = fetch_prices.price_provenance
 
 
 def price_on_or_after(prices, day, max_lag=MAX_PRICE_LAG_DAYS):
@@ -512,7 +551,7 @@ def generate_scorecard(today=None, path=SIGNALS_FILE, price_fetcher=fetch_prices
     return build_scorecard(stats, today)
 
 
-def generate_canonical_scorecard(today=None, price_fetcher=fetch_prices, claims=None):
+def generate_canonical_scorecard(today=None, price_fetcher=fetch_price_series, claims=None):
     """
     The production scorecard: canonical claims (active runs, no legacy rows,
     no repeats) scored under scorecard_pricing. Returns "" when nothing is

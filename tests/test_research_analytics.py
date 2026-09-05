@@ -121,7 +121,7 @@ def test_scorecard_scores_only_matured_testable_forecasts():
                  target_kind="absolute_value", target_value=110)
     young = _c("A", "NVDA", "bullish", published="2026-07-20", testable=True, forecast_end_date="2026-09-30", n=2)
     untestable = _c("A", "NVDA", "bullish", published="2026-07-01", testable=False, n=3)
-    prices = {"nvda.us": _series(date(2026, 7, 1), 40, 1.0), "spy.us": _series(date(2026, 7, 1), 40, 0.5)}
+    prices = {"nvda.us": _series(date(2026, 7, 1), 40, 1.0), "xlk.us": _series(date(2026, 7, 1), 40, 0.5)}
     sc = ra.scorecard([matured, young, untestable], today, _fetcher(prices), min_sample=1)
     excluded = sc.pop("_excluded")
     assert excluded == {"not_matured": 1, "not_testable": 1}

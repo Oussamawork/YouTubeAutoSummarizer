@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from claims import is_headline_claim, carries_view, OWN_VIEW_ATTRIBUTIONS
 from log import log_info, log_warn
 import canonical_claims
+import instruments
 import research_state
 import scorecard_pricing as sp
 
@@ -45,15 +46,26 @@ SCORECARD_RULES = {
               "(the first daily close after publication)",
     "evaluation_date": "forecast_end_date (claims.resolve_horizon); the first trading-day close on or "
                        f"after it, within {MAX_PRICE_LAG_DAYS} days",
-    "trading_calendar": "NYSE holiday rules for US listings; weekday-only calendars elsewhere "
-                        "(calendar_confidence recorded); continuous for crypto",
+    "instrument_metadata": "exchange, asset type, country, currency, sector and benchmark come from the "
+                           "canonical instrument registry (instruments.py: curated table, else the "
+                           "provider-verified ticker map); a claim's model-written sector is recorded as "
+                           "speaker_sector and never selects a benchmark; an unresolved instrument is excluded",
+    "trading_calendar": "NYSE holiday rules for US listings (calendar_confidence=full); continuous for "
+                        "crypto; weekday-only elsewhere (weekdays_only: local holidays are NOT modelled and "
+                        "no bound on the resulting date error is claimed) — such claims are scored and "
+                        "labelled but excluded from source rankings unless SCORECARD_RANK_WEEKDAY_CALENDARS=true",
+    "price_targets": "reach/hit targets are tested by intraday_touch (daily high/low) when bars are "
+                     "available, else by daily_close; horizon_close (the evaluation-date close) is recorded "
+                     "beside them; a target reached inside the window is reached even if the horizon close "
+                     "moved away; with closes only, intraday reach is recorded as unknown, never false",
     "adjusted_prices": "split-adjusted at minimum (provider adjust=splits); total-return-adjusted when "
                        "PRICE_ADJUSTMENT=all (dividends folded in); unadjusted or unknown series are "
                        "refused; provider, adjustment, corporate-action status, currency, requested and "
                        "resolved dates are recorded per scored claim",
-    "benchmark": "resolved per claim by asset type, exchange country and sector (scorecard_pricing."
-                 "BENCHMARKS, BENCHMARKS_JSON override); null when none is defensible; sources scored "
-                 "under different benchmark methods are not ranked against each other",
+    "benchmark": "resolved per claim from the INSTRUMENT's asset type, listing country and GICS sector "
+                 "(scorecard_pricing.BENCHMARKS, BENCHMARKS_JSON override, per-instrument override or "
+                 "none); null when none is defensible; sources scored under different benchmark methods "
+                 "are not ranked against each other",
     "conditional_forecasts": "excluded from unconditional rankings; scored separately only once their "
                              "condition is recorded as met (condition_evaluations.jsonl)",
     "maturity": "a forecast is scored only once its evaluation date has passed",
@@ -322,21 +334,28 @@ def _on_or_after(series, day):
 def scorecard(claims, today, price_fetcher, min_sample=None, include_conditional=False):
     """
     Evaluate matured, testable, headline forecasts under scorecard_pricing:
-    exchange-aware next-close entry, split-adjusted (at least) series with
-    recorded provenance, a per-claim benchmark or an honest null.
+    instrument metadata from the canonical registry (never from the claim's
+    sector), exchange-aware next-close entry, split-adjusted (at least)
+    series with recorded provenance, a per-claim benchmark or an honest
+    null, price targets by intraday touch / daily close / horizon close,
+    and calendar confidence per claim.
 
     Returns {source: {"n", "direction_hits", "target_hits", "target_n",
+    "ranked_n", "ranked_direction_hits" (full-confidence calendars only),
     "raw_returns", "excess_returns", "mfe", "mae", "benchmark_methods",
-    "scored": [per-claim records with provenance]}} plus "_excluded" (why
-    claims were not scored), "_min_sample" and "_rankings_enabled".
-    Unconditional forecasts only, unless `include_conditional` — and then
-    only those whose condition is recorded as met.
+    "target_test_methods", "calendar_confidence", "scored": [per-claim
+    records]}} plus "_excluded" (why claims were not scored), "_min_sample"
+    and "_rankings_enabled". Unconditional forecasts only, unless
+    `include_conditional` — and then only those whose condition is
+    recorded as met.
     """
     min_sample = MIN_SCORECARD_SAMPLE if min_sample is None else min_sample
     excluded = Counter()
     stats = defaultdict(lambda: {"n": 0, "direction_hits": 0, "target_hits": 0, "target_n": 0,
+                                 "ranked_n": 0, "ranked_direction_hits": 0,
                                  "raw_returns": [], "excess_returns": [], "mfe": [], "mae": [],
-                                 "benchmark_methods": Counter(), "scored": []})
+                                 "benchmark_methods": Counter(), "target_test_methods": Counter(),
+                                 "calendar_confidence": Counter(), "scored": []})
     series_cache = {}
 
     def series(symbol, start, end, exchange):
@@ -360,15 +379,20 @@ def scorecard(claims, today, price_fetcher, min_sample=None, include_conditional
                 excluded[f"condition_{c.get('condition_status') or 'not_evaluated'}"] += 1
                 continue
         pub, end = _date(c.get("published_at")), _date(c.get("forecast_end_date"))
-        symbol = _symbol(c)
         direction = _direction_of(c)
-        if not (pub and end and symbol and direction):
+        if not (pub and end and direction):
             excluded["missing_inputs"] += 1
             continue
         if end > today:
             excluded["not_matured"] += 1
             continue
-        exchange = sp.exchange_for_claim(c, symbol)
+        inst = instruments.resolve_instrument(c.get("ticker"), c.get("canonical_entity_name") or c.get("subject_mention"),
+                                              c.get("asset_type"))
+        if inst is None:
+            excluded["unresolved_instrument"] += 1
+            continue
+        symbol = inst.symbol
+        exchange = sp.exchange_for_instrument(inst)
         if exchange is None:
             excluded["unresolved_exchange"] += 1
             continue
@@ -387,7 +411,7 @@ def scorecard(claims, today, price_fetcher, min_sample=None, include_conditional
             excluded["evaluation_before_entry"] += 1
             continue
         ret = (exit_["price"] - entry["price"]) / entry["price"]
-        bench_symbol, bench_method = sp.resolve_benchmark(c.get("asset_type"), exchange, c.get("sector"), symbol)
+        bench_symbol, bench_method = instruments.benchmark_for(inst, exchange, symbol)
         excess, bench_return = None, None
         if bench_symbol:
             bs = series(bench_symbol, pub - timedelta(days=1), window_end, exchange)
@@ -402,35 +426,49 @@ def scorecard(claims, today, price_fetcher, min_sample=None, include_conditional
         window = [p for d, p in ps.closes.items() if entry_day <= d <= eval_day]
         mfe = (max(window) - entry["price"]) / entry["price"] if direction == "bullish" else (entry["price"] - min(window)) / entry["price"]
         mae = (entry["price"] - min(window)) / entry["price"] if direction == "bullish" else (max(window) - entry["price"]) / entry["price"]
+        rankable = sp.rankable_calendar(exchange)
         bucket = stats[_source(c)]
         bucket["n"] += 1
-        bucket["direction_hits"] += 1 if (ret > 0) == (direction == "bullish") and ret != 0 else 0
+        hit = 1 if (ret > 0) == (direction == "bullish") and ret != 0 else 0
+        bucket["direction_hits"] += hit
+        if rankable:
+            bucket["ranked_n"] += 1
+            bucket["ranked_direction_hits"] += hit
         bucket["raw_returns"].append(ret if direction == "bullish" else -ret)
         if excess is not None:
             bucket["excess_returns"].append(excess if direction == "bullish" else -excess)
         bucket["mfe"].append(mfe)
         bucket["mae"].append(mae)
         bucket["benchmark_methods"][bench_method if excess is not None else "none"] += 1
+        bucket["calendar_confidence"][exchange.calendar_confidence] += 1
         target = c.get("target_value")
-        reached = None
+        target_record = {"target_test_method": None, "target_reached": None, "target_first_reached_date": None,
+                         "target_reached_within_window": None, "horizon_close_target_met": None,
+                         "intraday_target_reached": None, "daily_close_target_reached": None}
         if c.get("target_kind") == "absolute_value" and target:
             bucket["target_n"] += 1
-            reached = max(window) >= target if direction == "bullish" else min(window) <= target
-            bucket["target_hits"] += 1 if reached else 0
+            target_record = sp.evaluate_target(ps, float(target), direction, entry_day, eval_day)
+            bucket["target_hits"] += 1 if target_record["target_reached"] else 0
+            bucket["target_test_methods"][target_record["target_test_method"]] += 1
         bucket["scored"].append({
             "claim_id": c.get("claim_id"), "symbol": symbol, "direction": direction,
             "testability_type": ttype, "condition_status": c.get("condition_status"),
+            **inst.metadata(), "speaker_sector": c.get("sector"), "speaker_asset_type": c.get("asset_type"),
             "exchange": exchange.code, "exchange_timezone": exchange.timezone,
-            "calendar_confidence": exchange.calendar_confidence,
+            "calendar_confidence": exchange.calendar_confidence, "rankable": rankable,
+            "calendar_note": None if exchange.calendar_confidence != "weekdays_only" else sp.WEEKDAY_CALENDAR_NOTE,
             "session_relation": entry["session_relation"], "entry_convention": entry["convention"],
             "entry_requested_date": entry["requested_date"], "entry_resolved_trading_date": entry["resolved_trading_date"],
             "entry_price": entry["price"], "evaluation_requested_date": exit_["requested_date"],
             "evaluation_resolved_trading_date": exit_["resolved_trading_date"], "evaluation_price": exit_["price"],
             "raw_return": ret, "benchmark_symbol": bench_symbol if excess is not None else None,
             "benchmark_method": bench_method, "benchmark_return": bench_return, "excess_return": excess,
-            "target_reached": reached, **ps.provenance(),
+            **target_record, **ps.provenance(),
         })
-    out = {source: dict(v, benchmark_methods=dict(v["benchmark_methods"])) for source, v in stats.items()}
+    out = {source: dict(v, benchmark_methods=dict(v["benchmark_methods"]),
+                        target_test_methods=dict(v["target_test_methods"]),
+                        calendar_confidence=dict(v["calendar_confidence"]))
+           for source, v in stats.items()}
     out["_excluded"] = dict(excluded)
     out["_min_sample"] = min_sample
     out["_rankings_enabled"] = sp.SCORECARD_RANKINGS_ENABLED
@@ -440,14 +478,18 @@ def scorecard(claims, today, price_fetcher, min_sample=None, include_conditional
 def rankable_sources(sc, min_sample):
     """
     Sources that may be ranked against each other: rankings enabled, sample
-    minimum met, and one shared benchmark method (a source scored against a
-    sector ETF is not compared with one scored raw or against BTC).
+    minimum met by forecasts on full-confidence calendars, and one shared
+    benchmark method (a source scored against a sector ETF is not compared
+    with one scored raw or against BTC).
     """
     if not sp.SCORECARD_RANKINGS_ENABLED:
         return []
     methods = {}
     for source, v in sc.items():
-        if source.startswith("_") or v["n"] < min_sample:
+        # Only forecasts on a full-confidence calendar count toward the
+        # sample (weekday-only calendars are scored but never ranked by
+        # default — scorecard_pricing.rankable_calendar).
+        if source.startswith("_") or v.get("ranked_n", v["n"]) < min_sample:
             continue
         used = {m for m in v.get("benchmark_methods", {}) if v["benchmark_methods"][m]}
         methods[source] = frozenset(used)
@@ -503,9 +545,11 @@ def format_scorecard_lines(sc, excluded, min_sample, rankings_on, rankable):
     lines = [f"Scorecard ({label}; matured, testable, evidence-backed unconditional forecasts; "
              f"exchange-aware next-close entry, split-adjusted prices; sample minimum {min_sample}):"]
     if rankings_on and rankable:
-        order = sorted(sc.items(), key=lambda kv: (kv[0] not in rankable,
-                                                   -(kv[1]["direction_hits"] / kv[1]["n"] if kv[1]["n"] else 0),
-                                                   kv[0]))
+        order = sorted(sc.items(), key=lambda kv: (
+            kv[0] not in rankable,
+            -(kv[1].get("ranked_direction_hits", kv[1]["direction_hits"]) / kv[1]["ranked_n"]
+              if kv[1].get("ranked_n") else 0),
+            kv[0]))
     else:
         order = sorted(sc.items(), key=lambda kv: kv[0])
     for source, v in order:
@@ -518,10 +562,15 @@ def format_scorecard_lines(sc, excluded, min_sample, rankings_on, rankable):
             note = "" if source in rankable else " (unranked: below sample minimum or different benchmark method)"
         else:
             note = " (unranked)"
+        weekday = (v.get("calendar_confidence") or {}).get("weekdays_only", 0)
+        calendar = f", {weekday} on weekday-only calendars (not ranked)" if weekday else ""
+        target_methods = ", ".join(f"{k} {n}" for k, n in sorted((v.get("target_test_methods") or {}).items()))
         lines.append(
             f"• {source}: direction {pct(v['direction_hits'], v['n'])}, target "
-            f"{pct(v['target_hits'], v['target_n'])}, return mean {100*mean:+.1f}% median "
-            f"{100*(med or 0):+.1f}%{excess}, n={v['n']}, benchmark {methods or 'none'}{note}"
+            f"{pct(v['target_hits'], v['target_n'])}"
+            + (f" ({target_methods})" if target_methods else "")
+            + f", return mean {100*mean:+.1f}% median "
+            f"{100*(med or 0):+.1f}%{excess}, n={v['n']}{calendar}, benchmark {methods or 'none'}{note}"
         )
     if not sc:
         lines.append("• no matured forecasts yet")

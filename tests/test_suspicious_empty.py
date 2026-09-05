@@ -64,7 +64,9 @@ def test_news_report_with_a_quoted_third_party_target_is_suspicious():
 
 
 def test_questions_and_all_caps_transcripts_do_not_trigger():
-    assert cm.suspicious_empty_check("Will Nvidia hit $200 next year? Could Apple fall 30 percent?")["suspicious"] is False
+    # Too short for language detection, so the English rule set is declared.
+    assert cm.suspicious_empty_check("Will Nvidia hit $200 next year? Could Apple fall 30 percent?",
+                                     language="en")["suspicious"] is False
     caps = "THE BOARD WILL MEET NEXT YEAR AND THE CEO WILL SPEAK ABOUT THE PLAN AND THE TEAM"
     assert cm.suspicious_empty_check(caps)["suspicious"] is False
 

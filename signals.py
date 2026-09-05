@@ -231,13 +231,64 @@ def _build_combined_prompt(compact=False):
     return base.replace(TRAILING_OUTPUT_RULE, "") + COMBINED_SUFFIX
 
 
-def _research_context(context, coverage_status="full"):
+EXTRACTION_MODES = ("combined", "standalone", "chunked", "exhaustive")
+
+
+def extraction_identity(mode, chunk_tokens=None):
+    """
+    Every processing input that shapes an extraction run beyond the
+    transcript itself, for the run key (research_state.run_key) and the run
+    record: the extraction mode, the chunking version and chunk policy, the
+    provider/model chain the run was configured with and the generation
+    settings. A changed model or chunk size is a different identity.
+    """
+    import transcript_normalize as tn
+    mode = mode if mode in EXTRACTION_MODES else "standalone"
+    return {
+        "extraction_mode": mode,
+        "chunking_version": tn.CHUNKING_VERSION,
+        "chunk_policy": "full" if mode in ("combined", "standalone") else f"tokens={chunk_tokens}",
+        "model_policy": _model_policy(),
+        "model_config": summarizer.model_config_string()
+        + f";claims_max_output={CLAIMS_MAX_OUTPUT_TOKENS};combined_max_output={COMBINED_MAX_OUTPUT_TOKENS}",
+        "extraction_prompt_version": claims_mod.EXTRACTION_PROMPT_VERSION,
+        "schema_version": claims_mod.SCHEMA_VERSION,
+    }
+
+
+def run_key_for(nt, mode, chunk_tokens=None):
+    return research_state.run_key(nt.transcript_hash, nt.normalization_version,
+                                  claims_mod.EXTRACTION_PROMPT_VERSION, claims_mod.SCHEMA_VERSION,
+                                  extraction_identity(mode, chunk_tokens))
+
+
+def planned_run(nt):
+    """(run key, identity) a standalone extraction of `nt` would get under
+    the current configuration (exhaustive mode when it is on) — what the
+    retry job compares a video's active run against."""
+    mode, tokens = ("exhaustive", RESEARCH_CHUNK_TOKENS) if EXHAUSTIVE_RESEARCH_MODE else ("standalone", None)
+    return run_key_for(nt, mode, tokens), extraction_identity(mode, tokens)
+
+
+def planned_run_key(nt):
+    return planned_run(nt)[0]
+
+
+def _research_context(context, coverage_status="full", mode=None, chunk_tokens=None):
+    """The context for one extraction, with the run key and identity for
+    its mode (`extraction_mode` in the context, else combined)."""
     ctx = dict(context or {})
     nt = ctx.get("normalized")
+    if mode:
+        ctx["extraction_mode"] = mode
+        ctx["chunk_tokens"] = chunk_tokens
+    mode = ctx.get("extraction_mode") or "combined"
     if nt is not None:
-        ctx.setdefault("run_key", research_state.run_key(
-            nt.transcript_hash, nt.normalization_version,
-            claims_mod.EXTRACTION_PROMPT_VERSION, claims_mod.SCHEMA_VERSION))
+        identity = extraction_identity(mode, ctx.get("chunk_tokens"))
+        ctx["run_identity"] = identity
+        ctx["run_key"] = research_state.run_key(nt.transcript_hash, nt.normalization_version,
+                                                claims_mod.EXTRACTION_PROMPT_VERSION,
+                                                claims_mod.SCHEMA_VERSION, identity)
     ctx.setdefault("extraction_model", summarizer.LAST_CALL_TELEMETRY.get("model"))
     return ctx
 
@@ -245,6 +296,7 @@ def _research_context(context, coverage_status="full"):
 def _failed(status, reason, context=None, **extra):
     out = {"status": status, "failure_reason": reason, "claims": [], "signals": None,
            "warnings": [], "coverage_status": None, "run_key": (context or {}).get("run_key"),
+           "run_identity": (context or {}).get("run_identity"),
            "telemetry": dict(summarizer.LAST_CALL_TELEMETRY)}
     out.update(extra)
     return out
@@ -283,18 +335,19 @@ def build_research(data, context, coverage_status="full", chunk_id=None, standal
         # asset, "no claims" is not believed: the combined path hands the
         # video to a standalone extraction pass (failed_retryable), and a
         # standalone pass that comes back empty again goes to a human
-        # (needs_review). Neither is ever recorded as no_claims_found, and
-        # neither writes an empty asset list.
-        check = claims_mod.suspicious_empty_check(nt.text)
-        if check["suspicious"]:
-            status = "needs_review" if standalone else "failed_retryable"
-            failure_reason = "suspicious_empty_extraction"
+        # (needs_review). A transcript in a language the guard has no rule
+        # set for is never certified either (needs_review /
+        # empty_extraction_language_guard_unavailable) unless it is provably
+        # asset-free. None of these is ever recorded as no_claims_found, and
+        # none writes an empty asset list.
+        status, failure_reason, warning = claims_mod.empty_extraction_verdict(
+            nt.text, ctx.get("transcript_language"), standalone=standalone)
+        if warning:
+            warnings.append(warning)
+        if failure_reason:
             signals_view = None
-            warnings.append("suspicious_empty_extraction: " + "; ".join(check["strong"] or check["moderate"]))
-            log_warn(f"Model returned no claims but the transcript looks claim-bearing "
-                     f"(score {check['score']}); research marked {status}.")
-        else:
-            status = "no_claims_found"
+            log_warn(f"Model returned no claims but that is not believed ({failure_reason}); "
+                     f"research marked {status}.")
     elif all(c.get("review_required") for c in validated):
         status = "needs_review"
     else:
@@ -303,7 +356,8 @@ def build_research(data, context, coverage_status="full", chunk_id=None, standal
         "status": status, "failure_reason": failure_reason, "claims": validated,
         "signals": signals_view,
         "warnings": warnings, "coverage_status": coverage_status,
-        "run_key": ctx.get("run_key"), "extraction_model": ctx.get("extraction_model"),
+        "run_key": ctx.get("run_key"), "run_identity": ctx.get("run_identity"),
+        "extraction_model": ctx.get("extraction_model"),
         "telemetry": dict(summarizer.LAST_CALL_TELEMETRY),
     }
 
@@ -329,6 +383,7 @@ def summarize_with_signals(transcript, title=None, compact=False, channel_name=N
     ctx = dict(context or {})
     ctx.setdefault("video_title", title)
     ctx.setdefault("channel_name", channel_name)
+    ctx["extraction_mode"] = "combined"
 
     text = complete(
         _build_combined_prompt(compact),
@@ -438,8 +493,9 @@ def extract_research(nt, context, prefer_chunked=False):
     build_research()-shaped result whose status is quota_deferred /
     failed_retryable / partial when it could not finish. Never raises.
     """
-    ctx = _research_context(context)
+    ctx = dict(context or {})
     ctx["normalized"] = nt
+    ctx = _research_context(ctx, mode="standalone")
     if not nt or not nt.text.strip():
         return _failed("failed_final", "empty_transcript", ctx)
 
@@ -471,6 +527,10 @@ def _extract_research_chunked(nt, ctx, max_chunk_tokens=None):
         per_chunk = min(per_chunk, max_chunk_tokens)
     if per_chunk < 500:
         return _failed("quota_deferred", "no_provider_with_input_capacity", ctx)
+    # The chunk size is part of the run identity: claims extracted in 12k
+    # token chunks are a different run from the same transcript in one piece.
+    ctx = _research_context(ctx, mode="exhaustive" if EXHAUSTIVE_RESEARCH_MODE else "chunked",
+                            chunk_tokens=per_chunk)
     chunks = tn.chunk_transcript(nt, per_chunk, token_budget.estimate_tokens)
     ok, problems = tn.validate_coverage(chunks, len(nt.text))
     if not ok:
@@ -515,28 +575,36 @@ def _extract_research_chunked(nt, ctx, max_chunk_tokens=None):
         return {
             "status": status, "failure_reason": stop_reason, "claims": validated,
             "signals": None, "warnings": warnings, "coverage_status": "partial",
-            "run_key": ctx.get("run_key"), "extraction_model": ctx.get("extraction_model"),
+            "run_key": ctx.get("run_key"), "run_identity": ctx.get("run_identity"),
+            "extraction_model": ctx.get("extraction_model"),
             "processed_chunk_ids": processed, "failed_chunk_ids": failed,
-            "chunks": len(chunks), "telemetry": dict(summarizer.LAST_CALL_TELEMETRY),
+            "chunks": len(chunks), "chunk_boundaries": _boundaries(chunks),
+            "telemetry": dict(summarizer.LAST_CALL_TELEMETRY),
         }
     total_raw = sum(len(raw) for _, raw in all_raw)
     failure_reason, signals_view = None, claims_mod.claims_to_legacy_signals(validated)
     if not total_raw:
-        check = claims_mod.suspicious_empty_check(nt.text)
-        if check["suspicious"]:
-            status, failure_reason, signals_view = "needs_review", "suspicious_empty_extraction", None
-            warnings.append("suspicious_empty_extraction: " + "; ".join(check["strong"] or check["moderate"]))
-        else:
-            status = "no_claims_found"
+        status, failure_reason, warning = claims_mod.empty_extraction_verdict(
+            nt.text, ctx.get("transcript_language"), standalone=True)
+        if warning:
+            warnings.append(warning)
+        if failure_reason:
+            signals_view = None
     else:
         status = "needs_review" if all(c.get("review_required") for c in validated) else "complete"
     return {
         "status": status, "failure_reason": failure_reason, "claims": validated,
         "signals": signals_view, "warnings": warnings,
         "coverage_status": "chunked_full", "run_key": ctx.get("run_key"),
+        "run_identity": ctx.get("run_identity"),
         "extraction_model": ctx.get("extraction_model"), "processed_chunk_ids": processed,
-        "failed_chunk_ids": [], "chunks": len(chunks), "telemetry": dict(summarizer.LAST_CALL_TELEMETRY),
+        "failed_chunk_ids": [], "chunks": len(chunks), "chunk_boundaries": _boundaries(chunks),
+        "telemetry": dict(summarizer.LAST_CALL_TELEMETRY),
     }
+
+
+def _boundaries(chunks):
+    return [[c.chunk_id, c.start_character, c.end_character] for c in chunks]
 
 
 def extract_signals(summary, video_title=None, channel_name=None):

@@ -54,6 +54,29 @@ direction, target numbers and horizon bucket agree wherever the expected
 claim states them. Each expected claim matches at most once; further
 matches count as duplicates. Never exact JSON equality.
 
+## Breakdowns, chunked comparison and the benchmark specification
+
+The report breaks every metric down by transcript length (short < 10k
+normalized chars, medium < 30k, long), by `transcript_source`, by
+`language` (declared on the fixture, else detected) and by quality (noisy /
+clean). `--compare-chunked` scores the chunked extraction beside the
+full-context one — live it makes a second `prefer_chunked` call per
+fixture; offline it replays `model_output_chunked` when a fixture stores
+one. The header states whether the set meets the real-benchmark
+specification (`claims_eval.BENCHMARK_SPEC`: ≥ 20 real videos from ≥ 2
+channels, ≥ 200 labelled atomic claims, the claim categories, short and
+long, noisy and clean, real sources) and says `Production extraction
+quality: NOT ESTABLISHED` until it does and live mode has run on it.
+`SCORECARD_RANKINGS` stays false until then.
+
+Real fixtures carry `source_video_id`, `transcript_source` (supadata /
+gemini_video / youtube_transcript_api), `language` and `duration_seconds`.
+`python claims_eval.py --export-transcripts evals/claims/real` writes one
+skeleton per transcript stored under `data/transcripts/` with
+`expected_claims: null`; the loader ignores a skeleton until that null is
+replaced by the labelled list, so an unlabelled video never counts as a
+no-claim fixture.
+
 ## Expanding the set
 
 1. Take a real transcript segment from `data/transcripts/` (see
@@ -72,4 +95,5 @@ matches count as duplicates. Never exact JSON equality.
 The five shipped fixtures are hand-authored caption-style segments with
 hand-written model outputs (two deliberate errors are stored: a missed
 news-report target and a duplicate), so the offline numbers describe the
-pipeline, not Gemini.
+pipeline, not Gemini. They do not meet the benchmark specification, and no
+live evaluation has been run.
