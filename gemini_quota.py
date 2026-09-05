@@ -16,8 +16,8 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 
-from helpers import env_int
-from log import log_info, log_warn
+from helpers import env_int, write_json_atomic
+from log import log_info
 
 GEMINI_USAGE_FILE = os.getenv("GEMINI_USAGE_FILE") or "data/gemini_usage.json"
 # Requests per model per day on the free tier. Measured from AI Studio for this
@@ -207,16 +207,10 @@ def _recheck_due(entry, now=None):
 
 
 def save_usage(usage):
-    try:
-        directory = os.path.dirname(GEMINI_USAGE_FILE)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(GEMINI_USAGE_FILE, "w", encoding="utf-8") as f:
-            json.dump(usage, f, indent=2, sort_keys=True)
-    except OSError as e:
-        # Losing an increment only risks over-attempting later, which the API
-        # rejects harmlessly. Losing the run would be worse.
-        log_warn(f"Could not persist Gemini usage: {e}")
+    # Atomic, like the dedup state: a truncated counter file reads as "nothing
+    # spent today". Losing an increment only risks over-attempting later, which
+    # the API rejects harmlessly, so a failure is logged, never raised.
+    write_json_atomic(GEMINI_USAGE_FILE, usage)
 
 
 def used(model, usage=None):

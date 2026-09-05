@@ -298,3 +298,66 @@ def test_photo_album_reports_rejection(tmp_path, monkeypatch):
     monkeypatch.setattr(tg.requests, "post", fake_post)
     paths = [_photo(tmp_path, f"{i}.png") for i in range(2)]
     assert tg.send_telegram_photo_album("tok", "chat", paths) is False
+
+
+# --- Retries and the rejected/failed distinction ---
+
+
+class _Resp:
+    def __init__(self, status, text="", payload=None):
+        self.status_code = status
+        self.text = text
+        self._payload = payload
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+
+def test_transient_failure_is_retried_then_succeeds(monkeypatch):
+    answers = iter([_Resp(502, "bad gateway"), _Resp(200)])
+    slept = []
+    monkeypatch.setattr(tg.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(tg.requests, "post", lambda *a, **k: next(answers))
+    assert tg.send_telegram_message("tok", "chat", "C", "T", "http://u", "d", "s") is True
+    assert slept == [tg.TELEGRAM_RETRY_BACKOFF]
+
+
+def test_429_honours_retry_after(monkeypatch):
+    answers = iter([_Resp(429, "slow down", {"parameters": {"retry_after": 7}}), _Resp(200)])
+    slept = []
+    monkeypatch.setattr(tg.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(tg.requests, "post", lambda *a, **k: next(answers))
+    assert tg._post("tok", "chat", "hello") is True
+    assert slept == [7]
+
+
+def test_network_failure_does_not_fall_back_to_plain_text(monkeypatch):
+    # A transient failure that outlives the retries is not a formatting
+    # problem: resending as plain text would only duplicate delivered chunks.
+    sent = []
+    monkeypatch.setattr(tg.time, "sleep", lambda s: None)
+
+    def fake_post(url, data=None, timeout=None):
+        sent.append(data)
+        raise tg.requests.ConnectionError("down")
+    monkeypatch.setattr(tg.requests, "post", fake_post)
+    assert tg.send_telegram_message("tok", "chat", "C", "T", "http://u", "d", "s") is False
+    assert len(sent) == tg.TELEGRAM_MAX_RETRIES
+    assert all(d.get("parse_mode") == "HTML" for d in sent)
+
+
+def test_rejection_falls_back_to_plain_text_once(monkeypatch):
+    sent = []
+
+    def fake_post(url, data=None, timeout=None):
+        sent.append(data)
+        return _Resp(400 if data.get("parse_mode") else 200, "can't parse entities")
+    monkeypatch.setattr(tg.requests, "post", fake_post)
+    assert tg.send_telegram_message("tok", "chat", "C", "T", "http://u", "d", "s") is True
+    assert [d.get("parse_mode") for d in sent] == ["HTML", None]
+
+
+def test_post_chunk_statuses():
+    assert tg.SENT != tg.REJECTED != tg.FAILED

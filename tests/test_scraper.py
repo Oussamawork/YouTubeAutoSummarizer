@@ -369,7 +369,6 @@ def _run_main(monkeypatch, free_channel=None, premium_url=None, outcome="sent",
     ])
     monkeypatch.setattr(scraper, "load_state", lambda path: {"channels": {}, "pending": {}})
     monkeypatch.setattr(scraper, "save_state", lambda path, state: None)
-    monkeypatch.setattr(scraper, "save_to_json", lambda results, filename: None)
     monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: [video])
     monkeypatch.setattr(
         scraper, "_summarize_video",
@@ -470,8 +469,8 @@ def test_main_no_signals_when_flag_off(monkeypatch):
 
 
 def test_env_flag_defaults():
-    assert scraper._env_flag("NO_SUCH_FLAG_XYZ") is False
-    assert scraper._env_flag("NO_SUCH_FLAG_XYZ", default=True) is True
+    assert scraper.env_flag("NO_SUCH_FLAG_XYZ") is False
+    assert scraper.env_flag("NO_SUCH_FLAG_XYZ", default=True) is True
 
 
 def test_main_signals_default_on(monkeypatch):
@@ -571,7 +570,6 @@ def test_main_resolves_handle_and_keys_state_by_id(monkeypatch):
     monkeypatch.setattr(scraper, "load_state", lambda p: {"channels": {}, "pending": {}})
     monkeypatch.setattr(scraper, "save_state", lambda p, s: saved.append(
         {k: dict(v) for k, v in s["channels"].items()}))
-    monkeypatch.setattr(scraper, "save_to_json", lambda r, f: None)
     monkeypatch.setattr(scraper, "resolve_channel_handle",
                         lambda key, handle: calls.append(handle) or "UCresolved")
     monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: [video] if cid == "UCresolved" else [])
@@ -594,7 +592,6 @@ def test_main_skips_unresolvable_handle(monkeypatch):
     ])
     monkeypatch.setattr(scraper, "load_state", lambda p: {"channels": {}, "pending": {}})
     monkeypatch.setattr(scraper, "save_state", lambda p, s: None)
-    monkeypatch.setattr(scraper, "save_to_json", lambda r, f: None)
     monkeypatch.setattr(scraper, "resolve_channel_handle", lambda key, handle: None)
     monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: fetched.append(cid) or [])
     scraper.main()
@@ -730,7 +727,6 @@ def _filter_run(monkeypatch, only, titles):
         "pending": {},
     })
     monkeypatch.setattr(scraper, "save_state", lambda p, s: None)
-    monkeypatch.setattr(scraper, "save_to_json", lambda r, f: None)
     monkeypatch.setattr(scraper, "get_recent_videos", lambda k, c: feed)
     monkeypatch.setattr(
         scraper, "_summarize_video",
@@ -855,7 +851,6 @@ def test_main_duration_gate_skips_before_transcript(monkeypatch):
         "pending": {},
     })
     monkeypatch.setattr(scraper, "save_state", lambda p, s: None)
-    monkeypatch.setattr(scraper, "save_to_json", lambda r, f: None)
     monkeypatch.setattr(scraper, "get_recent_videos", lambda k, c: feed)
     monkeypatch.setattr(scraper, "fetch_video_details", lambda key, ids: {
         "shorty": {"duration_seconds": 40, "has_captions": None},
@@ -945,7 +940,6 @@ def _main_harness(monkeypatch, feed, summarize):
         "pending": {},
     })
     monkeypatch.setattr(scraper, "save_state", lambda p, s: None)
-    monkeypatch.setattr(scraper, "save_to_json", lambda r, f: None)
     monkeypatch.setattr(scraper, "get_recent_videos", lambda k, c: feed)
     monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
     monkeypatch.setattr(scraper, "_summarize_video", summarize)

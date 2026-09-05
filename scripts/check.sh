@@ -5,7 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "==> Byte-compiling sources"
-python -m py_compile scraper.py summarizer.py transcript.py helpers.py sendToTelegram.py log.py
+# Every module, not a hand-kept list: the list drifted to 6 of 15 files.
+python -m compileall -q ./*.py tests/*.py
 
 echo "==> Running tests"
 python -m pytest -q

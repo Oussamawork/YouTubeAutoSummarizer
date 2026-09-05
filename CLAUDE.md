@@ -31,6 +31,13 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   counted cap is final.
 - `signals.py` — LLM extraction of structured market signals from summaries
   (opt-in via `MARKET_SIGNALS`; appends to `data/signals.jsonl`).
+- `signals_data.py` — the dataset layer every analytics module reads:
+  `load_signals`, asset identity (`ASSET_ALIASES`, `TICKER_ALIASES`,
+  `UNPRICEABLE_TICKERS`, the learned map, `canonical_ticker`), date windows and
+  `aggregate_assets` / `net_stance`. A leaf: it imports none of the modules
+  below, which is what lets `market_pulse`, `channel_scorecard`, `pulse_charts`
+  and `ticker_resolver` import each other at the top level instead of lazily.
+  `market_pulse` re-exports its names for existing callers.
 - `market_pulse.py` — weekly aggregation over `data/signals.jsonl` (top assets,
   consensus flips, new-on-radar) sent to Telegram by `weekly-pulse.yml`.
 - `pulse_charts.py` — the pulse's companion PNG charts (consensus board, flip
@@ -64,21 +71,30 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   run doesn't turn into 429s), served through the `price_cache` (see below).
   `TWELVEDATA_MAX_REQUESTS` (120) still caps any single run, and callers spend
   it in priority order — `_pulse_inputs` fetches the reader-visible latest
-  prices before the optional track-record weighting. Internal symbols stay Stooq-shaped
-  (`nvda.us`, `btcusd`) and are translated per provider by `twelvedata_symbol`.
-  **Stooq is the keyless legacy path and is unusable server-side** (verified
-  2026-08-17): the default UA gets 404, a browser UA gets a JavaScript challenge
-  instead of CSV. That block silently disabled implied upside, track-record
-  weighting, the scorecard and the price-target chart from the first scheduled
-  run (2026-07-27) until Twelve Data replaced it. `market_pulse.fetch_latest_prices`
-  logs one loud "no prices for any ticker" line when the source is down — the
-  first thing to check when prices look wrong.
-- `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback); digest builder.
+  prices before the optional track-record weighting. Internal symbols are
+  provider-independent (`nvda.us`, `btcusd`) and translated per provider by
+  `twelvedata_symbol`. Without a key there is no price source: the keyless
+  Stooq path it replaced sat behind a JavaScript challenge (verified 2026-08-17)
+  and silently disabled implied upside, track-record weighting, the scorecard
+  and the price-target chart from the first scheduled run (2026-07-27) until
+  Twelve Data replaced it, so it has been removed rather than kept as a fallback
+  that only ever returned nothing. `market_pulse.fetch_latest_prices` logs one
+  loud "no prices for any ticker" line when the source is down — the first
+  thing to check when prices look wrong.
+- `sendToTelegram.py` — Telegram delivery (HTML, with plain-text fallback);
+  digest builder. Transient failures retry with backoff (429 honours
+  `retry_after`); the plain-text fallback runs only when Telegram *rejected*
+  the HTML, so a network failure never duplicates already-delivered chunks.
+  `scraper._Outbox` is the one place that decides single message vs digest and
+  premium vs free, and reports what Telegram accepted.
 - `helpers.py` — channel file parsing (`<id|@handle> [digest] [max=N] [only=a,b]` per
   line; handles resolved at run time by `scraper.resolve_channel_handle`; `only=`
   is a whole-word title filter applied before any transcript fetch), dedup
-  state (v2 schema + v1 migration), summary cleaning.
-- `log.py` — colored logging helpers.
+  state (v2 schema + v1 migration), `write_json_atomic` (used by every committed
+  JSON state file), env parsing (`env_int` / `env_float` / `env_flag` — always
+  use these: an unconfigured Actions variable arrives as `""`), summary cleaning.
+- `log.py` — colored logging helpers; `redact()` / `describe_error()` keep bot
+  tokens and API keys out of request-error lines.
 
 ## Dedup state model
 `seen_videos.json`: `channels` maps channel-id → watermark (`last_video_id`,
@@ -88,7 +104,14 @@ video-id → retry record for
 deferred videos (captions not up yet → retried until `NO_TRANSCRIPT_MAX_ATTEMPTS`
 *and* `NO_TRANSCRIPT_MIN_HOURS` are both exceeded, and no more often than
 `PENDING_RETRY_MIN_HOURS`; LLM quota exhausted). Deciding a video advances the
-watermark; deferring does not.
+watermark; deferring does not. **Delivery is part of deciding**: a final
+outcome whose message Telegram has not accepted yet is held in the record's
+`undelivered` block (the finished text plus the entry fields) and re-sent on a
+later run without refetching the transcript or calling the LLM. Held records
+survive the video leaving the RSS feed. A digest's videos are finalized only
+once the digest itself has been accepted. Runs stop starting new videos after
+`RUN_DEADLINE_MINUTES` so buffered digests always get flushed before the
+workflow timeout.
 
 ## Design docs
 - `docs/tdd-transcript-budget.md` — measured findings on transcript-credit

@@ -109,6 +109,7 @@ This skips the channel scan and dedup state entirely — useful for any video, s
 | `NO_TRANSCRIPT_MAX_ATTEMPTS` | `8` | Runs to retry a video whose captions aren't up yet. Giving up needs **this and** `NO_TRANSCRIPT_MIN_HOURS` to be satisfied. |
 | `NO_TRANSCRIPT_MIN_HOURS` | `36` | Never write a video off before it has been chased this long, whatever the polling rate. An attempt count alone is the wrong unit: at one run every two hours, three attempts is six hours, and auto-captions routinely take longer to appear. |
 | `PENDING_RETRY_MIN_HOURS` | `3` | Minimum gap between retries of one deferred video. A "no captions" answer costs a transcript credit, so without this a frequent schedule spends one per run on every pending video. `0` disables it. |
+| `RUN_DEADLINE_MINUTES` | `35` | Wall-clock budget for one run. Videos not started by then defer to the next run, so a slow run flushes its digests and saves state instead of being killed by the workflow's 45-minute timeout mid-video. `0` disables it. |
 | `DAILY_DIGEST` | off | `true` bundles all of a run's summaries into one combined Telegram message. |
 | `MIN_VIDEO_SECONDS` | `90` | Skip videos shorter than this before fetching a transcript — Shorts and clips rarely carry usable captions and aren't worth a transcript credit. Checked with one `videos.list` call per 50 videos (1 quota unit of 10,000/day). Videos whose metadata can't be read are kept. `0` disables the check. |
 | `SKIP_UNCAPTIONED` | off | Also skip videos the API reports as having no captions. **Off by default**: the API's `caption` flag tracks *uploaded* captions and is commonly `false` for videos that only have auto-generated ones, which Supadata can still fetch. Enable only if a run's failure breakdown shows it is safe. |
@@ -155,7 +156,7 @@ least want to miss first — the ones at the bottom absorb whatever is left.
 | `SUPADATA_CREDITS_PER_KEY` | `100` | Monthly credits each key contributes to the budget. |
 | `SUPADATA_MONTHLY_BUDGET` | keys × credits | Explicit override for the whole cycle's budget. |
 | `SUPADATA_DAILY_PACING` | `false` | Ration the cycle's credits across its remaining days instead of spending what's needed each run. Off means a day's videos are all processed that day. |
-| `TWELVEDATA_API` (secret) | — | Price data for implied upside, the accuracy scorecard and the price-target chart ([twelvedata.com](https://twelvedata.com), free tier: 800 requests/day, 8/min). Without it prices are unavailable: the legacy Stooq source sits behind a browser check and returns no data to a server (verified 2026-08-17). |
+| `TWELVEDATA_API` (secret) | — | Price data for implied upside, the accuracy scorecard and the price-target chart ([twelvedata.com](https://twelvedata.com), free tier: 800 requests/day, 8/min). Without it prices are unavailable and the jobs say so once per run (the keyless Stooq source it replaced sat behind a browser check and returned nothing to a server, verified 2026-08-17, and has been removed). |
 | `TWELVEDATA_MAX_REQUESTS` | `120` | Ceiling on price requests per run, so a paced run can't outlast its workflow timeout. The Sunday cache warmer raises it to 600. |
 | `SUPADATA_RESET_DAY` | `1` | Day of the month the plan's credits reset. Supadata resets on the plan's anniversary, not the 1st — the dashboard shows it ("Credits reset on 08/17" → set `17`). Only consulted when pacing is enabled: it makes the pacing think the cycle ends sooner than it does; a per-day ceiling of budget ÷ 28 limits the damage, but set it correctly. |
 
@@ -207,10 +208,10 @@ shows sample sizes (small samples are noise, not skill).
 
 ### Dedup state (`seen_videos.json`):
 
-The daily workflow commits this file back to the repo after each run. It stores a per-channel watermark (`last_video_id` + `last_published`) plus a `pending` map of videos deferred for retry (captions not up yet, LLM quota exhausted). Legacy flat `{channel_id: video_id}` files are migrated automatically.
+The daily workflow commits this file back to the repo after each run. It stores a per-channel watermark (`last_video_id` + `last_published`) plus a `pending` map of videos deferred for retry (captions not up yet, LLM quota exhausted). A video counts as done only once Telegram has accepted its message: a finished summary that could not be delivered is kept in its pending record and re-sent on the next run at no transcript or LLM cost. Legacy flat `{channel_id: video_id}` files are migrated automatically.
 
 ### Example Output:
-The script outputs a JSON file containing details of the latest videos and their summaries. Additionally, it prints the following to the console:
+The script prints a per-run log like the following to the console:
 
 ```
 [INFO] Processing channel ID: UC123456789
