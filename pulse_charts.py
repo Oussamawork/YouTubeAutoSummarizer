@@ -17,7 +17,7 @@ from datetime import timedelta
 
 from log import log_warn
 
-from market_pulse import (
+from signals_data import (
     CONVICTION_WEIGHTS,  # noqa: F401  (documented dependency of net_stance)
     NET_THRESHOLD,
     net_stance,

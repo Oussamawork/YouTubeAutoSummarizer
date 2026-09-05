@@ -9,48 +9,35 @@ import requests
 from dotenv import load_dotenv
 
 import price_cache
+from helpers import env_int
 from log import log_info, log_warn, log_error
-from market_pulse import (
+from sendToTelegram import send_telegram_text
+from signals_data import (
     SIGNALS_FILE, load_signals, _parse_date, _iter_assets, canonical_ticker,
     UNPRICEABLE_TICKERS,
 )
-from sendToTelegram import send_telegram_text
 
 # Weekly per-channel accuracy scorecard: joins the directional calls recorded
-# in data/signals.jsonl with free daily price data (Stooq, keyless CSV) and
-# measures each channel's hit rate — was the price higher after a bullish call,
-# lower after a bearish one — at 7- and 30-day horizons. Runs every Friday from
+# in data/signals.jsonl with daily price data (Twelve Data) and measures each
+# channel's hit rate — was the price higher after a bullish call, lower after a
+# bearish one — at 7- and 30-day horizons. Runs every Friday from
 # weekly-scorecard.yml; silently skips until the dataset spans at least a week.
 # Hit rates over tiny samples are noise: the report always shows sample sizes,
 # and remains research input, not investment advice.
 
 load_dotenv('.env')
 
-STOOQ_URL = "https://stooq.com/q/d/l/?s={symbol}&d1={d1}&d2={d2}&i=d"
-# Stooq is behind a JavaScript browser check and is NOT usable server-side as
-# of 2026-08-17, measured directly:
-#   - default python-requests UA  -> 404 for every symbol
-#   - browser UA (these headers)  -> 200 whose body is the JS challenge page,
-#                                    not CSV, so the parser still yields nothing
-# The 404 masqueraded as "no such ticker" in the logs, which is how this went
-# unnoticed from the first scheduled run (2026-07-27) onward: every price lookup
-# has failed since, silently disabling implied-upside annotations, track-record
-# weighting, the scorecard and the price-target chart. These headers are kept
-# because they are correct for a CSV client and cost nothing if Stooq drops the
-# challenge, but restoring prices needs a different provider — do not read their
-# presence as "prices work".
-STOOQ_HEADERS = {
-    "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
-    "Accept": "text/csv,text/plain,*/*",
-}
 REQUEST_TIMEOUT = 15
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2
 
-# Twelve Data is the price source once TWELVEDATA_API is set: unlike Stooq it
-# is built for server-side use, and its free tier (800 requests/day, 8 per
-# minute) comfortably covers a weekly pulse and scorecard.
+# Twelve Data is the price source; TWELVEDATA_API must be set for any price
+# lookup to work. It is built for server-side use, and its free tier (800
+# requests/day, 8 per minute) comfortably covers a weekly pulse and scorecard.
+# The keyless predecessor, Stooq, sat behind a JavaScript browser check from
+# 2026-08-17 and silently returned nothing from the first scheduled run
+# (2026-07-27) until Twelve Data replaced it; it has been removed rather than
+# kept as a fallback that only ever produced an empty result.
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 TWELVEDATA_SEARCH_URL = "https://api.twelvedata.com/symbol_search"
 # The plan allows 8 credits/minute; we pace below it on purpose. Measured
@@ -68,7 +55,7 @@ TWELVEDATA_RATE_LIMIT_COOLDOWN = 62
 # The cap keeps a run bounded (120 -> ~15 minutes) and degrades the way the
 # rest of this module does — callers that get {} just skip those assets.
 # Callers spend it in priority order, so the visible features are funded first.
-TWELVEDATA_MAX_REQUESTS = int(os.getenv("TWELVEDATA_MAX_REQUESTS", "120") or 120)
+TWELVEDATA_MAX_REQUESTS = env_int("TWELVEDATA_MAX_REQUESTS", 120)
 # A signal dated on a weekend/holiday uses the next trading day's close, up to
 # this many days later; beyond that the price point is treated as missing.
 MAX_PRICE_LAG_DAYS = 5
@@ -84,7 +71,7 @@ DISCLAIMER = (
 
 def symbol_for(asset):
     """
-    Map an asset entry to a Stooq symbol, or None when it isn't priceable.
+    Map an asset entry to an internal symbol, or None when it isn't priceable.
     Uses the canonical ticker (recorded, else the curated alias table), so a
     call on "Chevron" scores even though the speaker never said "CVX" — a
     third of directional calls were ticker-less and invisible before this.
@@ -98,7 +85,7 @@ def symbol_for(asset):
         return f"{ticker}.us"
     if asset_type == "crypto":
         return f"{ticker}usd"
-    return None  # index/commodity/macro naming on Stooq is too inconsistent
+    return None  # index/commodity/macro symbols vary too much per provider
 
 
 def twelvedata_key():
@@ -333,20 +320,20 @@ def fetch_prices_twelvedata(symbol, start, end, api_key):
     return {}
 
 
-def fetch_prices_live(symbol, start, end):
+def fetch_prices_live(symbol, start, end, _warned=[]):
     """
-    Daily closes straight from the provider: Twelve Data when a key is
-    configured, Stooq otherwise. Returns {} on any failure (logged, never
-    raises).
-
-    Stooq is the keyless legacy path and has been unusable server-side since
-    2026-08-17 (see STOOQ_HEADERS) — without a Twelve Data key this returns
-    nothing, which market_pulse.fetch_latest_prices reports as one loud line.
+    Daily closes straight from the provider. Returns {} on any failure
+    (logged, never raises). Without a Twelve Data key there is no provider:
+    that is said once per run, and market_pulse.fetch_latest_prices then
+    reports the resulting "no prices for any ticker" in one loud line.
     """
     api_key = twelvedata_key()
     if api_key:
         return fetch_prices_twelvedata(symbol, start, end, api_key)
-    return fetch_prices_stooq(symbol, start, end)
+    if not _warned:
+        _warned.append(True)
+        log_warn("No price API key configured (TWELVEDATA_API); price lookups are off.")
+    return {}
 
 
 def fetch_prices(symbol, start, end, cache=None):
@@ -371,47 +358,6 @@ def fetch_prices(symbol, start, end, cache=None):
         price_cache.remember(cache, symbol, start, end, prices)
         return price_cache.slice_range(cache[symbol], start, end)
     return price_cache.slice_range(entry, start, end)
-
-
-def fetch_prices_stooq(symbol, start, end):
-    """Daily closes for `symbol` from Stooq as {date: close}; {} on failure."""
-    url = STOOQ_URL.format(
-        symbol=symbol, d1=start.strftime("%Y%m%d"), d2=end.strftime("%Y%m%d")
-    )
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = requests.get(url, headers=STOOQ_HEADERS, timeout=REQUEST_TIMEOUT)
-        except requests.RequestException as e:
-            log_warn(f"Stooq request error for {symbol} (attempt {attempt}/{MAX_RETRIES}): {e}")
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF * attempt)
-                continue
-            return {}
-        if resp.status_code != 200:
-            log_warn(f"Stooq returned {resp.status_code} for {symbol}.")
-            return {}
-        return _parse_stooq_csv(resp.text, symbol)
-    return {}
-
-
-def _parse_stooq_csv(text, symbol):
-    lines = (text or "").strip().splitlines()
-    if len(lines) < 2 or not lines[0].lower().startswith("date"):
-        log_warn(f"No usable price data from Stooq for {symbol}.")
-        return {}
-    prices = {}
-    for line in lines[1:]:
-        parts = line.split(",")
-        if len(parts) < 5:
-            continue
-        day = _parse_date(parts[0])
-        try:
-            close = float(parts[4])
-        except ValueError:
-            continue
-        if day is not None:
-            prices[day] = close
-    return prices
 
 
 def price_on_or_after(prices, day, max_lag=MAX_PRICE_LAG_DAYS):
@@ -545,7 +491,7 @@ def generate_scorecard(today=None, path=SIGNALS_FILE, price_fetcher=fetch_prices
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Per-channel accuracy scorecard from data/signals.jsonl + Stooq prices"
+        description="Per-channel accuracy scorecard from data/signals.jsonl + daily prices"
     )
     parser.add_argument("--dry-run", action="store_true", help="Print instead of sending")
     args = parser.parse_args()

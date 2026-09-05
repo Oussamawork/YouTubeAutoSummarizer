@@ -7,7 +7,7 @@ from urllib.parse import urlparse, parse_qs
 
 import requests
 import gemini_quota
-from helpers import env_flag, env_int
+from helpers import env_flag, env_int, write_json_atomic
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
@@ -141,16 +141,10 @@ def _load_usage(today=None):
 
 
 def _save_usage(usage):
-    try:
-        directory = os.path.dirname(SUPADATA_USAGE_FILE)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(SUPADATA_USAGE_FILE, "w", encoding="utf-8") as f:
-            json.dump(usage, f, indent=2)
-    except OSError as e:
-        # Losing a counter update is better than losing the run; the worst case
-        # is over-counting next run, which errs toward saving credits.
-        log_warn(f"Could not persist Supadata usage: {e}")
+    # Atomic, like the dedup state: a counter file truncated by a crash reads
+    # as "nothing spent" and authorises draining the pool. Losing one update
+    # is better than losing the run, so a failure is logged, never raised.
+    write_json_atomic(SUPADATA_USAGE_FILE, usage, sort_keys=False)
 
 
 def _record_call(usage):
@@ -706,7 +700,9 @@ def get_transcript_from_video(video_id):
 
     text, budget_exhausted, reason = _fetch_supadata(vid)
     if not text:
-        gemini_text, gemini_quota, gemini_reason = _fetch_gemini_transcript(vid)
+        # Not named `gemini_quota`: that is the imported module, and a local
+        # of the same name would shadow it for the rest of this function.
+        gemini_text, gemini_spent, gemini_reason = _fetch_gemini_transcript(vid)
         if gemini_text:
             text, reason = gemini_text, gemini_reason
         elif gemini_reason != "no_gemini_key":
@@ -714,7 +710,7 @@ def get_transcript_from_video(video_id):
             # Its quota being spent defers the video just like Supadata's is:
             # the transcript exists, we simply have nothing left to spend today.
             reason = gemini_reason
-            budget_exhausted = budget_exhausted or gemini_quota
+            budget_exhausted = budget_exhausted or gemini_spent
     if not text:
         fallback = _fetch_youtube_transcript_api(vid)
         if fallback:

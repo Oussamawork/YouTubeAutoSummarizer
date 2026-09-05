@@ -10,7 +10,8 @@ So closes are cached in `data/prices.json` and topped up by a separate weekly
 job (`warm-prices.yml`, Sundays) that has the time to be slow. The pulse and the
 scorecard then read the cache and only reach the network for what it is missing.
 
-Cache shape, keyed by our internal (Stooq-style, provider-independent) symbol:
+Cache shape, keyed by our internal, provider-independent symbol (`nvda.us`,
+`btcusd`; see channel_scorecard.symbol_for):
 
     {"version": 1, "symbols": {
         "nvda.us": {"from": "2026-07-01", "to": "2026-08-16",
@@ -22,8 +23,9 @@ from "never fetched".
 """
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
+from helpers import write_json_atomic
 from log import log_info, log_warn
 
 CACHE_FILE = "data/prices.json"
@@ -78,7 +80,7 @@ def load(path=CACHE_FILE):
 def save(cache, path=CACHE_FILE, today=None):
     """Write the cache, trimming history beyond MAX_HISTORY_DAYS. Returns True
     on success; a write failure is logged, never raised."""
-    today = today or datetime.utcnow().date()
+    today = today or datetime.now(timezone.utc).date()
     cutoff = today - timedelta(days=MAX_HISTORY_DAYS)
     symbols = {}
     for symbol, entry in sorted(cache.items()):
@@ -91,14 +93,7 @@ def save(cache, path=CACHE_FILE, today=None):
             "to": entry["to"].isoformat(),
             "closes": closes,
         }
-    try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"version": CACHE_VERSION, "symbols": symbols}, f,
-                      indent=1, sort_keys=True)
-            f.write("\n")
-    except OSError as e:
-        log_warn(f"Could not write the price cache to {path}: {e}")
+    if not write_json_atomic(path, {"version": CACHE_VERSION, "symbols": symbols}, indent=1):
         return False
     total = sum(len(entry["closes"]) for entry in symbols.values())
     log_info(f"Price cache saved: {len(symbols)} symbols, {total} closes.")

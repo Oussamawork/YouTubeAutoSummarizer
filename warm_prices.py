@@ -18,11 +18,12 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 import channel_scorecard as cs
-import market_pulse as mp
 import price_cache
+import signals_data as mp
 import ticker_resolver
+from helpers import env_int
 from log import log_info, log_warn, log_error
-from market_pulse import (
+from signals_data import (
     SIGNALS_FILE, load_signals, aggregate_assets, _in_window,
 )
 
@@ -40,7 +41,7 @@ PULSE_WINDOW_DAYS = 7
 # the backlog runs for hours and dies on the workflow timeout having saved
 # nothing. Bounded runs chip away at it instead, most-discussed first, and
 # results are cached so no asset is paid for twice.
-MAX_RESOLVE_PER_RUN = int(os.getenv("MAX_RESOLVE_PER_RUN", "40") or 40)
+MAX_RESOLVE_PER_RUN = env_int("MAX_RESOLVE_PER_RUN", 40)
 
 
 def resolvable_assets(records, cache, learned):

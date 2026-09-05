@@ -156,7 +156,7 @@ least want to miss first — the ones at the bottom absorb whatever is left.
 | `SUPADATA_CREDITS_PER_KEY` | `100` | Monthly credits each key contributes to the budget. |
 | `SUPADATA_MONTHLY_BUDGET` | keys × credits | Explicit override for the whole cycle's budget. |
 | `SUPADATA_DAILY_PACING` | `false` | Ration the cycle's credits across its remaining days instead of spending what's needed each run. Off means a day's videos are all processed that day. |
-| `TWELVEDATA_API` (secret) | — | Price data for implied upside, the accuracy scorecard and the price-target chart ([twelvedata.com](https://twelvedata.com), free tier: 800 requests/day, 8/min). Without it prices are unavailable: the legacy Stooq source sits behind a browser check and returns no data to a server (verified 2026-08-17). |
+| `TWELVEDATA_API` (secret) | — | Price data for implied upside, the accuracy scorecard and the price-target chart ([twelvedata.com](https://twelvedata.com), free tier: 800 requests/day, 8/min). Without it prices are unavailable and the jobs say so once per run (the keyless Stooq source it replaced sat behind a browser check and returned nothing to a server, verified 2026-08-17, and has been removed). |
 | `TWELVEDATA_MAX_REQUESTS` | `120` | Ceiling on price requests per run, so a paced run can't outlast its workflow timeout. The Sunday cache warmer raises it to 600. |
 | `SUPADATA_RESET_DAY` | `1` | Day of the month the plan's credits reset. Supadata resets on the plan's anniversary, not the 1st — the dashboard shows it ("Credits reset on 08/17" → set `17`). Only consulted when pacing is enabled: it makes the pacing think the cycle ends sooner than it does; a per-day ceiling of budget ÷ 28 limits the damage, but set it correctly. |
 
