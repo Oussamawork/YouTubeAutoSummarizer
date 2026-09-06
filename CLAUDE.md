@@ -38,7 +38,9 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `summary_eval.py` / `evals/summaries/` — nine agent-labelled real-source
   review regressions from four saved videos. Default validates fixtures only;
   live requires `--live`, `SUMMARY_EVAL_LIVE=1`, and an allowed provider.
-  No live accuracy measurement or independent human validation is established.
+  The first live run matched 9/9 labels (report under `evals/reports/`), with
+  657 tests also passing on Python 3.11. General production accuracy and
+  independent human validation are not established.
 - `model_capabilities.py` — per-model input/output token limits: live Gemini
   `models.get` (cached in `data/model_capabilities.json`), `MODEL_CAPABILITIES_JSON`
   override, then the dated registry, then a small default for unknown models.

@@ -124,6 +124,8 @@ SUMMARY_EVAL_LIVE=1 python summary_eval.py --live --output /tmp/summary-review-e
 The fixture set covers four saved videos from one channel, with agent-reviewed
 labels that still need independent human review. It is a regression seed, not a
 representative production benchmark. See [accuracy design and limitations](docs/summary-accuracy.md).
+The first live run on 2026-09-06 matched all nine labels, including rejecting
+all five injected errors; see the [saved report](evals/reports/summary-review-34041316375-1.json).
 
 If `GEMINI_API_KEY` is already a GitHub repository secret, no local copy is
 needed: run **Actions → Summary Accuracy Benchmark → Run workflow** after

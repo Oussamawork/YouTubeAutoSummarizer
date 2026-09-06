@@ -52,8 +52,14 @@ quota/context failures, production delivery gates, retry persistence, stored
 source reuse, RSS expiry and benchmark integrity.
 
 The nine-case real-source benchmark is a regression seed with agent-prepared
-labels, not an independent human benchmark. No local model credentials were
-available during implementation, so no live model performance is established.
+labels, not an independent human benchmark. The first live run on 2026-09-06
+used the repository's Gemini secret in Actions and matched all nine labels:
+four faithful candidates approved and five corrupted candidates rejected,
+with no unavailable reviews. Seven cases used Gemini 3.7 Flash and two used
+Gemini 3.6 Flash. Full results are in
+`evals/reports/summary-review-34041316375-1.json`; Actions run 34041316375 also
+passed all 657 tests on Python 3.11. This establishes the targeted regression
+result, not general production accuracy or independent human validation.
 `summary_eval.py --live` is the explicit, quota-spending measurement path; the
 default command only validates fixture integrity. The existing `claims_eval.py`
 remains the separate extraction-quality benchmark.

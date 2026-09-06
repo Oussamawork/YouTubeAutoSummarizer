@@ -9,7 +9,11 @@ versus host disagreement, and a passing mention mislabelled as neutral.
 
 Labels were prepared by the coding agent after reading the saved transcripts.
 They have **not** been independently human-validated. All four videos belong
-to one channel. No live review results are bundled or claimed.
+to one channel. The first live run on 2026-09-06 matched all nine labels
+(four approvals and five rejections), with no unavailable reviews. It used
+the configured Gemini 3.7/3.6 Flash chain. The complete evidence and model
+telemetry are saved in `evals/reports/summary-review-34041316375-1.json`.
+This narrow result does not establish production-wide accuracy.
 
 `python summary_eval.py` validates file structure, source hashes and reference
 excerpts. Its `fixture_validation_only` report contains no accuracy score.
