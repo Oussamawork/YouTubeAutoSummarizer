@@ -33,9 +33,14 @@
       "last_video_id": "HNsqlYseGMA"
     },
     "UCwKB_00dPL3x5XmHF9IJCrg": {
-      "last_published": "2026-09-05T16:45:25+00:00",
-      "last_video_id": "yJsM2K8psG0"
+      "last_published": "2026-09-06T13:45:17+00:00",
+      "last_video_id": "l2yBHD0tWfI"
     }
   },
-  "pending": {}
+  "pending": {
+    "4L1A3cR0xKs": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    }
+  }
 }
