@@ -5,6 +5,7 @@ import time
 import requests
 import gemini_quota
 import token_budget
+from summary_policy import FIDELITY_RULES, SUMMARY_PROMPT_VERSION
 from helpers import env_int, env_float, write_json_atomic
 from log import log_info, log_warn, log_error
 
@@ -135,8 +136,8 @@ TRUNCATED_SENTINEL = "SUMMARY_TRUNCATED"
 # **bold** or "#" headers will not render). Hence: plain text, "• " bullets only.
 SUMMARY_SYSTEM_PROMPT = (
     "You are an expert analyst summarizing market and investing videos for a "
-    "reader who has NOT watched them and may act on what you write. Specificity "
-    "is the entire value: a summary that omits the numbers is worse than none.\n"
+    "reader who has NOT watched them. Preserve source-supported specifics "
+    "without overstating what the speaker said.\n"
     "\n"
     "Output format (plain text only — no markdown, no headers, no bold):\n"
     "1. First line: a single-sentence TL;DR giving the speaker's actual "
@@ -168,9 +169,9 @@ SUMMARY_SYSTEM_PROMPT = (
     "\n"
     "Capture these whenever the speaker states them — they are the point:\n"
     "- EVERY asset the speaker discusses, with their stance (bullish / bearish "
-    "/ neutral) and how strongly they hold it. Do not drop an asset for "
+    "/ neutral) and conviction only when expressed. Do not drop an asset for "
     "brevity: if the speaker covers eight assets, all eight must appear. Give "
-    "the ticker only when the speaker says it or it is on screen in the title; "
+    "the ticker only when the speaker says it in the transcript; "
     "otherwise use the company name alone. Never supply a ticker you happen to "
     "know but did not hear.\n"
     "- Concrete numbers: price levels, targets, support and resistance, stop or "
@@ -197,7 +198,7 @@ SUMMARY_SYSTEM_PROMPT = (
     "- If you are running long, shorten the bullets, then drop bullets "
     "entirely. Never drop an asset line, and never leave a sentence "
     "unfinished — the roster is the last thing to go, not the first.\n"
-    "\n"
+    + FIDELITY_RULES + "\n\n"
     "Output only the summary itself — no preamble, no sign-off, and no phrases "
     "like \"Here is the summary\"."
 )
@@ -247,7 +248,7 @@ COMPACT_SUMMARY_SYSTEM_PROMPT = (
     "70 per asset line, up to 1500 total. Never omit an asset to stay short — "
     "shorten its line instead.\n"
     "- Finish every sentence; never leave one unfinished.\n"
-    "\n"
+    + FIDELITY_RULES + "\n\n"
     "Output only the summary itself — no preamble, no sign-off, and no phrases "
     "like \"Here is the summary\"."
 )
@@ -863,12 +864,14 @@ CHUNK_NOTES_SYSTEM_PROMPT = (
     'target, timeframe and condition they gave>"], '
     '"assets": [{"name": "<as stated>", "ticker": "<only if spoken>", '
     '"stance": "bullish|bearish|neutral|unclear", "levels": "<numbers given>", '
+    '"attribution": "<whose view, if any>", "view_status": "current|past|comparison|unclear", '
     '"timeframe": "<as stated>", "reasoning": "<why>"}], '
     '"positions": ["<positions the speaker discloses or changes>"], '
     '"other": ["<anything else a reader who has not watched would need>"]}\n'
     "Rules: never invent numbers, tickers, names or dates; keep negations, "
     "conditions and hedges attached to the point they qualify; omit sponsor "
     "reads and housekeeping; write in English; an empty list is fine."
+    + FIDELITY_RULES
 )
 
 MERGE_PREAMBLE = (
@@ -880,8 +883,8 @@ MERGE_PREAMBLE = (
 )
 
 
-CHUNK_NOTES_PROMPT_VERSION = "1"
-CHUNK_NOTES_SCHEMA_VERSION = "1"
+CHUNK_NOTES_PROMPT_VERSION = "2"
+CHUNK_NOTES_SCHEMA_VERSION = "2"
 
 
 def _model_policy():
@@ -893,7 +896,8 @@ def model_config_string():
     """The generation settings every request is made with, for run identity
     and partial-cache keys: a changed temperature or reasoning effort is a
     different extraction."""
-    return (f"temperature={LLM_TEMPERATURE};reasoning_effort={LLM_REASONING_EFFORT};"
+    return (f"summary_prompt={SUMMARY_PROMPT_VERSION};"
+            f"temperature={LLM_TEMPERATURE};reasoning_effort={LLM_REASONING_EFFORT};"
             f"summary_max_output={SUMMARY_MAX_OUTPUT_TOKENS};ceiling={LLM_MAX_TOKENS_CEILING};"
             f"escalations={LLM_MAX_ESCALATIONS}")
 

@@ -1,0 +1,13 @@
+{
+  "source_video_id": "iX3l4eykN-s",
+  "source_transcript_hash": "f4c20807a5623db4b5fce6cd14b5f260fb5aa9520657e9d39c798f9052d311f7",
+  "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+  "draft": "The speaker sees Taiwan Semiconductor, Micron and Nvidia as undervalued AI investments over 12–18 months; Nvidia is his top pick and largest disclosed portfolio position.\n\n• Taiwan Semiconductor: fair value $609 versus $416 quoted price and over 46% stated upside. AI and device demand support the thesis, while China–Taiwan tensions and more expensive overseas production pose risks.\n• Micron: fair value $1,473 versus $941 and over 56% stated upside. Hyperscaler spending and longer customer agreements support demand visibility; management expects less cyclicality, but the speaker says cyclical risk remains.\n• Nvidia: fair value $339 versus $219 and roughly 55% stated upside. The speaker cites its full-stack offering and estimated 80–90% market share, alongside increasing competition from chipmakers and customers, and risks from loss-making AI model companies and complex financing arrangements.",
+  "expected_status": "approved",
+  "category": "faithful_summary",
+  "reference_notes": "Faithful candidate retaining source attribution and material caveats; acceptance label needs independent human review.",
+  "supporting_excerpts": [
+    "I actually own Nvidia stock in my portfolio. It's the largest position in my portfolio",
+    "It's the manufacturing partner for companies like Nvidia and AMD. It's also the manufacturing partner for companies like Apple."
+  ]
+}

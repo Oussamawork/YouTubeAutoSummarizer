@@ -25,7 +25,7 @@ from log import log_info, log_warn
 from signals_data import ASSET_ALIASES, TICKER_ALIASES, learned_tickers
 
 SCHEMA_VERSION = "2"
-EXTRACTION_PROMPT_VERSION = "2"
+EXTRACTION_PROMPT_VERSION = "3"
 
 # --- Enumerations -----------------------------------------------------------
 
@@ -149,6 +149,11 @@ CLAIM_RULES = (
     "(host_position=adopted) or rejects it (host_position=rejected).\n"
     "- \"Last year I said X\" is retrospective_claim / historical_claim, not a "
     "new forecast.\n"
+    "- A hold/buy/sell rating is not ownership or a personal transaction. "
+    "A current quoted price is not a buy-below level. A fair value estimate "
+    "alone is valuation_view, not a forecast that the price will reach it. "
+    "Keep signed numbers and their metrics intact; never drop a minus sign "
+    "or change an operating margin into a price target.\n"
     "- Owning a stock is portfolio_disclosure with stance=not_applicable and "
     "recommendation_action=none — it is not a view; praise without an explicit "
     "buy/sell/hold instruction is opinion with recommendation_action=none. Only "
@@ -279,7 +284,7 @@ def raw_claims_from(data):
 
 _FOLD_MAP = str.maketrans({
     "’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-",
-    " ": " ",
+    " ": " ", "−": "-",
 })
 
 
@@ -292,6 +297,11 @@ def _fold(text):
     for i, ch in enumerate(text):
         lower = ch.lower()
         if lower.isalnum() or lower in "$%€£":
+            out.append(lower)
+            idx.append(i)
+            prev_space = False
+        elif lower in "+-" and i + 1 < len(text) and text[i + 1].isdigit():
+            # Numeric signs are evidence, not disposable punctuation.
             out.append(lower)
             idx.append(i)
             prev_space = False
@@ -352,6 +362,13 @@ def numbers_in(text):
             value = float(f"{whole}.{frac}" if frac else whole)
         except ValueError:
             continue
+        prefix = text[:m.start()]
+        gap = text[matches[i - 1].end():m.start()] if i else None
+        is_range_separator = gap is not None and gap.strip() in ("-", "–", "—")
+        negative = re.search(r"(?:\b(?:negative|minus)(?:\s+at)?\s*|[-−]\s*)[$€£]?\s*$",
+                             prefix, re.IGNORECASE)
+        if negative and not is_range_separator:
+            value = -value
         found.add(value)
         suffix = (m.group(3) or "").lower()
         if suffix in _MULT:

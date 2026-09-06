@@ -98,6 +98,10 @@ def _offline_model_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(transcript_store, "TRANSCRIPT_INDEX",
                         str(tmp_path / "research" / "transcript_records.jsonl"))
     monkeypatch.setattr(summarizer, "PARTIALS_DIR", str(tmp_path / "partials"))
+    # Existing orchestration tests mock generation only. Review tests opt in
+    # explicitly and mock the additional calls; no test spends live quota.
+    monkeypatch.setenv("SUMMARY_REVIEW_ENABLED", "false")
+    monkeypatch.setenv("SUMMARY_REVIEW_FILE", str(tmp_path / "summary_reviews.jsonl"))
     monkeypatch.setattr(scraper, "SIGNALS_FILE", str(tmp_path / "signals.jsonl"))
     monkeypatch.setattr(signals, "EXHAUSTIVE_RESEARCH_MODE", False)
     yield

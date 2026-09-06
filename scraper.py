@@ -28,6 +28,7 @@ import language_detect
 import research_budget
 import research_state
 import transcript_store
+import summary_review
 from claims import SCHEMA_VERSION, EXTRACTION_PROMPT_VERSION
 from transcript_normalize import normalize_transcript
 from sendToTelegram import (
@@ -439,6 +440,7 @@ def _evict_orphaned_pending(pending, channel_id, feed_video_ids):
         # everything needed to deliver it and needs no feed entry; dropping
         # it here would lose paid-for work.
         and not _undelivered(record)
+        and not record.get("summary_review_retry")
     ]
     for video_id in orphaned:
         pending.pop(video_id, None)
@@ -557,7 +559,14 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     transcript goes to the model — nothing is cut to fit.
     """
     log_info(f"Fetching transcript for {video_details['video_url']} ...")
-    transcript = get_transcript_from_video(video_details['video_url'])
+    retry = video_details.get('_summary_review_retry') or {}
+    stored = transcript_store.load_transcript(video_details.get('video_id') or "") if retry else None
+    if stored and isinstance(stored.get('raw_transcript'), str) and stored['raw_transcript'].strip():
+        transcript = {"transcript": stored['raw_transcript'],
+                      "reason": stored.get('transcript_retrieval_reason')}
+        log_info("Resuming source review from the stored transcript.")
+    else:
+        transcript = get_transcript_from_video(video_details['video_url'])
 
     # Check the actual transcript TEXT, not the dict (a dict is always truthy).
     transcript_text = transcript.get('transcript', '') if isinstance(transcript, dict) else ''
@@ -631,7 +640,12 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     transcript_text = nt.text
 
     raw_summary, research = None, None
-    if want_signals:
+    if (retry.get('transcript_hash') == nt.transcript_hash
+            and isinstance(retry.get('draft'), str) and retry['draft'].strip()):
+        raw_summary = retry['draft']
+        LAST_CALL_TELEMETRY.clear()
+        LAST_CALL_TELEMETRY.update(retry.get('summary_telemetry') or {})
+    if want_signals and raw_summary is None:
         # One call for both; None means "not usable" — fall back to the plain
         # summary call so a combined-format hiccup can never cost a summary.
         # (None, research) means the combined OUTPUT was truncated by the
@@ -705,6 +719,13 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
 
     summary = clean_summary(raw_summary)
     if summary:
+        summary, review = summary_review.review_summary(
+            summary, nt, video_details, compact=compact)
+        video_details['summary_review'] = review
+        if summary is None:
+            video_details['summary'] = "Summary awaiting source review."
+            log_warn(f"Summary source review {review['status']}: {review.get('reason')}; deferring.")
+            return None, "summary_review_deferred", False, research
         video_details['summary'] = summary
         video_details['summary_telemetry'] = dict(LAST_CALL_TELEMETRY)
         log_info("Summary generated.")
@@ -927,6 +948,7 @@ def _persist_research(channel_id, video_details, summary, research, signals_row=
         "failure_reason": (research or {}).get("failure_reason"),
         "telemetry": (research or {}).get("telemetry") or {},
         "summary_telemetry": video_details.get("summary_telemetry") or {},
+        "summary_review_status": (video_details.get("summary_review") or {}).get("status"),
         "transcript_stored": fields["transcript_stored"],
         "recorded_at": research_state.now_iso(),
     })
@@ -989,6 +1011,7 @@ _GATE_BY_OUTCOME = {
     "quota_deferred": "model_quota_deferred", "truncated_deferred": "model_quota_deferred",
     "truncated": "manual_review", "insufficient": "manual_review",
     "summary_failed": "manual_review",
+    "summary_review_deferred": "summary_review_deferred",
 }
 
 
@@ -1019,14 +1042,13 @@ def _finalize_video(channels_state, pending, channel_id, video_details):
 
 def _undelivered_candidates(pending, channel_id, feed_video_ids):
     """
-    Videos of this channel that were summarized on an earlier run but never
-    accepted by Telegram and have since left the feed. Rebuilt from the held
-    record so they can still be delivered; ones still in the feed come through
+    Videos awaiting delivery or source review that have since left the feed.
+    Rebuilt from the held record so they can still be processed; ones in the feed come through
     _select_candidates like any other pending video. Oldest first.
     """
     found = []
     for video_id, record in pending.items():
-        block = _undelivered(record)
+        block = _undelivered(record) or (record.get("summary_review_retry") if isinstance(record, dict) else None)
         if (block and isinstance(record, dict) and record.get("channel_id") == channel_id
                 and video_id not in feed_video_ids):
             found.append({"video_id": video_id,
@@ -1214,6 +1236,7 @@ def main():
                 "no_transcript_deferred": 0, "insufficient": 0, "summary_failed": 0,
                 "quota_deferred": 0, "budget_deferred": 0, "retry_backoff": 0,
                 "truncated_deferred": 0, "truncated": 0, "delivery_failed": 0,
+                "summary_review_deferred": 0,
                 "deadline_deferred": 0, "no_video": 0, "error": 0,
             }
 
@@ -1374,6 +1397,7 @@ def main():
                                 f"(published: {video_details['published_at']})"
                             )
 
+                            video_details['_summary_review_retry'] = record.get("summary_review_retry")
                             telegram_body, outcome, decided, signals = _summarize_video(
                                 video_details, attempts, compact=channel["digest"],
                                 want_signals=market_signals,
@@ -1442,6 +1466,19 @@ def main():
                             # Retryable outcome: leave the watermark alone and
                             # remember the video so the next run picks it up.
                             entry = pending.setdefault(video_id, {"channel_id": channel_id, "attempts": 0})
+                            if outcome == "summary_review_deferred":
+                                # Review failure must never age into a final
+                                # no-transcript verdict or advance the watermark.
+                                entry["last_attempt"] = datetime.now(timezone.utc).isoformat()
+                                review = video_details.get('summary_review') or {}
+                                attempts_reviewed = review.get('attempts') or []
+                                if attempts_reviewed:
+                                    entry["summary_review_retry"] = {
+                                        "draft": attempts_reviewed[-1]['summary'],
+                                        "transcript_hash": review.get('transcript_hash'),
+                                        "summary_telemetry": dict(LAST_CALL_TELEMETRY),
+                                        **{field: video_details.get(field, "") for field in _ENTRY_FIELDS},
+                                    }
                             if outcome in ("no_transcript_deferred", "truncated_deferred"):
                                 # Stamped only for deferrals that cost a credit,
                                 # so a budget-deferred video retries as soon as
@@ -1553,7 +1590,8 @@ def summarize_on_demand(video_url):
     # There is no next run for an on-demand request, so a "deferred" outcome is
     # simply a failure: say so rather than promising a retry that never comes,
     # and report it as a failure so the manual run doesn't look green.
-    deferred = outcome in ("quota_deferred", "truncated_deferred", "budget_deferred")
+    deferred = outcome in ("quota_deferred", "truncated_deferred", "budget_deferred",
+                           "summary_review_deferred")
     if deferred:
         telegram_body = (
             "⚠️ No summary could be produced for this video right now "

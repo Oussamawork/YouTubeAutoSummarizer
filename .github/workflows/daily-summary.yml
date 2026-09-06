@@ -126,6 +126,13 @@ jobs:
           GEMINI_FREE_TIER_TPM: ${{ vars.GEMINI_FREE_TIER_TPM }}
           CONTEXT_SAFETY_MARGIN_TOKENS: ${{ vars.CONTEXT_SAFETY_MARGIN_TOKENS }}
           EXHAUSTIVE_RESEARCH_MODE: ${{ vars.EXHAUSTIVE_RESEARCH_MODE }}
+          # Source review is on by default. One extra call, or three if a
+          # rejected draft needs a repair and a second audit. Failed audits
+          # defer delivery; unset/empty variables retain the defaults.
+          SUMMARY_REVIEW_ENABLED: ${{ vars.SUMMARY_REVIEW_ENABLED }}
+          SUMMARY_REVIEW_REPAIR: ${{ vars.SUMMARY_REVIEW_REPAIR }}
+          SUMMARY_REVIEW_MAX_TOKENS: ${{ vars.SUMMARY_REVIEW_MAX_TOKENS }}
+          SUMMARY_MODELS: ${{ vars.SUMMARY_MODELS }}
 
       - name: Retry pending research extractions
         # Videos whose summary went out but whose claims failed, were

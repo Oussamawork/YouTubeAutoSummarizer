@@ -241,7 +241,7 @@ def test_summary_note_partials_carry_the_same_key(monkeypatch, tmp_path):
     chunk = _chunk(nt)
     summarizer._save_partial(nt, chunk, {"key_points": ["x"]}, {"model": "m"})
     assert summarizer._load_partial(nt, chunk) == {"notes": {"key_points": ["x"]}}
-    monkeypatch.setattr(summarizer, "CHUNK_NOTES_PROMPT_VERSION", "2")
+    monkeypatch.setattr(summarizer, "CHUNK_NOTES_PROMPT_VERSION", summarizer.CHUNK_NOTES_PROMPT_VERSION + "-changed")
     assert summarizer._load_partial(nt, chunk) is None
     with open(partial_cache.path_for(nt.transcript_hash, "summary_notes", chunk.chunk_id), encoding="utf-8") as f:
         key = json.load(f)["key"]

@@ -79,6 +79,63 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Accuracy and source review
+
+Summaries now receive an additional source review before delivery by default
+(`SUMMARY_REVIEW_ENABLED=true`). Every nonempty summary line must receive a
+supported verdict and cite literal excerpts from the complete transcript.
+The reviewer also checks for missing central conclusions and material caveats.
+Code validates line coverage and the quoted evidence; semantic support is still
+a model judgment, not a proof or an external fact check.
+
+The shared prompts distinguish ratings from personal holdings, current prices
+from entry thresholds, fair value from forecasts, historical recommendations
+from current views, and passing mentions from neutral investment stances.
+They preserve disagreement, conditional wording, numeric signs and uncertainty.
+
+A rejected draft gets at most one repair and a fresh review. An unavailable,
+malformed or failed review defers delivery. Scheduled retries preserve the draft
+and reuse its stored transcript when available, including after RSS expiry.
+Audit records, excerpts, offsets, available timestamps and model metadata are
+saved to `data/research/summary_reviews.jsonl`, including when market signals
+are disabled. Existing messages already queued for delivery are not re-audited.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SUMMARY_REVIEW_ENABLED` | `true` | Review before production delivery; `false` retains generation-only behavior. |
+| `SUMMARY_REVIEW_REPAIR` | `true` | Allow one correction followed by another review. |
+| `SUMMARY_REVIEW_MAX_TOKENS` | `6000` | Output budget for each review call. |
+
+A clean draft adds one model call. A repaired draft adds three (review, repair,
+review), before provider retries or token-budget escalation. This reduces the
+number of videos a fixed free-tier allowance can deliver each day. If the full
+transcript plus draft cannot fit any allowed review model, delivery defers;
+the source is never shortened to obtain approval. Configure an allowed model
+with sufficient input capacity or disable review explicitly if necessary.
+
+Run `python summary_eval.py` to check the nine real-source regression fixtures.
+This makes no model calls and does **not** measure model accuracy. With an allowed
+provider configured, run the live review benchmark explicitly:
+
+```bash
+SUMMARY_EVAL_LIVE=1 python summary_eval.py --live --output /tmp/summary-review-eval.json
+```
+
+The fixture set covers four saved videos from one channel, with agent-reviewed
+labels that still need independent human review. It is a regression seed, not a
+representative production benchmark. See [accuracy design and limitations](docs/summary-accuracy.md).
+
+If `GEMINI_API_KEY` is already a GitHub repository secret, no local copy is
+needed: run **Actions → Summary Accuracy Benchmark → Run workflow** after
+publishing `.github/workflows/summary-quality.yml` and the benchmark code to
+the default branch. It uses that secret inside Actions, runs the offline checks
+first, and uploads the live report even when verdicts fail. It never sends
+Telegram messages. Running it requires repository write access and consumes
+the same Gemini quota as production; its quota usage is uploaded as an artifact
+but is not committed back to the production counter. During development, code
+pushes to `codex/summary-accuracy` also run the benchmark and save its report
+under `evals/reports/` on that branch only; report-only commits do not rerun it.
+
 ### Fetching and Summarizing Videos:
 1. Add YouTube channel IDs to `channel_ids.txt` (one per line).
 2. Run the script to fetch each channel's new videos, extract the transcripts, summarize them, and send the summaries to Telegram:

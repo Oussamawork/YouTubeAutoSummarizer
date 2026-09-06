@@ -1,0 +1,13 @@
+{
+  "source_video_id": "-kN_6j8wQTA",
+  "source_transcript_hash": "9cce8f836ee51f28952f1d3fe555823cc1f8a7535a6db63175970fd1e3125f6a",
+  "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+  "draft": "The speaker reiterates a buy rating on Lockheed Martin and raises conviction from low to medium, citing improved performance, valuation and defense spending prospects.\n\n• He reports a $64 billion quarterly backlog increase to $230 billion and believes defense budget growth could sustain double-digit revenue growth, but highlights manufacturing execution and relatively modest operating margins of 11.8%.\n• He cites 22% ROIC, more than twice the weighted average cost of capital, and a forward P/E of 16.6.\n• His fair value estimate is $660 versus a quoted current price of $544, which he describes as roughly 21% upside over 12–18 months. No personal purchase or buy-below threshold is disclosed.",
+  "expected_status": "approved",
+  "category": "faithful_summary",
+  "reference_notes": "Faithful candidate retaining source attribution and material caveats; acceptance label needs independent human review.",
+  "supporting_excerpts": [
+    "I estimated a fair value of the stock at $660, and you can buy it today at 544.",
+    "I'm ranking Lockheed Martin stock a buying opportunity, but I am upgrading my conviction level to medium"
+  ]
+}

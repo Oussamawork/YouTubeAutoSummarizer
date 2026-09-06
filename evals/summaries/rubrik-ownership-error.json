@@ -1,0 +1,13 @@
+{
+  "source_video_id": "yJsM2K8psG0",
+  "source_transcript_hash": "115049a72e5ef3dd5db48393277a14a87595b039f9775b3c2b44b3a2d72c6f6d",
+  "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+  "draft": "The speaker is personally holding Rubrik shares with medium conviction, viewing it as expensive and preferring to wait for a better buying opportunity.\n\n• Subscription revenue grew 37%, with management citing demand for agentic AI cyber resilience. The speaker expects continued double-digit revenue growth, but profitability still depends on sustaining growth and reaching greater scale over several years.\n• Trailing operating margin is -18.3% and ROIC is negative 40%; the speaker suggests operating margins could eventually approach 20–40% at larger scale, using Palo Alto Networks and Fortinet as comparisons.\n• The speaker estimates fair value at $68 versus a quoted $88 share price and forward P/E of 115. He describes the price as about 22% more expensive than fair value; that stated percentage appears inconsistent with his quoted prices.\n• He recalls having rated Palo Alto Networks, Fortinet, Sentinel One, Okta and Zscaler as buys entering 2026, while Rubrik and CrowdStrike were exceptions. These are past ratings, not new recommendations.",
+  "expected_status": "rejected",
+  "category": "rating_vs_ownership",
+  "reference_notes": "A hold rating is not evidence of ownership.",
+  "supporting_excerpts": [
+    "In fact, I had it ranked as a hold with a medium conviction level, and I last updated it on January 1st. So, today I will be reiterating that rating.",
+    "At $88 per share, it's about 22% more expensive than my fair value estimate of $68 per share."
+  ]
+}

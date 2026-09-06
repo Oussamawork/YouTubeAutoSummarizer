@@ -1,0 +1,111 @@
+name: Summary Accuracy Benchmark
+
+# Uses the existing Gemini secret and never invokes the scraper or Telegram.
+# The isolated benchmark branch can run before this workflow reaches main.
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/summary-accuracy]
+    paths:
+      - '*.py'
+      - 'tests/**'
+      - 'evals/summaries/**'
+      - '.github/workflows/summary-quality.yml'
+      - 'requirements*.txt'
+
+permissions:
+  contents: write
+
+# Share the production job's lock so evaluation does not compete with a
+# summary run for the same per-minute Gemini quota.
+concurrency:
+  group: daily-summary
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run offline checks
+        run: ./scripts/check.sh
+
+      - name: Validate benchmark sources and labels
+        run: python summary_eval.py --output artifacts/fixture-validation.json
+
+      - name: Run live source-review benchmark
+        run: python summary_eval.py --live --output artifacts/summary-review-eval.json
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GEMINI_FALLBACK_MODELS: ${{ vars.GEMINI_FALLBACK_MODELS }}
+          SUMMARY_MODELS: ${{ vars.SUMMARY_MODELS }}
+          SUMMARY_EVAL_LIVE: 'true'
+          SUMMARY_REVIEW_MAX_TOKENS: ${{ vars.SUMMARY_REVIEW_MAX_TOKENS }}
+          LLM_LIVE_CAPABILITIES: ${{ vars.LLM_LIVE_CAPABILITIES }}
+          LLM_LIVE_COUNT_TOKENS: ${{ vars.LLM_LIVE_COUNT_TOKENS }}
+          GEMINI_FREE_TIER_TPM: ${{ vars.GEMINI_FREE_TIER_TPM }}
+          CONTEXT_SAFETY_MARGIN_TOKENS: ${{ vars.CONTEXT_SAFETY_MARGIN_TOKENS }}
+
+      - name: Explain benchmark result
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path('artifacts/summary-review-eval.json')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+              if not path.exists():
+                  out.write('No live benchmark report was produced. Check the failed step; accuracy is not established.\n')
+              else:
+                  report = json.loads(path.read_text(encoding='utf-8'))
+                  out.write('## Source-review benchmark\n\n')
+                  out.write(f"Matched labels: {report['matched']}/{report['cases']}\n\n")
+                  out.write(f"False approvals: {report['false_approvals']}\n\n")
+                  out.write(f"False rejections: {report['false_rejections']}\n\n")
+                  out.write(f"Unavailable reviews: {report['unavailable']}\n\n")
+                  out.write('These are agent-labelled regression cases from one channel, not an independent production accuracy estimate.\n')
+          PY
+
+      - name: Upload reports and quota usage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary-accuracy-${{ github.run_id }}
+          path: |
+            artifacts/*.json
+            data/gemini_usage.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Save report on the isolated benchmark branch
+        # Makes the result retrievable with the personal SSH identity. Never
+        # writes to main, and report-only commits do not trigger another run.
+        if: always() && github.ref == 'refs/heads/codex/summary-accuracy'
+        env:
+          REPORT_NAME: summary-review-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: |
+          if [ ! -f artifacts/summary-review-eval.json ]; then
+            exit 0
+          fi
+          mkdir -p evals/reports
+          cp artifacts/summary-review-eval.json "evals/reports/${REPORT_NAME}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "evals/reports/${REPORT_NAME}"
+          git commit -m 'test: record live summary benchmark results'
+          git push origin HEAD:refs/heads/codex/summary-accuracy

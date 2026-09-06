@@ -1,0 +1,13 @@
+{
+  "source_video_id": "vmN5za6bkFQ",
+  "source_transcript_hash": "4ff4774aa26259e5854e9a98ca0f00cc0118c561a050fd400fc39118c8e28b6d",
+  "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+  "draft": "The speaker rates the EV company referred to as Neo in the captions a buying opportunity with low conviction, suitable only for investors willing to tolerate above-average risk.\n\n• Vehicle margins rose to 18.5% from 10.3% a year earlier. Operating losses improved, but consistent profitability is still unproven; the speaker describes a strong cash balance, though the exact cash figure is garbled in the captions.\n• Management guides to third-quarter deliveries of 108,000–111,000 and expects fourth-quarter car-industry growth. The speaker doubts that rebound, expecting component costs, consumer budget pressure, high interest rates and geopolitical risks to persist.\n• Falling research and development expenses and a forward P/E of 23.4 support the valuation case, but the speaker stresses his dislike of the car industry and the volatility of an emerging brand.",
+  "expected_status": "approved",
+  "category": "faithful_summary",
+  "reference_notes": "Faithful candidate retaining source attribution and material caveats; acceptance label needs independent human review.",
+  "supporting_excerpts": [
+    "I don't know about that. The headwinds that are impacting the car industry in the third quarter in my opinion are likely to persist into the fourth quarter.",
+    "I would say yes, but I have a low confidence level, a low conviction in that rating."
+  ]
+}

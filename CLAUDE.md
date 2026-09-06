@@ -28,6 +28,17 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   summarized in complete-coverage chunks and merged (`_summarize_chunked`,
   resumable via `data/research/partials/`, quota-checked before it starts).
   `SUMMARY_MAX_OUTPUT_TOKENS` caps what the model writes, never what it reads.
+- `summary_policy.py` / `summary_review.py` — shared source-fidelity rules and
+  the pre-delivery audit (on by default). Every line requires a supported
+  verdict and literal evidence; rejected drafts get one repair and re-audit.
+  Unavailable/failed reviews defer, preserving source and draft for retries.
+  `data/research/summary_reviews.jsonl` retains audits independently of claims.
+  This is model-assisted source review, not external fact checking. See
+  `docs/summary-accuracy.md` for request costs and limits.
+- `summary_eval.py` / `evals/summaries/` — nine agent-labelled real-source
+  review regressions from four saved videos. Default validates fixtures only;
+  live requires `--live`, `SUMMARY_EVAL_LIVE=1`, and an allowed provider.
+  No live accuracy measurement or independent human validation is established.
 - `model_capabilities.py` — per-model input/output token limits: live Gemini
   `models.get` (cached in `data/model_capabilities.json`), `MODEL_CAPABILITIES_JSON`
   override, then the dated registry, then a small default for unknown models.
@@ -107,7 +118,7 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   been evaluated live; `--export-transcripts` writes labelling skeletons
   from stored transcripts). Offline replay by default; live only with
   `--live` and `CLAIMS_EVAL_LIVE=1`. Never runs in CI. The real benchmark
-  has not been built yet (no stored transcripts, no live run).
+  has not been built yet (four stored transcripts, no live benchmark run).
 - `research_state.py` — research state independent of delivery
   (`data/research/research_state.json`) plus the append-only products:
   `claims.jsonl`, `extraction_runs.jsonl`, `review_queue.jsonl`,

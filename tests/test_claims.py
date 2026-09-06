@@ -88,6 +88,24 @@ def test_number_support_handles_units_and_multipliers():
     assert not cm.number_supported(200, "reach $100")
 
 
+def test_signed_source_numbers_cannot_support_the_opposite_sign():
+    for source in ("Negative 18.3% operating margin", "margin of -18.3%", "margin of −18.3%"):
+        assert cm.number_supported(-18.3, source)
+        assert not cm.number_supported(18.3, source)
+    assert cm.number_supported(-40, "returns on invested capital are negative at 40%")
+    assert cm.number_supported(-2e9, "minus $2 billion")
+    assert cm.number_supported(-5, "between -5 and -2 percent")
+    assert cm.number_supported(-2, "between -5 and -2 percent")
+    assert cm.number_supported(180000, "150 - 180k")
+    assert not cm.number_supported(-180000, "150 - 180k")
+
+
+def test_evidence_matching_does_not_erase_numeric_signs():
+    assert cm.locate_evidence("Operating margin was -18.3 percent", "Operating margin was 18.3 percent") is None
+    assert cm.locate_evidence("Operating margin was 18.3 percent", "Operating margin was -18.3 percent") is None
+    assert cm.locate_evidence("Operating margin was -18.3 percent", "Operating margin was −18.3 percent")
+
+
 def test_two_targets_two_horizons_stay_two_claims():
     text = "This stock could reach $100 this year and $150 by 2030."
     claims, _ = _validate(text, [
