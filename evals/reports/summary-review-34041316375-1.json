@@ -1,0 +1,2028 @@
+{
+  "cases": 9,
+  "categories": {
+    "current_price_vs_entry": 1,
+    "faithful_summary": 4,
+    "historical_vs_current": 1,
+    "management_vs_host": 1,
+    "mention_vs_stance": 1,
+    "rating_vs_ownership": 1
+  },
+  "channels": 1,
+  "false_approvals": 0,
+  "false_rejections": 0,
+  "matched": 9,
+  "mode": "live_review",
+  "production_accuracy": "NOT ESTABLISHED: small agent-labelled, single-channel sample",
+  "results": [
+    {
+      "case": "ai-stocks-faithful",
+      "category": "faithful_summary",
+      "expected_status": "approved",
+      "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+      "matches_label": true,
+      "review": {
+        "checks": [
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "In this video, I'm going to bring you three undervalued AI stocks that have at least 40% upside or more according to my calculations.",
+                "spans": [
+                  [
+                    155,
+                    288
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Therefore, I calculated upside of over 46% for Taiwan Semiconductor stock over the next 12 to 18 months.",
+                "spans": [
+                  [
+                    600,
+                    704
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "So, given that difference, I calculated upside of over 56% for Micron over the next 12 to 18 months.",
+                "spans": [
+                  [
+                    3872,
+                    3972
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "and so I calculated an upside of roughly 55% for Nvidia stock over the next 12 to 18 months.",
+                "spans": [
+                  [
+                    6610,
+                    6702
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "I actually own Nvidia stock in my portfolio. It's the largest position in my portfolio, and I have Nvidia ranked as the best stock you can buy right now.",
+                "spans": [
+                  [
+                    9204,
+                    9357
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 1,
+            "reason": "",
+            "text": "The speaker sees Taiwan Semiconductor, Micron and Nvidia as undervalued AI investments over 12\u201318 months; Nvidia is his top pick and largest disclosed portfolio position.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "I calculated a fair value for the stock at $609 per share, and the market price is just $416. Therefore, I calculated upside of over 46% for Taiwan Semiconductor stock over the next 12 to 18 months.",
+                "spans": [
+                  [
+                    506,
+                    704
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "not just for the cloud data centers that are pushing out these computing services for the large language models, but also on-device artificial intelligence, devices like smartphones, tablets, laptops, personal computers, and increasingly cars",
+                "spans": [
+                  [
+                    1416,
+                    1658
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Now, the biggest geopolitical tension is between China and Taiwan.",
+                "spans": [
+                  [
+                    2265,
+                    2331
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "The management team said the costs of production in those regions are going to be higher than the costs of producing in Taiwan.",
+                "spans": [
+                  [
+                    3073,
+                    3200
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 2,
+            "reason": "",
+            "text": "\u2022 Taiwan Semiconductor: fair value $609 versus $416 quoted price and over 46% stated upside. AI and device demand support the thesis, while China\u2013Taiwan tensions and more expensive overseas production pose risks.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "I calculated a fair value for this business at $1,473, and the current market price is $941. So, given that difference, I calculated upside of over 56% for Micron over the next 12 to 18 months.",
+                "spans": [
+                  [
+                    3779,
+                    3972
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "The obvious bullish factor for Micron is the CapEx boom from hyperscalers in the United States.",
+                "spans": [
+                  [
+                    3973,
+                    4068
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Micron has informed investors several times that they've signed several strategic customer agreements that extend well into the 2030s, or beyond 2030.",
+                "spans": [
+                  [
+                    4490,
+                    4640
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "And so, Micron's management team said that makes the business lower risk cuz they have a better idea of what sales will look like not just next year, but 3 years later and 5 years later, and they can plan more effectively.",
+                "spans": [
+                  [
+                    5841,
+                    6063
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "And therefore, make the business less cyclical. Not non-cyclical, the semiconductor industry will always have some type of cyclicality because it's so correlated to growth in the industry",
+                "spans": [
+                  [
+                    6126,
+                    6313
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 3,
+            "reason": "",
+            "text": "\u2022 Micron: fair value $1,473 versus $941 and over 56% stated upside. Hyperscaler spending and longer customer agreements support demand visibility; management expects less cyclicality, but the speaker says cyclical risk remains.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "And last but not least, Nvidia, which I calculated a fair value of $339. The current market price is $219, and so I calculated an upside of roughly 55% for Nvidia stock over the next 12 to 18 months.",
+                "spans": [
+                  [
+                    6503,
+                    6702
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Nvidia is the only company in the marketplace that's offering a full stack solution to enterprises building data centers.",
+                "spans": [
+                  [
+                    6851,
+                    6972
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Nvidia's competitive advantages is one of the reasons why it boasts an estimated 80 to 90% market share in the data center industry",
+                "spans": [
+                  [
+                    7298,
+                    7429
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "These companies, to varying degrees, are investing in their own proprietary chips to reduce their dependence on Nvidia's products. Additionally, companies like AMD and Intel are investing in chips as well.",
+                "spans": [
+                  [
+                    8001,
+                    8206
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "And the second bearish factor is the industry economics with companies like Anthropic and OpenAI losing billions of dollars on the bottom line.",
+                "spans": [
+                  [
+                    8342,
+                    8485
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "And so, there's been a lot of fancy arrangements, complex arrangements to facilitate sales",
+                "spans": [
+                  [
+                    8951,
+                    9041
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 4,
+            "reason": "",
+            "text": "\u2022 Nvidia: fair value $339 versus $219 and roughly 55% stated upside. The speaker cites its full-stack offering and estimated 80\u201390% market share, alongside increasing competition from chipmakers and customers, and risks from loss-making AI model companies and complex financing arrangements.",
+            "verdict": "supported"
+          }
+        ],
+        "material_omissions": [],
+        "reason": null,
+        "status": "approved",
+        "telemetry": {
+          "available_input_tokens": 241952,
+          "capability_source": "live-cached",
+          "finish_reason": "stop",
+          "input_tokens": 4757,
+          "max_output_tokens": 6000,
+          "model": "gemini-3.7-flash",
+          "model_input_token_limit": 1048576,
+          "provider": "gemini",
+          "reported_input_tokens": 2992,
+          "reported_output_tokens": 913,
+          "token_count_method": "estimate",
+          "transcript_chars": 0
+        }
+      },
+      "source_transcript_hash": "f4c20807a5623db4b5fce6cd14b5f260fb5aa9520657e9d39c798f9052d311f7",
+      "source_video_id": "iX3l4eykN-s"
+    },
+    {
+      "case": "ai-stocks-neutral-error",
+      "category": "mention_vs_stance",
+      "expected_status": "rejected",
+      "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+      "matches_label": true,
+      "review": {
+        "checks": [
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "In this video, I'm going to bring you three undervalued AI stocks that have at least 40% upside or more according to my calculations.",
+                "spans": [
+                  [
+                    155,
+                    288
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Taiwan Semiconductor Manufacturing Company. I calculated a fair value for the stock at $609 per share, and the market price is just $416. Therefore, I calculated upside of over 46% for Taiwan Semiconductor stock over the next 12 to 18 months.",
+                "spans": [
+                  [
+                    462,
+                    704
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "The next AI stock with significant upside is Micron.",
+                "spans": [
+                  [
+                    3726,
+                    3778
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "quote": "over the next 12 to 18 months.",
+                "spans": [
+                  [
+                    674,
+                    704
+                  ],
+                  [
+                    3942,
+                    3972
+                  ],
+                  [
+                    6672,
+                    6702
+                  ]
+                ]
+              },
+              {
+                "end_seconds": null,
+                "quote": "And last but not least, Nvidia",
+                "spans": [
+                  [
+                    6503,
+                    6533
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "quote": "over the next 12 to 18 months.",
+                "spans": [
+                  [
+                    674,
+                    704
+                  ],
+                  [
+                    3942,
+                    3972
+                  ],
+                  [
+                    6672,
+                    6702
+                  ]
+                ]
+              },
+              {
+                "end_seconds": null,
+                "quote": "I actually own Nvidia stock in my portfolio. It's the largest position in my portfolio, and I have Nvidia ranked as the best stock you can buy right now.",
+                "spans": [
+                  [
+                    9204,
+                    9357
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 1,
+            "reason": "",
+            "text": "The speaker sees Taiwan Semiconductor, Micron and Nvidia as undervalued AI investments over 12\u201318 months; Nvidia is his top pick and largest disclosed portfolio position.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Taiwan Semiconductor Manufacturing Company. I calculated a fair value for the stock at $609 per share, and the market price is just $416. Therefore, I calculated upside of over 46% for Taiwan Semiconductor stock",
+                "spans": [
+                  [
+                    462,
+                    673
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "benefiting from this proliferation of expanding capabilities not just for the cloud data centers that are pushing out these computing services for the large language models, but also on-device artificial intelligence, devices like smartphones, tablets, laptops, personal computers, and increasingly cars",
+                "spans": [
+                  [
+                    1355,
+                    1658
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "the biggest geopolitical tension is between China and Taiwan.",
+                "spans": [
+                  [
+                    2270,
+                    2331
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "The management team said the costs of production in those regions are going to be higher than the costs of producing in Taiwan.",
+                "spans": [
+                  [
+                    3073,
+                    3200
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "expanding outside of their core region, and that's resulting in higher cost.",
+                "spans": [
+                  [
+                    3493,
+                    3569
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 2,
+            "reason": "",
+            "text": "\u2022 Taiwan Semiconductor: fair value $609 versus $416 quoted price and over 46% stated upside. AI and device demand support the thesis, while China\u2013Taiwan tensions and more expensive overseas production pose risks.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "I calculated a fair value for this business at $1,473, and the current market price is $941. So, given that difference, I calculated upside of over 56% for Micron",
+                "spans": [
+                  [
+                    3779,
+                    3941
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "The obvious bullish factor for Micron is the CapEx boom from hyperscalers in the United States.",
+                "spans": [
+                  [
+                    3973,
+                    4068
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Micron has informed investors several times that they've signed several strategic customer agreements that extend well into the 2030s, or beyond 2030.",
+                "spans": [
+                  [
+                    4490,
+                    4640
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Micron's management team said that makes the business lower risk cuz they have a better idea of what sales will look like not just next year, but 3 years later and 5 years later, and they can plan more effectively. They can adjust their capacity availability more effectively. And therefore, make the business less cyclical.",
+                "spans": [
+                  [
+                    5849,
+                    6173
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Not non-cyclical, the semiconductor industry will always have some type of cyclicality because it's so correlated to growth in the industry, but at least it won't be as cyclical as it was in the past",
+                "spans": [
+                  [
+                    6174,
+                    6373
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 3,
+            "reason": "",
+            "text": "\u2022 Micron: fair value $1,473 versus $941 and over 56% stated upside. Hyperscaler spending and longer customer agreements support demand visibility; management expects less cyclicality, but the speaker says cyclical risk remains.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Nvidia, which I calculated a fair value of $339. The current market price is $219, and so I calculated an upside of roughly 55% for Nvidia stock over the next 12 to 18 months.",
+                "spans": [
+                  [
+                    6527,
+                    6702
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Nvidia is the only company in the marketplace that's offering a full stack solution to enterprises building data centers.",
+                "spans": [
+                  [
+                    6851,
+                    6972
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "boasts an estimated 80 to 90% market share in the data center industry",
+                "spans": [
+                  [
+                    7359,
+                    7429
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "These companies, to varying degrees, are investing in their own proprietary chips to reduce their dependence on Nvidia's products. Additionally, companies like AMD and Intel are investing in chips as well. So, Nvidia is facing increasing competition",
+                "spans": [
+                  [
+                    8001,
+                    8250
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "the second bearish factor is the industry economics with companies like Anthropic and OpenAI losing billions of dollars on the bottom line. Investors are concerned that they will not be able to support their commitments",
+                "spans": [
+                  [
+                    8346,
+                    8565
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "those question marks are also resulting in, of course, circular financing arrangements because OpenAI and Anthropic don't have the cash to pay for a lot of these commitments. And so, there's been a lot of fancy arrangements, complex arrangements to facilitate sales",
+                "spans": [
+                  [
+                    8776,
+                    9041
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 4,
+            "reason": "",
+            "text": "\u2022 Nvidia: fair value $339 versus $219 and roughly 55% stated upside. The speaker cites its full-stack offering and estimated 80\u201390% market share, alongside increasing competition from chipmakers and customers, and risks from loss-making AI model companies and complex financing arrangements.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "It's also the manufacturing partner for companies like Apple.",
+                "spans": [
+                  [
+                    1280,
+                    1341
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 5,
+            "reason": "Apple was only mentioned in passing as a manufacturing customer of TSMC. The speaker did not state an investment stance on Apple, so labeling it as 'neutral' violates the instruction that passing mentions do not establish an investment stance.",
+            "text": "\u2022 Apple \u2014 neutral investment stance.",
+            "verdict": "unsupported"
+          }
+        ],
+        "material_omissions": [],
+        "reason": "unsupported_or_incomplete",
+        "status": "rejected",
+        "telemetry": {
+          "available_input_tokens": 241952,
+          "capability_source": "live-cached",
+          "finish_reason": "stop",
+          "input_tokens": 4778,
+          "max_output_tokens": 6000,
+          "model": "gemini-3.7-flash",
+          "model_input_token_limit": 1048576,
+          "provider": "gemini",
+          "reported_input_tokens": 3011,
+          "reported_output_tokens": 1108,
+          "token_count_method": "estimate",
+          "transcript_chars": 0
+        }
+      },
+      "source_transcript_hash": "f4c20807a5623db4b5fce6cd14b5f260fb5aa9520657e9d39c798f9052d311f7",
+      "source_video_id": "iX3l4eykN-s"
+    },
+    {
+      "case": "lockheed-entry-error",
+      "category": "current_price_vs_entry",
+      "expected_status": "rejected",
+      "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+      "matches_label": true,
+      "review": {
+        "checks": [
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "I'm ranking Lockheed Martin stock a buying opportunity, but I am upgrading my conviction level to medium given the company's performance improvements, given the valuation has improved sequentially, and given the forecast for continued increasing budgets for defense for the United States and its allies.",
+                "spans": [
+                  [
+                    4515,
+                    4818
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 1,
+            "reason": "The speaker rates/ranks the stock a 'buying opportunity' rather than stating he personally is buying it, and $544 is cited as the current market price ('you can buy it today at 544'), not an established buy-below threshold.",
+            "text": "The speaker is buying Lockheed Martin below $544 and raises conviction from low to medium, citing improved performance, valuation and defense spending prospects.",
+            "verdict": "unsupported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Lockheed Martin secured a $64 billion increase in its backlog. That makes its backlog total now $230 billion and the increase quarter over quarter is larger in magnitude",
+                "spans": [
+                  [
+                    66,
+                    235
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "it's reasonable to assume that Lockheed Martin could sustain double-digit revenue growth for the foreseeable future.",
+                "spans": [
+                  [
+                    1166,
+                    1282
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "The difficulty for Lockheed Martin is in manufacturing effectiveness.",
+                "spans": [
+                  [
+                    1706,
+                    1775
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Its operating profit margin over the trailing 12-month period reached 11.8%.",
+                "spans": [
+                  [
+                    1542,
+                    1618
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 2,
+            "reason": "",
+            "text": "\u2022 He reports a $64 billion quarterly backlog increase to $230 billion and believes defense budget growth could sustain double-digit revenue growth, but highlights manufacturing execution and relatively modest operating margins of 11.8%.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Not just in the most recent completed 12-month period at 22%",
+                "spans": [
+                  [
+                    2431,
+                    2491
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "What's more, this return on invested capital is more than two times the company's weighted average cost of capital.",
+                "spans": [
+                  [
+                    2603,
+                    2718
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Lockheed Martin is trading at a forward price-to-earnings of just 16.6.",
+                "spans": [
+                  [
+                    3621,
+                    3692
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 3,
+            "reason": "",
+            "text": "\u2022 He cites 22% ROIC, more than twice the weighted average cost of capital, and a forward P/E of 16.6.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "I estimated a fair value of the stock at $660, and you can buy it today at 544. That leaves roughly 21% upside over the next 12 to 18 months for Lockheed Martin stock investors.",
+                "spans": [
+                  [
+                    3896,
+                    4073
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 4,
+            "reason": "",
+            "text": "\u2022 His fair value estimate is $660 versus a quoted current price of $544, which he describes as roughly 21% upside over 12\u201318 months. No personal purchase or buy-below threshold is disclosed.",
+            "verdict": "supported"
+          }
+        ],
+        "material_omissions": [],
+        "reason": "unsupported_or_incomplete",
+        "status": "rejected",
+        "telemetry": {
+          "available_input_tokens": 241952,
+          "capability_source": "live-cached",
+          "finish_reason": "stop",
+          "input_tokens": 3043,
+          "max_output_tokens": 6000,
+          "model": "gemini-3.7-flash",
+          "model_input_token_limit": 1048576,
+          "provider": "gemini",
+          "reported_input_tokens": 1925,
+          "reported_output_tokens": 515,
+          "token_count_method": "estimate",
+          "transcript_chars": 0
+        }
+      },
+      "source_transcript_hash": "9cce8f836ee51f28952f1d3fe555823cc1f8a7535a6db63175970fd1e3125f6a",
+      "source_video_id": "-kN_6j8wQTA"
+    },
+    {
+      "case": "lockheed-faithful",
+      "category": "faithful_summary",
+      "expected_status": "approved",
+      "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+      "matches_label": true,
+      "review": {
+        "checks": [
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "I last evaluated the company around April, where I ranked the stock a buying opportunity with a low conviction level. Today, I will be reiterating that rating. I'm ranking Lockheed Martin stock a buying opportunity, but I am upgrading my conviction level to medium given the company's performance improvements, given the valuation has improved sequentially, and given the forecast for continued increasing budgets for defense for the United States and its allies.",
+                "spans": [
+                  [
+                    4355,
+                    4818
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 1,
+            "reason": "",
+            "text": "The speaker reiterates a buy rating on Lockheed Martin and raises conviction from low to medium, citing improved performance, valuation and defense spending prospects.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Lockheed Martin secured a $64 billion increase in its backlog. That makes its backlog total now $230 billion and the increase quarter over quarter is larger in magnitude",
+                "spans": [
+                  [
+                    66,
+                    235
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Given the increasing geopolitical tension and increasing defense budgets from countries ranging from the United States to Europe to Asia, it's reasonable to assume that Lockheed Martin could sustain double-digit revenue growth for the foreseeable future.",
+                "spans": [
+                  [
+                    1028,
+                    1282
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "The difficulty for Lockheed Martin is in manufacturing effectiveness.",
+                "spans": [
+                  [
+                    1706,
+                    1775
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Its operating profit margin over the trailing 12-month period reached 11.8%. It is improving, but still this kind of operating profit margin is not very lucrative.",
+                "spans": [
+                  [
+                    1542,
+                    1705
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 2,
+            "reason": "",
+            "text": "\u2022 He reports a $64 billion quarterly backlog increase to $230 billion and believes defense budget growth could sustain double-digit revenue growth, but highlights manufacturing execution and relatively modest operating margins of 11.8%.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "most recent completed 12-month period at 22%",
+                "spans": [
+                  [
+                    2447,
+                    2491
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "this return on invested capital is more than two times the company's weighted average cost of capital.",
+                "spans": [
+                  [
+                    2616,
+                    2718
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Lockheed Martin is trading at a forward price-to-earnings of just 16.6.",
+                "spans": [
+                  [
+                    3621,
+                    3692
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 3,
+            "reason": "",
+            "text": "\u2022 He cites 22% ROIC, more than twice the weighted average cost of capital, and a forward P/E of 16.6.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "I estimated a fair value of the stock at $660, and you can buy it today at 544. That leaves roughly 21% upside over the next 12 to 18 months for Lockheed Martin stock investors.",
+                "spans": [
+                  [
+                    3896,
+                    4073
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 4,
+            "reason": "",
+            "text": "\u2022 His fair value estimate is $660 versus a quoted current price of $544, which he describes as roughly 21% upside over 12\u201318 months. No personal purchase or buy-below threshold is disclosed.",
+            "verdict": "supported"
+          }
+        ],
+        "material_omissions": [],
+        "reason": null,
+        "status": "approved",
+        "telemetry": {
+          "available_input_tokens": 241952,
+          "capability_source": "live-cached",
+          "finish_reason": "stop",
+          "input_tokens": 3045,
+          "max_output_tokens": 6000,
+          "model": "gemini-3.7-flash",
+          "model_input_token_limit": 1048576,
+          "provider": "gemini",
+          "reported_input_tokens": 1924,
+          "reported_output_tokens": 440,
+          "token_count_method": "estimate",
+          "transcript_chars": 0
+        }
+      },
+      "source_transcript_hash": "9cce8f836ee51f28952f1d3fe555823cc1f8a7535a6db63175970fd1e3125f6a",
+      "source_video_id": "-kN_6j8wQTA"
+    },
+    {
+      "case": "neo-disagreement-error",
+      "category": "management_vs_host",
+      "expected_status": "rejected",
+      "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+      "matches_label": true,
+      "review": {
+        "checks": [
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "do I think NEO stock is a buying opportunity? I would say yes, but I have a low confidence level, a low conviction in that rating.",
+                "spans": [
+                  [
+                    7113,
+                    7243
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "if you are an investor that's looking for highreward potential and are willing to tolerate above average risk, then NEO could be an investment that's right for",
+                "spans": [
+                  [
+                    7671,
+                    7830
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 1,
+            "reason": "The transcript confirms the speaker considers Neo a buying opportunity with low conviction and suitable for investors willing to tolerate above-average risk.",
+            "text": "The speaker rates the EV company referred to as Neo in the captions a buying opportunity with low conviction, suitable only for investors willing to tolerate above-average risk.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Vehicle margins came in at 18.5% in the second quarter compared to 10.3% in the same quarter last year.",
+                "spans": [
+                  [
+                    954,
+                    1057
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "improved by more than 10fold with an operating loss of 51.2 million in the second quarter of 2026.",
+                "spans": [
+                  [
+                    1516,
+                    1614
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "So it's yet to become a consistently profitable business.",
+                "spans": [
+                  [
+                    1882,
+                    1939
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "it's got a strong balance sheet, $8.4 $4 billion US as of June 30th, 2026",
+                "spans": [
+                  [
+                    2081,
+                    2154
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 2,
+            "reason": "The line accurately summarizes vehicle margins, operating loss improvement, unproven profitability, and the strong balance sheet with a garbled dollar figure ($8.4 $4 billion US).",
+            "text": "\u2022 Vehicle margins rose to 18.5% from 10.3% a year earlier. Operating losses improved, but consistent profitability is still unproven; the speaker describes a strong cash balance, though the exact cash figure is garbled in the captions.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "expect total deliveries to range between 108 and 111,000 vehicles.",
+                "spans": [
+                  [
+                    4443,
+                    4509
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "they expect the fourth quarter to return to growth for the overall car industry.",
+                "spans": [
+                  [
+                    4791,
+                    4871
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "I don't know about that. The headwinds that are impacting the car industry in the third quarter in my opinion are likely to persist into the fourth quarter.",
+                "spans": [
+                  [
+                    4872,
+                    5028
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 3,
+            "reason": "The speaker explicitly disagrees with management's expectation of a fourth-quarter industry rebound, stating that headwinds are likely to persist into the fourth quarter.",
+            "text": "\u2022 Management guides to third-quarter deliveries of 108,000\u2013111,000 and expects fourth-quarter car-industry growth. The speaker agrees that the fourth quarter will rebound and the headwinds will clear.",
+            "verdict": "unsupported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Management also noted that R&D expense is dropping",
+                "spans": [
+                  [
+                    6167,
+                    6217
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "NEO is now selling at a forward price to earnings of 23.4.",
+                "spans": [
+                  [
+                    6883,
+                    6941
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "As you already know, the car industry is one of my least favorite industries overall.",
+                "spans": [
+                  [
+                    7244,
+                    7329
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "NEO is an emerging brand, still in its early growth stages, and with a growth company, you have more volatility and more risk.",
+                "spans": [
+                  [
+                    7535,
+                    7661
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 4,
+            "reason": "All assertions in this line regarding dropping R&D expenses, forward P/E, industry dislike, and emerging brand volatility are supported by the transcript.",
+            "text": "\u2022 Falling research and development expenses and a forward P/E of 23.4 support the valuation case, but the speaker stresses his dislike of the car industry and the volatility of an emerging brand.",
+            "verdict": "supported"
+          }
+        ],
+        "material_omissions": [],
+        "reason": "unsupported_or_incomplete",
+        "status": "rejected",
+        "telemetry": {
+          "available_input_tokens": 241952,
+          "capability_source": "live-cached",
+          "finish_reason": "stop",
+          "input_tokens": 4076,
+          "max_output_tokens": 6000,
+          "model": "gemini-3.6-flash",
+          "model_input_token_limit": 1048576,
+          "provider": "gemini",
+          "reported_input_tokens": 2690,
+          "reported_output_tokens": 543,
+          "token_count_method": "estimate",
+          "transcript_chars": 0
+        }
+      },
+      "source_transcript_hash": "4ff4774aa26259e5854e9a98ca0f00cc0118c561a050fd400fc39118c8e28b6d",
+      "source_video_id": "vmN5za6bkFQ"
+    },
+    {
+      "case": "neo-faithful",
+      "category": "faithful_summary",
+      "expected_status": "approved",
+      "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+      "matches_label": true,
+      "review": {
+        "checks": [
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "The Chinese-based EV company also reported increasing costs",
+                "spans": [
+                  [
+                    76,
+                    135
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "do I think NEO stock is a buying opportunity? I would say yes, but I have a low confidence level, a low conviction in that rating.",
+                "spans": [
+                  [
+                    7113,
+                    7243
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "However, if you are an investor that's looking for highreward potential and are willing to tolerate above average risk, then NEO could be an investment that's right for",
+                "spans": [
+                  [
+                    7662,
+                    7830
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 1,
+            "reason": "",
+            "text": "The speaker rates the EV company referred to as Neo in the captions a buying opportunity with low conviction, suitable only for investors willing to tolerate above-average risk.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Vehicle margins came in at 18.5% in the second quarter compared to 10.3% in the same quarter last year.",
+                "spans": [
+                  [
+                    954,
+                    1057
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "The company's losses from operations increased by more than 10fold or I should say improved by more than 10fold with an operating loss of 51.2 million",
+                "spans": [
+                  [
+                    1433,
+                    1583
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "So it's yet to become a consistently profitable business.",
+                "spans": [
+                  [
+                    1882,
+                    1939
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "And for NEO, it's got a strong balance sheet, $8.4 $4 billion US as of June 30th, 2026 compared to the $50 million in losses.",
+                "spans": [
+                  [
+                    2068,
+                    2193
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 2,
+            "reason": "",
+            "text": "\u2022 Vehicle margins rose to 18.5% from 10.3% a year earlier. Operating losses improved, but consistent profitability is still unproven; the speaker describes a strong cash balance, though the exact cash figure is garbled in the captions.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "So for the third quarter, NEO saying that they expect total deliveries to range between 108 and 111,000 vehicles.",
+                "spans": [
+                  [
+                    4396,
+                    4509
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "the management team during the conference call which I evaluated said that they expect the fourth quarter to return to growth for the overall car industry. I don't know about that.",
+                "spans": [
+                  [
+                    4716,
+                    4896
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "The headwinds that are impacting the car industry in the third quarter in my opinion are likely to persist into the fourth quarter.",
+                "spans": [
+                  [
+                    4897,
+                    5028
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "macroeconomic headwinds that are impacting car sales, which are higher component costs, uh less disposable income from consumers because they're spending more on everything and so there's less disposable income to go around, higher interest rates, etc. All of these factors are likely to persist into the fourth quarter unless we see some dramatic change in geopolitical tensions",
+                "spans": [
+                  [
+                    5256,
+                    5635
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 3,
+            "reason": "",
+            "text": "\u2022 Management guides to third-quarter deliveries of 108,000\u2013111,000 and expects fourth-quarter car-industry growth. The speaker doubts that rebound, expecting component costs, consumer budget pressure, high interest rates and geopolitical risks to persist.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Management also noted that R&D expense is dropping as a result of for the most part bringing to market the vast majority of products and brands they expect to deliver.",
+                "spans": [
+                  [
+                    6167,
+                    6334
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "NEO is now selling at a forward price to earnings of 23.4. It's the lowest and the cheapest this stock has traded for according to this valuation metric going back several years.",
+                "spans": [
+                  [
+                    6883,
+                    7061
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "the car industry is one of my least favorite industries overall.",
+                "spans": [
+                  [
+                    7265,
+                    7329
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "fact that NEO is an emerging brand, still in its early growth stages, and with a growth company, you have more volatility and more risk.",
+                "spans": [
+                  [
+                    7525,
+                    7661
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 4,
+            "reason": "",
+            "text": "\u2022 Falling research and development expenses and a forward P/E of 23.4 support the valuation case, but the speaker stresses his dislike of the car industry and the volatility of an emerging brand.",
+            "verdict": "supported"
+          }
+        ],
+        "material_omissions": [],
+        "reason": null,
+        "status": "approved",
+        "telemetry": {
+          "available_input_tokens": 241952,
+          "capability_source": "live-cached",
+          "finish_reason": "stop",
+          "input_tokens": 4095,
+          "max_output_tokens": 6000,
+          "model": "gemini-3.7-flash",
+          "model_input_token_limit": 1048576,
+          "provider": "gemini",
+          "reported_input_tokens": 2698,
+          "reported_output_tokens": 699,
+          "token_count_method": "estimate",
+          "transcript_chars": 0
+        }
+      },
+      "source_transcript_hash": "4ff4774aa26259e5854e9a98ca0f00cc0118c561a050fd400fc39118c8e28b6d",
+      "source_video_id": "vmN5za6bkFQ"
+    },
+    {
+      "case": "rubrik-faithful",
+      "category": "faithful_summary",
+      "expected_status": "approved",
+      "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+      "matches_label": true,
+      "review": {
+        "checks": [
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "In fact, I had it ranked as a hold with a medium conviction level, and I last updated it on January 1st. So, today I will be reiterating that rating.",
+                "spans": [
+                  [
+                    4480,
+                    4629
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "But, still given the valuation discrepancy, I would wait for a better opportunity to buy this cybersecurity stock.",
+                "spans": [
+                  [
+                    4743,
+                    4857
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 1,
+            "reason": "",
+            "text": "The speaker reiterates a hold rating for Rubrik with medium conviction, viewing it as expensive and preferring to wait for a better buying opportunity.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Rubrik, the cybersecurity company, reported a 37% increase in subscription revenue, and the management team attributed the success to companies looking to be resilient to agentic AI.",
+                "spans": [
+                  [
+                    0,
+                    182
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "it wouldn't be unreasonable to assume that Rubrik's revenue will continue growing at double-digit rates for the foreseeable future.",
+                "spans": [
+                  [
+                    1314,
+                    1445
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "and it needs to demonstrate continued success not just for one or two quarters, not just for one or two years, but for 5, 6, 7 years in order to reach reach the scale that's large enough to generate profitability and lucrative returns to investors.",
+                "spans": [
+                  [
+                    2624,
+                    2872
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 2,
+            "reason": "",
+            "text": "\u2022 Subscription revenue grew 37%, with management citing demand for agentic AI cyber resilience. The speaker expects continued double-digit revenue growth, but profitability still depends on sustaining growth and reaching greater scale over several years.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Negative 18.3% was its most recent trailing 12-month operating profit margin.",
+                "spans": [
+                  [
+                    1520,
+                    1597
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "its operating profit margin could approach 20, 30, or even 40% at larger scale. Larger cybersecurity companies like Palo Alto Networks and Fortinet generate very lucrative operating profit margins.",
+                "spans": [
+                  [
+                    1699,
+                    1896
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "its returns on invested capital are negative at 40%",
+                "spans": [
+                  [
+                    2119,
+                    2170
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 3,
+            "reason": "",
+            "text": "\u2022 Trailing operating margin is -18.3% and ROIC is negative 40%; the speaker suggests operating margins could eventually approach 20\u201340% at larger scale, using Palo Alto Networks and Fortinet as comparisons.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "trading at a forward price to earnings of 115.",
+                "spans": [
+                  [
+                    2981,
+                    3027
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "At $88 per share, it's about 22% more expensive than my fair value estimate of $68 per share.",
+                "spans": [
+                  [
+                    3955,
+                    4048
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 4,
+            "reason": "",
+            "text": "\u2022 The speaker estimates fair value at $68 versus a quoted $88 share price and forward P/E of 115. He describes the price as about 22% more expensive than fair value; that stated percentage appears inconsistent with his quoted prices.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "I had almost every single cybersecurity stock ranked as a buy coming into 2026. Rubrik was actually one of the few I didn't have ranked as a buy along with CrowdStrike, which is another one I did not have ranked as a buy for 2026. But, Palo Alto Networks, um Fortinet, Sentinel One, Okta, Zscaler, and others, I had them ranked as buying opportunities",
+                "spans": [
+                  [
+                    3414,
+                    3765
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 5,
+            "reason": "",
+            "text": "\u2022 He recalls having rated Palo Alto Networks, Fortinet, Sentinel One, Okta and Zscaler as buys entering 2026, while Rubrik and CrowdStrike were exceptions. These are past ratings, not new recommendations.",
+            "verdict": "supported"
+          }
+        ],
+        "material_omissions": [],
+        "reason": null,
+        "status": "approved",
+        "telemetry": {
+          "available_input_tokens": 241952,
+          "capability_source": "live-cached",
+          "finish_reason": "stop",
+          "input_tokens": 3185,
+          "max_output_tokens": 6000,
+          "model": "gemini-3.7-flash",
+          "model_input_token_limit": 1048576,
+          "provider": "gemini",
+          "reported_input_tokens": 2143,
+          "reported_output_tokens": 634,
+          "token_count_method": "estimate",
+          "transcript_chars": 0
+        }
+      },
+      "source_transcript_hash": "115049a72e5ef3dd5db48393277a14a87595b039f9775b3c2b44b3a2d72c6f6d",
+      "source_video_id": "yJsM2K8psG0"
+    },
+    {
+      "case": "rubrik-ownership-error",
+      "category": "rating_vs_ownership",
+      "expected_status": "rejected",
+      "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+      "matches_label": true,
+      "review": {
+        "checks": [
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "In fact, I had it ranked as a hold with a medium conviction level, and I last updated it on January 1st. So, today I will be reiterating that rating.",
+                "spans": [
+                  [
+                    4480,
+                    4629
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "But, still given the valuation discrepancy, I would wait for a better opportunity to buy this cybersecurity stock.",
+                "spans": [
+                  [
+                    4743,
+                    4857
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 1,
+            "reason": "The speaker explicitly rates the stock as a 'hold' (a rating), rather than stating that he personally holds shares of Rubrik.",
+            "text": "The speaker is personally holding Rubrik shares with medium conviction, viewing it as expensive and preferring to wait for a better buying opportunity.",
+            "verdict": "unsupported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Rubrik, the cybersecurity company, reported a 37% increase in subscription revenue, and the management team attributed the success to companies looking to be resilient to agentic AI.",
+                "spans": [
+                  [
+                    0,
+                    182
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "it wouldn't be unreasonable to assume that Rubrik's revenue will continue growing at double-digit rates for the foreseeable future.",
+                "spans": [
+                  [
+                    1314,
+                    1445
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "it needs to demonstrate continued success not just for one or two quarters, not just for one or two years, but for 5, 6, 7 years in order to reach reach the scale that's large enough to generate profitability and lucrative returns to investors.",
+                "spans": [
+                  [
+                    2628,
+                    2872
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 2,
+            "reason": "",
+            "text": "\u2022 Subscription revenue grew 37%, with management citing demand for agentic AI cyber resilience. The speaker expects continued double-digit revenue growth, but profitability still depends on sustaining growth and reaching greater scale over several years.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Negative 18.3% was its most recent trailing 12-month operating profit margin. However, if the company continues growing at these rates of increase, it's reasonable to assume that its operating profit margin could approach 20, 30, or even 40% at larger scale.",
+                "spans": [
+                  [
+                    1520,
+                    1778
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Larger cybersecurity companies like Palo Alto Networks and Fortinet generate very lucrative operating profit margins.",
+                "spans": [
+                  [
+                    1779,
+                    1896
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Similar to its operating profit margin, its returns on invested capital are negative at 40%",
+                "spans": [
+                  [
+                    2079,
+                    2170
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 3,
+            "reason": "",
+            "text": "\u2022 Trailing operating margin is -18.3% and ROIC is negative 40%; the speaker suggests operating margins could eventually approach 20\u201340% at larger scale, using Palo Alto Networks and Fortinet as comparisons.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "trading at a forward price to earnings of 115.",
+                "spans": [
+                  [
+                    2981,
+                    3027
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "At $88 per share, it's about 22% more expensive than my fair value estimate of $68 per share.",
+                "spans": [
+                  [
+                    3955,
+                    4048
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 4,
+            "reason": "",
+            "text": "\u2022 The speaker estimates fair value at $68 versus a quoted $88 share price and forward P/E of 115. He describes the price as about 22% more expensive than fair value; that stated percentage appears inconsistent with his quoted prices.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "I had almost every single cybersecurity stock ranked as a buy coming into 2026. Rubrik was actually one of the few I didn't have ranked as a buy along with CrowdStrike, which is another one I did not have ranked as a buy for 2026. But, Palo Alto Networks, um Fortinet, Sentinel One, Okta, Zscaler, and others, I had them ranked as buying opportunities",
+                "spans": [
+                  [
+                    3414,
+                    3765
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 5,
+            "reason": "",
+            "text": "\u2022 He recalls having rated Palo Alto Networks, Fortinet, Sentinel One, Okta and Zscaler as buys entering 2026, while Rubrik and CrowdStrike were exceptions. These are past ratings, not new recommendations.",
+            "verdict": "supported"
+          }
+        ],
+        "material_omissions": [],
+        "reason": "unsupported_or_incomplete",
+        "status": "rejected",
+        "telemetry": {
+          "available_input_tokens": 241952,
+          "capability_source": "live-cached",
+          "finish_reason": "stop",
+          "input_tokens": 3185,
+          "max_output_tokens": 6000,
+          "model": "gemini-3.7-flash",
+          "model_input_token_limit": 1048576,
+          "provider": "gemini",
+          "reported_input_tokens": 2141,
+          "reported_output_tokens": 690,
+          "token_count_method": "estimate",
+          "transcript_chars": 0
+        }
+      },
+      "source_transcript_hash": "115049a72e5ef3dd5db48393277a14a87595b039f9775b3c2b44b3a2d72c6f6d",
+      "source_video_id": "yJsM2K8psG0"
+    },
+    {
+      "case": "rubrik-past-ratings-error",
+      "category": "historical_vs_current",
+      "expected_status": "rejected",
+      "label_origin": "agent-reviewed against saved transcript; not independently human-validated",
+      "matches_label": true,
+      "review": {
+        "checks": [
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "In fact, I had it ranked as a hold with a medium conviction level",
+                "spans": [
+                  [
+                    4480,
+                    4545
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "So, today I will be reiterating that rating.",
+                "spans": [
+                  [
+                    4585,
+                    4629
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "I would wait for a better opportunity to buy this cybersecurity stock.",
+                "spans": [
+                  [
+                    4787,
+                    4857
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 1,
+            "reason": "The line accurately reflects the speaker's reiterated hold rating, medium conviction level, view on valuation, and stance to wait for a better buying opportunity.",
+            "text": "The speaker reiterates a hold rating for Rubrik with medium conviction, viewing it as expensive and preferring to wait for a better buying opportunity.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "reported a 37% increase in subscription revenue",
+                "spans": [
+                  [
+                    35,
+                    82
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "demand for agentic cyber resilience",
+                "spans": [
+                  [
+                    310,
+                    345
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "wouldn't be unreasonable to assume that Rubrik's revenue will continue growing at double-digit rates for the foreseeable future.",
+                "spans": [
+                  [
+                    1317,
+                    1445
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "needs to demonstrate continued success not just for one or two quarters, not just for one or two years, but for 5, 6, 7 years in order to reach reach the scale that's large enough to generate profitability",
+                "spans": [
+                  [
+                    2631,
+                    2836
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 2,
+            "reason": "All assertions are fully backed by the transcript excerpts.",
+            "text": "\u2022 Subscription revenue grew 37%, with management citing demand for agentic AI cyber resilience. The speaker expects continued double-digit revenue growth, but profitability still depends on sustaining growth and reaching greater scale over several years.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Negative 18.3% was its most recent trailing 12-month operating profit margin.",
+                "spans": [
+                  [
+                    1520,
+                    1597
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "operating profit margin could approach 20, 30, or even 40% at larger scale.",
+                "spans": [
+                  [
+                    1703,
+                    1778
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Larger cybersecurity companies like Palo Alto Networks and Fortinet generate very lucrative operating profit margins.",
+                "spans": [
+                  [
+                    1779,
+                    1896
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "returns on invested capital are negative at 40%",
+                "spans": [
+                  [
+                    2123,
+                    2170
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 3,
+            "reason": "All metrics and comparisons are directly supported by the text.",
+            "text": "\u2022 Trailing operating margin is -18.3% and ROIC is negative 40%; the speaker suggests operating margins could eventually approach 20\u201340% at larger scale, using Palo Alto Networks and Fortinet as comparisons.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "trading at a forward price to earnings of 115.",
+                "spans": [
+                  [
+                    2981,
+                    3027
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "At $88 per share, it's about 22% more expensive than my fair value estimate of $68 per share.",
+                "spans": [
+                  [
+                    3955,
+                    4048
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 4,
+            "reason": "The stated figures match the transcript, and noting the mathematical tension between the dollar figures ($68 vs $88 is a 29.4% premium) and the speaker's stated 22% figure is appropriate.",
+            "text": "\u2022 The speaker estimates fair value at $68 versus a quoted $88 share price and forward P/E of 115. He describes the price as about 22% more expensive than fair value; that stated percentage appears inconsistent with his quoted prices.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [
+              {
+                "end_seconds": null,
+                "quote": "Rubrik was actually one of the few I didn't have ranked as a buy along with CrowdStrike",
+                "spans": [
+                  [
+                    3494,
+                    3581
+                  ]
+                ],
+                "start_seconds": null
+              },
+              {
+                "end_seconds": null,
+                "quote": "Palo Alto Networks, um Fortinet, Sentinel One, Okta, Zscaler, and others, I had them ranked as buying opportunities",
+                "spans": [
+                  [
+                    3650,
+                    3765
+                  ]
+                ],
+                "start_seconds": null
+              }
+            ],
+            "line_id": 5,
+            "reason": "The line accurately attributes these historical ratings coming into 2026 without framing them as new recommendations.",
+            "text": "\u2022 He recalls having rated Palo Alto Networks, Fortinet, Sentinel One, Okta and Zscaler as buys entering 2026, while Rubrik and CrowdStrike were exceptions. These are past ratings, not new recommendations.",
+            "verdict": "supported"
+          },
+          {
+            "evidence": [],
+            "line_id": 6,
+            "reason": "The speaker does not upgrade Okta or Zscaler today anywhere in the transcript; he only mentions having had them ranked as buying opportunities coming into 2026.",
+            "text": "\u2022 The speaker upgrades Okta and Zscaler to buy today.",
+            "verdict": "unsupported"
+          }
+        ],
+        "material_omissions": [],
+        "reason": "unsupported_or_incomplete",
+        "status": "rejected",
+        "telemetry": {
+          "available_input_tokens": 241952,
+          "capability_source": "live-cached",
+          "finish_reason": "stop",
+          "input_tokens": 3212,
+          "max_output_tokens": 6000,
+          "model": "gemini-3.6-flash",
+          "model_input_token_limit": 1048576,
+          "provider": "gemini",
+          "reported_input_tokens": 2168,
+          "reported_output_tokens": 614,
+          "token_count_method": "estimate",
+          "transcript_chars": 0
+        }
+      },
+      "source_transcript_hash": "115049a72e5ef3dd5db48393277a14a87595b039f9775b3c2b44b3a2d72c6f6d",
+      "source_video_id": "yJsM2K8psG0"
+    }
+  ],
+  "review_version": "1",
+  "source_videos": 4,
+  "unavailable": 0
+}
