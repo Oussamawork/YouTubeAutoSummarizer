@@ -251,7 +251,7 @@
       "video_title": "I Just Bought More of the Stock Everyone Slept On"
     },
     "ClypKlG0BJs": {
-      "active_run_key": "8c326169631da523:n1:p2:s2:c1:mcombined:k9c0ad25a9f",
+      "active_run_key": null,
       "attempt_count": 0,
       "budget_check": null,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q",
@@ -262,13 +262,16 @@
       "extraction_model": "gemini-3.7-flash",
       "extraction_prompt_version": "2",
       "failed_chunk_ids": [],
-      "failure_reason": null,
+      "failure_reason": "transcript_language_mismatch:script_mismatch:arabic",
       "last_attempt_at": "2026-09-07T21:23:27+00:00",
       "next_eligible_at": null,
       "normalization_version": "1",
       "processed_chunk_ids": [],
       "published_at": "2026-09-07T18:37:20+00:00",
-      "research_status": "complete",
+      "refetch_languages": [
+        "en"
+      ],
+      "research_status": "transcript_rejected",
       "run_identity": {
         "chunk_policy": "full",
         "chunking_version": "1",
@@ -279,12 +282,34 @@
         "schema_version": "2"
       },
       "schema_version": "2",
-      "superseded_run_keys": [],
+      "superseded_run_keys": [
+        "8c326169631da523:n1:p2:s2:c1:mcombined:k9c0ad25a9f"
+      ],
+      "transcript_check": {
+        "accepted": [
+          "en"
+        ],
+        "detected": "unknown",
+        "language": "unknown",
+        "ok": false,
+        "reason": "script_mismatch:arabic",
+        "reported": null,
+        "script": "arabic"
+      },
       "transcript_hash": "8c326169631da5231979e02cff805371ff62fb59ae27d59aa447f006fe061990",
+      "transcript_language": "unknown",
       "transcript_source": "supadata",
-      "transcript_stored": true,
-      "updated_at": "2026-09-07T21:23:27+00:00",
+      "transcript_stored": false,
+      "updated_at": "2026-09-08T21:12:03+00:00",
       "video_id": "ClypKlG0BJs",
+      "video_meta": {
+        "channel_id": null,
+        "channel_name": "More Crypto Online",
+        "duration_seconds": 1164,
+        "published_at": "2026-09-07T18:37:20+00:00",
+        "video_title": "Bitcoin to $160,000 - What Has to Happen First",
+        "video_url": "https://www.youtube.com/watch?v=ClypKlG0BJs"
+      },
       "video_title": "Bitcoin to $160,000 - What Has to Happen First"
     },
     "Loz3Z0X1i-o": {
@@ -325,7 +350,7 @@
       "video_title": "The End of Cheap Money Is Here"
     },
     "RCBTjgRirQc": {
-      "active_run_key": "4621f04bf5b954a4:n1:p2:s2:c1:mcombined:k9c0ad25a9f",
+      "active_run_key": null,
       "attempt_count": 0,
       "budget_check": null,
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg",
@@ -336,13 +361,16 @@
       "extraction_model": "gemini-3.7-flash",
       "extraction_prompt_version": "2",
       "failed_chunk_ids": [],
-      "failure_reason": null,
+      "failure_reason": "transcript_language_mismatch:script_mismatch:arabic",
       "last_attempt_at": "2026-09-08T16:26:16+00:00",
       "next_eligible_at": null,
       "normalization_version": "1",
       "processed_chunk_ids": [],
       "published_at": "2026-09-08T12:45:22+00:00",
-      "research_status": "complete",
+      "refetch_languages": [
+        "en"
+      ],
+      "research_status": "transcript_rejected",
       "run_identity": {
         "chunk_policy": "full",
         "chunking_version": "1",
@@ -353,12 +381,34 @@
         "schema_version": "2"
       },
       "schema_version": "2",
-      "superseded_run_keys": [],
+      "superseded_run_keys": [
+        "4621f04bf5b954a4:n1:p2:s2:c1:mcombined:k9c0ad25a9f"
+      ],
+      "transcript_check": {
+        "accepted": [
+          "en"
+        ],
+        "detected": "unknown",
+        "language": "unknown",
+        "ok": false,
+        "reason": "script_mismatch:arabic",
+        "reported": null,
+        "script": "arabic"
+      },
       "transcript_hash": "4621f04bf5b954a4f12ff837a47516cf3bda7705650a92f2b1f6fe91b17e6b04",
+      "transcript_language": "unknown",
       "transcript_source": "supadata",
-      "transcript_stored": true,
-      "updated_at": "2026-09-08T16:26:16+00:00",
+      "transcript_stored": false,
+      "updated_at": "2026-09-08T21:12:03+00:00",
       "video_id": "RCBTjgRirQc",
+      "video_meta": {
+        "channel_id": null,
+        "channel_name": "Parkev Tatevosian, CFA",
+        "duration_seconds": 552,
+        "published_at": "2026-09-08T12:45:22+00:00",
+        "video_title": "Massive Update for AMD Stock Investors",
+        "video_url": "https://www.youtube.com/watch?v=RCBTjgRirQc"
+      },
       "video_title": "Massive Update for AMD Stock Investors"
     },
     "Vxe5Djlj8Es": {
@@ -584,7 +634,7 @@
       "video_title": "Is Solana Ready for a Reversal or Further Downside?"
     },
     "ftd6uWeeWkw": {
-      "active_run_key": "7ceb9df4ba9c1784:n1:p2:s2:c1:mcombined:k9c0ad25a9f",
+      "active_run_key": null,
       "attempt_count": 1,
       "budget_check": null,
       "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ",
@@ -595,13 +645,16 @@
       "extraction_model": "gemini-3.6-flash",
       "extraction_prompt_version": "2",
       "failed_chunk_ids": [],
-      "failure_reason": null,
+      "failure_reason": "transcript_language_mismatch:language_mismatch:en",
       "last_attempt_at": "2026-09-07T17:45:14+00:00",
       "next_eligible_at": null,
       "normalization_version": "1",
       "processed_chunk_ids": [],
       "published_at": "2026-09-07T15:00:14+00:00",
-      "research_status": "needs_review",
+      "refetch_languages": [
+        "de"
+      ],
+      "research_status": "transcript_rejected",
       "run_identity": {
         "chunk_policy": "full",
         "chunking_version": "1",
@@ -612,16 +665,38 @@
         "schema_version": "2"
       },
       "schema_version": "2",
-      "superseded_run_keys": [],
+      "superseded_run_keys": [
+        "7ceb9df4ba9c1784:n1:p2:s2:c1:mcombined:k9c0ad25a9f"
+      ],
+      "transcript_check": {
+        "accepted": [
+          "de"
+        ],
+        "detected": "en",
+        "language": "en",
+        "ok": false,
+        "reason": "language_mismatch:en",
+        "reported": null,
+        "script": "latin"
+      },
       "transcript_hash": "7ceb9df4ba9c17849fbee624bd2a78bec9a07345456ce32749662cd9c8a99556",
+      "transcript_language": "en",
       "transcript_source": "supadata",
-      "transcript_stored": true,
-      "updated_at": "2026-09-07T17:45:14+00:00",
+      "transcript_stored": false,
+      "updated_at": "2026-09-08T21:12:03+00:00",
       "video_id": "ftd6uWeeWkw",
+      "video_meta": {
+        "channel_id": null,
+        "channel_name": "HKCM",
+        "duration_seconds": 668,
+        "published_at": "2026-09-07T15:00:14+00:00",
+        "video_title": "Hier verkaufen wir jetzt zum Start der Korrektur!",
+        "video_url": "https://www.youtube.com/watch?v=ftd6uWeeWkw"
+      },
       "video_title": "Hier verkaufen wir jetzt zum Start der Korrektur!"
     },
     "fybjAT21wbo": {
-      "active_run_key": "22c714c1ed0dad40:n1:p2:s2:c1:mcombined:k9c0ad25a9f",
+      "active_run_key": null,
       "attempt_count": 0,
       "budget_check": null,
       "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ",
@@ -632,13 +707,16 @@
       "extraction_model": "gemini-3.7-flash",
       "extraction_prompt_version": "2",
       "failed_chunk_ids": [],
-      "failure_reason": null,
+      "failure_reason": "transcript_language_mismatch:language_mismatch:en",
       "last_attempt_at": "2026-09-06T11:37:35+00:00",
       "next_eligible_at": null,
       "normalization_version": "1",
       "processed_chunk_ids": [],
       "published_at": "2026-09-06T08:30:31+00:00",
-      "research_status": "complete",
+      "refetch_languages": [
+        "de"
+      ],
+      "research_status": "transcript_rejected",
       "run_identity": {
         "chunk_policy": "full",
         "chunking_version": "1",
@@ -649,12 +727,34 @@
         "schema_version": "2"
       },
       "schema_version": "2",
-      "superseded_run_keys": [],
+      "superseded_run_keys": [
+        "22c714c1ed0dad40:n1:p2:s2:c1:mcombined:k9c0ad25a9f"
+      ],
+      "transcript_check": {
+        "accepted": [
+          "de"
+        ],
+        "detected": "en",
+        "language": "en",
+        "ok": false,
+        "reason": "language_mismatch:en",
+        "reported": null,
+        "script": "latin"
+      },
       "transcript_hash": "22c714c1ed0dad4082f9890bc38d7d623b75b326e2758e47c3a660385507e401",
+      "transcript_language": "en",
       "transcript_source": "supadata",
-      "transcript_stored": true,
-      "updated_at": "2026-09-06T11:37:35+00:00",
+      "transcript_stored": false,
+      "updated_at": "2026-09-08T21:12:03+00:00",
       "video_id": "fybjAT21wbo",
+      "video_meta": {
+        "channel_id": null,
+        "channel_name": "HKCM",
+        "duration_seconds": 3630,
+        "published_at": "2026-09-06T08:30:31+00:00",
+        "video_title": "Insider: Die meisten k\u00f6nnen sich nicht vorstellen, was auf uns zukommt!",
+        "video_url": "https://www.youtube.com/watch?v=fybjAT21wbo"
+      },
       "video_title": "Insider: Die meisten k\u00f6nnen sich nicht vorstellen, was auf uns zukommt!"
     },
     "iX3l4eykN-s": {
@@ -934,7 +1034,7 @@
       "video_title": "With Oil Prices Soaring, Is Occidental Petroleum Stock a Buy Right Now? | OXY Stock Analysis"
     },
     "y531NemLAuc": {
-      "active_run_key": "debde8b59aee9245:n1:p2:s2:c1:mcombined:k9c0ad25a9f",
+      "active_run_key": null,
       "attempt_count": 0,
       "budget_check": null,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q",
@@ -945,13 +1045,16 @@
       "extraction_model": "gemini-3.7-flash",
       "extraction_prompt_version": "2",
       "failed_chunk_ids": [],
-      "failure_reason": null,
+      "failure_reason": "transcript_language_mismatch:script_mismatch:arabic",
       "last_attempt_at": "2026-09-08T07:06:21+00:00",
       "next_eligible_at": null,
       "normalization_version": "1",
       "processed_chunk_ids": [],
       "published_at": "2026-09-08T06:00:27+00:00",
-      "research_status": "complete",
+      "refetch_languages": [
+        "en"
+      ],
+      "research_status": "transcript_rejected",
       "run_identity": {
         "chunk_policy": "full",
         "chunking_version": "1",
@@ -962,16 +1065,38 @@
         "schema_version": "2"
       },
       "schema_version": "2",
-      "superseded_run_keys": [],
+      "superseded_run_keys": [
+        "debde8b59aee9245:n1:p2:s2:c1:mcombined:k9c0ad25a9f"
+      ],
+      "transcript_check": {
+        "accepted": [
+          "en"
+        ],
+        "detected": "unknown",
+        "language": "unknown",
+        "ok": false,
+        "reason": "script_mismatch:arabic",
+        "reported": null,
+        "script": "arabic"
+      },
       "transcript_hash": "debde8b59aee9245d28bd068a9166eeb6b9d22f044ebc1705639537c20e44168",
+      "transcript_language": "unknown",
       "transcript_source": "supadata",
-      "transcript_stored": true,
-      "updated_at": "2026-09-08T07:06:21+00:00",
+      "transcript_stored": false,
+      "updated_at": "2026-09-08T21:12:03+00:00",
       "video_id": "y531NemLAuc",
+      "video_meta": {
+        "channel_id": null,
+        "channel_name": "More Crypto Online",
+        "duration_seconds": 165,
+        "published_at": "2026-09-08T06:00:27+00:00",
+        "video_title": "Ethereum: $10,100 Is The First All Time High Target",
+        "video_url": "https://www.youtube.com/watch?v=y531NemLAuc"
+      },
       "video_title": "Ethereum: $10,100 Is The First All Time High Target"
     },
     "yEGPJoMrJiE": {
-      "active_run_key": "9c16a8aa3f410470:n1:p2:s2:c1:mcombined:k9c0ad25a9f",
+      "active_run_key": null,
       "attempt_count": 0,
       "budget_check": null,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q",
@@ -982,13 +1107,16 @@
       "extraction_model": "gemini-3.7-flash",
       "extraction_prompt_version": "2",
       "failed_chunk_ids": [],
-      "failure_reason": null,
+      "failure_reason": "transcript_language_mismatch:script_mismatch:arabic",
       "last_attempt_at": "2026-09-07T07:10:18+00:00",
       "next_eligible_at": null,
       "normalization_version": "1",
       "processed_chunk_ids": [],
       "published_at": "2026-09-06T15:10:07+00:00",
-      "research_status": "complete",
+      "refetch_languages": [
+        "en"
+      ],
+      "research_status": "transcript_rejected",
       "run_identity": {
         "chunk_policy": "full",
         "chunking_version": "1",
@@ -999,12 +1127,34 @@
         "schema_version": "2"
       },
       "schema_version": "2",
-      "superseded_run_keys": [],
+      "superseded_run_keys": [
+        "9c16a8aa3f410470:n1:p2:s2:c1:mcombined:k9c0ad25a9f"
+      ],
+      "transcript_check": {
+        "accepted": [
+          "en"
+        ],
+        "detected": "unknown",
+        "language": "unknown",
+        "ok": false,
+        "reason": "script_mismatch:arabic",
+        "reported": null,
+        "script": "arabic"
+      },
       "transcript_hash": "9c16a8aa3f41047088fba84d54177d0e84b20fefdeeb1d6f7a311abfbbfe9216",
+      "transcript_language": "unknown",
       "transcript_source": "supadata",
-      "transcript_stored": true,
-      "updated_at": "2026-09-07T07:10:18+00:00",
+      "transcript_stored": false,
+      "updated_at": "2026-09-08T21:12:03+00:00",
       "video_id": "yEGPJoMrJiE",
+      "video_meta": {
+        "channel_id": null,
+        "channel_name": "More Crypto Online",
+        "duration_seconds": 496,
+        "published_at": "2026-09-06T15:10:07+00:00",
+        "video_title": "Bitcoin Price Analysis: Watching These Key Support Levels",
+        "video_url": "https://www.youtube.com/watch?v=yEGPJoMrJiE"
+      },
       "video_title": "Bitcoin Price Analysis: Watching These Key Support Levels"
     },
     "yJsM2K8psG0": {

@@ -44,6 +44,22 @@ def env_float(name, default):
         return default
 
 
+def env_str_list(name, default=()):
+    """
+    Comma-separated env var as a list of lower-cased, stripped, de-duplicated
+    items; unset/empty (an unconfigured Actions variable is "") gives `default`.
+    """
+    value = (os.getenv(name) or "").strip()
+    if not value:
+        return list(default)
+    out = []
+    for item in value.split(","):
+        item = item.strip().lower()
+        if item and item not in out:
+            out.append(item)
+    return out or list(default)
+
+
 # Function to read channel entries from a file
 def read_channels(file_path):
     """
@@ -62,11 +78,17 @@ def read_channels(file_path):
       only=a,b,c — process a video only when its title mentions one of these
                keywords (whole words, case-insensitive). Filtering happens
                before the transcript fetch, so skipped videos cost nothing.
+      lang=xx — the language the channel speaks (ISO 639-1, e.g. lang=de).
+               Only a transcript in that language is accepted: a translated
+               or auto-dubbed caption track is rejected and the next source
+               tried. Without it, any language in TRANSCRIPT_LANGUAGES
+               (default: every language the claims guard covers) passes.
 
     Unknown or malformed options are logged and ignored, so a typo can't make
     the whole channel list unreadable.
 
-    Returns a list of {"channel_id", "digest", "max_per_run", "only"} dicts.
+    Returns a list of {"channel_id", "digest", "max_per_run", "only",
+    "language"} dicts.
     """
     try:
         with open(file_path, "r", encoding="utf-8") as file:
@@ -79,7 +101,7 @@ def read_channels(file_path):
                     continue
                 tokens = line.split()
                 entry = {"channel_id": tokens[0], "digest": False, "max_per_run": None,
-                         "only": []}
+                         "only": [], "language": None}
                 for token in tokens[1:]:
                     option = token.lower()
                     if option == "digest":
@@ -95,6 +117,12 @@ def read_channels(file_path):
                             entry["only"].extend(keywords)
                         else:
                             log_error(f"Ignoring empty channel option '{token}' for {tokens[0]}")
+                    elif option.startswith("lang="):
+                        code = option[5:].strip().replace("_", "-").split("-", 1)[0]
+                        if re.fullmatch(r"[a-z]{2,3}", code):
+                            entry["language"] = code
+                        else:
+                            log_error(f"Ignoring malformed channel option '{token}' for {tokens[0]}")
                     else:
                         log_error(f"Ignoring unknown channel option '{token}' for {tokens[0]}")
                 channels.append(entry)

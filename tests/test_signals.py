@@ -150,8 +150,10 @@ COMBINED_OK = {"summary": "TL;DR line\n\n• bullet one", "claims": [CLAIM_OK],
 
 
 def _ctx():
+    # transcript_language arrives verified from the fetch in production
+    # (language_detect.verify_language); a 12-word fixture is too short to detect.
     return {"video_id": "v1", "channel_id": "c1", "channel_name": "Chan", "video_title": "T",
-            "published_at": "2026-07-01T00:00:00+00:00", "normalized": _nt()}
+            "published_at": "2026-07-01T00:00:00+00:00", "normalized": _nt(), "transcript_language": "en"}
 
 
 def test_summarize_with_signals_success(monkeypatch):

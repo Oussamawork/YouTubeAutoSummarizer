@@ -529,8 +529,15 @@ def get_latest_video(YOUTUBE_api_key, channel_id):
         return None
 
 
+def _channel_languages(channel):
+    """The languages a channel's transcripts must be in: its `lang=` line
+    option when set, else the pipeline default (TRANSCRIPT_LANGUAGES)."""
+    code = (channel or {}).get("language")
+    return [code] if code else list(language_detect.DEFAULT_LANGUAGES)
+
+
 def _summarize_video(video_details, no_transcript_attempts=0, compact=False, want_signals=False,
-                     hours_since_first=None):
+                     hours_since_first=None, languages=None):
     """
     Fetch and summarize one video's transcript. `compact` requests a short
     TL;DR-style summary (for digest-mode channels) instead of a full one.
@@ -557,7 +564,7 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     transcript goes to the model — nothing is cut to fit.
     """
     log_info(f"Fetching transcript for {video_details['video_url']} ...")
-    transcript = get_transcript_from_video(video_details['video_url'])
+    transcript = get_transcript_from_video(video_details['video_url'], languages=languages)
 
     # Check the actual transcript TEXT, not the dict (a dict is always truthy).
     transcript_text = transcript.get('transcript', '') if isinstance(transcript, dict) else ''
@@ -612,8 +619,14 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     video_details['normalized'] = nt
     # The transcript's language decides which suspicious-empty rule set the
     # research side may use (English and German are covered); recorded with
-    # the stored transcript, the claims and the research context.
-    video_details['transcript_language'] = language_detect.detect_language(nt.text)["language"]
+    # the stored transcript, the claims and the research context. The fetch
+    # already verified the track is one the channel speaks; its verdict
+    # (provider tag or detection) is the language, detection the fallback.
+    verified = transcript.get("language") if isinstance(transcript, dict) else None
+    video_details['transcript_language'] = (
+        verified if verified in language_detect.SUPPORTED_LANGUAGES
+        else language_detect.detect_language(nt.text)["language"]
+    )
     video_details['transcript_record'] = None
     if PERSIST_TRANSCRIPTS and want_signals and video_details.get('video_id'):
         try:
@@ -893,6 +906,7 @@ def _persist_research(channel_id, video_details, summary, research, signals_row=
         "research_status": status,
         "transcript_hash": nt.transcript_hash if nt else None,
         "transcript_source": video_details.get("transcript_source"),
+        "transcript_language": video_details.get("transcript_language"),
         "transcript_stored": bool(stored.get("stored")) if stored else False,
         "schema_version": SCHEMA_VERSION,
         "normalization_version": nt.normalization_version if nt else None,
@@ -1374,10 +1388,14 @@ def main():
                                 f"(published: {video_details['published_at']})"
                             )
 
+                            # The feed carries no channel id on its entries;
+                            # the research records key on it.
+                            video_details.setdefault("channel_id", channel_id)
                             telegram_body, outcome, decided, signals = _summarize_video(
                                 video_details, attempts, compact=channel["digest"],
                                 want_signals=market_signals,
                                 hours_since_first=_hours_since(record.get("first_attempt")),
+                                languages=_channel_languages(channel),
                             )
                             outcomes[outcome] += 1
                             _gate(channel_id, video_details, _GATE_BY_OUTCOME.get(outcome, "other"),

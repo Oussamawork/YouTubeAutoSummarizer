@@ -136,7 +136,7 @@ def test_language_travels_with_the_transcript_and_the_claims(monkeypatch):
     import scraper
     import transcript_store
     stored = {}
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": DE_CLAIM, "reason": "ok"})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": DE_CLAIM, "reason": "ok"})
     monkeypatch.setattr(scraper.transcript_store, "store_transcript",
                         lambda details, text, source, reason, language=None: stored.update(language=language) or {"stored": True})
     captured = {}

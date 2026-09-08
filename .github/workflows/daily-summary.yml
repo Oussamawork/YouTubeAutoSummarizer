@@ -121,11 +121,44 @@ jobs:
           # with countTokens when available (LLM_LIVE_COUNT_TOKENS); the free
           # tier's per-minute token cap bounds one request (GEMINI_FREE_TIER_TPM).
           PERSIST_TRANSCRIPTS: ${{ vars.PERSIST_TRANSCRIPTS }}
+          # Languages a transcript may be in when a channel line sets no
+          # lang= (default en,de: the claims guard's rule sets).
+          TRANSCRIPT_LANGUAGES: ${{ vars.TRANSCRIPT_LANGUAGES }}
           LLM_LIVE_CAPABILITIES: ${{ vars.LLM_LIVE_CAPABILITIES }}
           LLM_LIVE_COUNT_TOKENS: ${{ vars.LLM_LIVE_COUNT_TOKENS }}
           GEMINI_FREE_TIER_TPM: ${{ vars.GEMINI_FREE_TIER_TPM }}
           CONTEXT_SAFETY_MARGIN_TOKENS: ${{ vars.CONTEXT_SAFETY_MARGIN_TOKENS }}
           EXHAUSTIVE_RESEARCH_MODE: ${{ vars.EXHAUSTIVE_RESEARCH_MODE }}
+
+      - name: Re-capture transcripts served in the wrong language
+        # A caption track in a language the channel does not speak (a
+        # translation or auto-dub) is refused at fetch time; this retires any
+        # such capture that is already stored (offline check, no credit),
+        # then re-fetches a few of them in the channel's language under the
+        # normal transcript budget and extracts their claims.
+        if: ${{ !inputs.video_url }}
+        run: python research_backfill.py --reject-foreign-transcripts --refetch
+        env:
+          SUPADATA_API_KEY: ${{ secrets.SUPADATA_API_KEY }}
+          SUPADATA_API_KEY_2: ${{ secrets.SUPADATA_API_KEY_2 }}
+          SUPADATA_API_KEY_3: ${{ secrets.SUPADATA_API_KEY_3 }}
+          SUPADATA_CREDITS_PER_KEY: ${{ vars.SUPADATA_CREDITS_PER_KEY }}
+          SUPADATA_MONTHLY_BUDGET: ${{ vars.SUPADATA_MONTHLY_BUDGET }}
+          SUPADATA_RESET_DAY: ${{ vars.SUPADATA_RESET_DAY }}
+          SUPADATA_DAILY_PACING: ${{ vars.SUPADATA_DAILY_PACING }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_TRANSCRIPT_MODELS: ${{ vars.GEMINI_TRANSCRIPT_MODELS }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GEMINI_FALLBACK_MODELS: ${{ vars.GEMINI_FALLBACK_MODELS }}
+          GROQ_MODEL: ${{ vars.GROQ_MODEL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_LIVE_CAPABILITIES: ${{ vars.LLM_LIVE_CAPABILITIES }}
+          LLM_LIVE_COUNT_TOKENS: ${{ vars.LLM_LIVE_COUNT_TOKENS }}
+          TRANSCRIPT_LANGUAGES: ${{ vars.TRANSCRIPT_LANGUAGES }}
+          RESEARCH_REFETCH_MAX_VIDEOS: ${{ vars.RESEARCH_REFETCH_MAX_VIDEOS }}
 
       - name: Retry pending research extractions
         # Videos whose summary went out but whose claims failed, were

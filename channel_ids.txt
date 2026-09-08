@@ -8,6 +8,12 @@
 #   only=a,b,c — only process videos whose TITLE mentions one of these keywords
 #            (whole-word, case-insensitive; filtered out before any transcript
 #            is fetched, so skipped videos cost nothing)
+#   lang=xx — the language the channel speaks (ISO 639-1). Only a caption
+#            track in that language is accepted; YouTube keeps translated and
+#            auto-dubbed tracks beside the original and a provider may serve
+#            any of them (Sept 2026: Arabic for English videos, English for
+#            German ones). Without it any language in TRANSCRIPT_LANGUAGES
+#            (default en,de) passes, so set it wherever the language is known.
 #
 # No per-run caps are set: every video a channel publishes is processed in the
 # run that finds it, rather than trickling out over later runs. Channel order
@@ -16,24 +22,24 @@
 # stay at the top.
 
 # --- Priority: never miss these -------------------------------------------
-UCwKB_00dPL3x5XmHF9IJCrg                # @ParkevTatevosian, CFA (~4-5/day)
+UCwKB_00dPL3x5XmHF9IJCrg lang=en        # @ParkevTatevosian, CFA (~4-5/day)
 
 # --- Steady, ~1 video/day each --------------------------------------------
-UCrGLm-Drgv0vbbemwwHeXJw                # Couch Investor
-UCfCT7SSFEWyG4th9ZmaGYqQ                # Joseph Carlson After Hours
-UC3AdN1bEmEonuSwXNS8LixQ digest         # @hkcm
+UCrGLm-Drgv0vbbemwwHeXJw lang=en        # Couch Investor
+UCfCT7SSFEWyG4th9ZmaGYqQ lang=en        # Joseph Carlson After Hours
+UC3AdN1bEmEonuSwXNS8LixQ digest lang=de # @hkcm (German; has English auto-dubs)
 UCvLnTGJQthqju38QPtaD64Q digest         # @HKCM_GLOBAL
-UC_niVs5ITmD-qgnxph8CohA                # @phantombyhkcm
+UC_niVs5ITmD-qgnxph8CohA lang=de        # @phantombyhkcm (German)
 
 # --- Highest volume --------------------------------------------------------
 # More Crypto Online posts a per-coin analysis for many altcoins; only the
 # majors are worth a transcript credit. Aliases are listed explicitly because
 # matching is whole-word ("sol" alone does not match "solana").
-UCngIhBkikUe6e7tZTjpKK7Q digest only=btc,bitcoin,eth,ethereum,sol,solana
+UCngIhBkikUe6e7tZTjpKK7Q digest lang=en only=btc,bitcoin,eth,ethereum,sol,solana
 
 # --- New / unproven --------------------------------------------------------
 # Handles (not IDs) so they resolve at run time; each costs 1 API quota unit.
 @realfinvid
 # TheStreet publishes many short market clips a day — digest so they arrive as
 # one TL;DR rather than a burst of separate messages.
-@thestreet digest
+@thestreet digest lang=en

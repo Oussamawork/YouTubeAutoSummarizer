@@ -43,7 +43,11 @@ VIDEOS_FILE = os.path.join(RESEARCH_DIR, "video_records.jsonl")
 CONDITIONS_FILE = os.path.join(RESEARCH_DIR, "condition_evaluations.jsonl")
 
 STATUSES = {"pending", "extracting", "complete", "no_claims_found", "partial", "needs_review",
-            "quota_deferred", "failed_retryable", "failed_final", "superseded"}
+            "quota_deferred", "failed_retryable", "failed_final", "superseded", "transcript_rejected"}
+# transcript_rejected: the stored transcript was in the wrong language and
+# has been retired (transcript_store.reject_transcript); the video's runs are
+# superseded and it waits for a re-capture (research_backfill --refetch),
+# never for a retry from the retired text.
 RETRYABLE = {"pending", "partial", "quota_deferred", "failed_retryable"}
 GATE_OUTCOMES = {"included", "already_decided", "title_filtered", "duration_filtered",
                  "retry_backoff", "metadata_unavailable", "transcript_unavailable",
@@ -320,15 +324,17 @@ def load_active_claims(state=None, path=None, include_legacy=True):
     """
     state = state or load_state()
     active = {vid: e.get("active_run_key") for vid, e in state["videos"].items()}
+    superseded = {vid: set(e.get("superseded_run_keys") or []) for vid, e in state["videos"].items()}
     out = []
     for row in load_claims(path=path):
         key = row.get("run_key")
+        vid = row.get("video_id")
         if row.get("schema_version") == "legacy":
             if include_legacy:
                 out.append(row)
             continue
-        if key and active.get(row.get("video_id")) not in (None, key):
-            continue  # superseded
+        if key and (key in superseded.get(vid, ()) or active.get(vid) not in (None, key)):
+            continue  # superseded (a rejected transcript's runs have no active successor yet)
         out.append(row)
     return out
 
