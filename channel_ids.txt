@@ -39,7 +39,7 @@ UCngIhBkikUe6e7tZTjpKK7Q digest lang=en only=btc,bitcoin,eth,ethereum,sol,solana
 
 # --- New / unproven --------------------------------------------------------
 # Handles (not IDs) so they resolve at run time; each costs 1 API quota unit.
-@realfinvid
+@realfinvid lang=en
 # TheStreet publishes many short market clips a day — digest so they arrive as
 # one TL;DR rather than a burst of separate messages.
 @thestreet digest lang=en
