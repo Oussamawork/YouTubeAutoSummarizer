@@ -28,7 +28,7 @@ UCwKB_00dPL3x5XmHF9IJCrg lang=en        # @ParkevTatevosian, CFA (~4-5/day)
 UCrGLm-Drgv0vbbemwwHeXJw lang=en        # Couch Investor
 UCfCT7SSFEWyG4th9ZmaGYqQ lang=en        # Joseph Carlson After Hours
 UC3AdN1bEmEonuSwXNS8LixQ digest lang=de # @hkcm (German; has English auto-dubs)
-UCvLnTGJQthqju38QPtaD64Q digest         # @HKCM_GLOBAL
+UCvLnTGJQthqju38QPtaD64Q digest lang=en # @HKCM_GLOBAL (English)
 UC_niVs5ITmD-qgnxph8CohA lang=de        # @phantombyhkcm (German)
 
 # --- Highest volume --------------------------------------------------------
