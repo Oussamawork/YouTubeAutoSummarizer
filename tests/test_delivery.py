@@ -42,7 +42,7 @@ def _harness(monkeypatch, feed, *, state=None, digest=False, daily_digest=False,
     monkeypatch.setattr(scraper, "save_state", save)
     monkeypatch.setattr(scraper, "get_recent_videos", lambda k, c: list(feed))
 
-    def default_summarize(d, a, compact=False, want_signals=False, hours_since_first=None):
+    def default_summarize(d, a, compact=False, want_signals=False, hours_since_first=None, languages=None):
         calls["summarized"].append(d["video_id"])
         return (f"summary of {d['video_id']}", "sent", True, None)
     monkeypatch.setattr(scraper, "_summarize_video", summarize or default_summarize)
@@ -139,7 +139,7 @@ def test_daily_digest_failure_holds_entries_too(monkeypatch):
 def test_deferral_notices_do_not_gate_the_watermark(monkeypatch):
     # A deferral notice that fails to send is not a lost summary: the video is
     # retried anyway, and must not gain an "undelivered" block.
-    def summarize(d, a, compact=False, want_signals=False, hours_since_first=None):
+    def summarize(d, a, compact=False, want_signals=False, hours_since_first=None, languages=None):
         return ("⏳ deferred", "quota_deferred", False, None)
     calls = _harness(monkeypatch, [_vid("v1", "2026-07-03T00:00:00+00:00")],
                      send=lambda *a: False, summarize=summarize)

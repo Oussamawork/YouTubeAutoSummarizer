@@ -71,7 +71,7 @@ def two_videos(tmp_path, monkeypatch):
     summarizer._EXHAUSTED_PROVIDERS.clear()
     transcripts = {"v1": LONG, "v2": SHORT}
     monkeypatch.setattr(scraper, "get_transcript_from_video",
-                        lambda url: {"transcript": transcripts[url.rsplit("=", 1)[-1]], "reason": "ok"})
+                        lambda url, languages=None: {"transcript": transcripts[url.rsplit("=", 1)[-1]], "reason": "ok"})
     rows = []
     monkeypatch.setattr(scraper, "append_jsonl", lambda path, rec: rows.append((path, rec)) or True)
     for name, value in {"YOUTUBE_API_KEY": "yt", "TELEGRAM_TOKEN": "tok", "TELEGRAM_CHANNEL_ID": "premium",

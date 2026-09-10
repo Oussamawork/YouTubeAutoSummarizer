@@ -76,6 +76,7 @@ pip install -r requirements.txt
    | `digest` | For prolific channels: instead of one full-summary message per video, bundle the channel's new videos into **one compact TL;DR digest message per run** (short TL;DR + up to 3 bullets each), so the chat isn't flooded. |
    | `max=N` | Per-run video cap for this channel (overrides `MAX_VIDEOS_PER_RUN`); `0` means no cap. |
    | `only=a,b,c` | Process a video only when its **title** mentions one of these keywords. Matching is case-insensitive and **whole-word**, so `eth` does not match "wh*eth*er" and `sol` does not match "*sol*ve" — which also means `sol` does not match "solana", so list each alias you want (e.g. `only=sol,solana`). Filtering happens before the transcript fetch, so skipped videos cost no transcript credits and no LLM calls. |
+   | `lang=xx` | The language the channel speaks (ISO 639-1, e.g. `lang=de`). Only a caption track in that language is accepted: YouTube keeps translated and auto-dubbed tracks beside the original, and a transcript provider may serve any of them, so every fetched transcript is verified (provider tag, writing system, stop-word detection) and a track in another language is refused and the next source tried — Gemini then transcribes the audio itself, in that language. Without the option any language in `TRANSCRIPT_LANGUAGES` (default `en,de`) passes. A capture that was already stored in the wrong language is retired by `python research_backfill.py --reject-foreign-transcripts` and re-captured by `--refetch` (the daily job runs both). |
 
 ## Usage
 

@@ -227,7 +227,7 @@ def test_advance_channel_state_never_regresses():
 # --- Per-video summarization outcomes ---------------------------------------
 
 def test_summarize_video_defers_missing_transcript(monkeypatch):
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": ""})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": ""})
     body, outcome, decided, _sig = scraper._summarize_video(_vid("v1", ""), no_transcript_attempts=0)
     # Captions may still be processing: stay silent and retry next run.
     assert body is None
@@ -236,7 +236,7 @@ def test_summarize_video_defers_missing_transcript(monkeypatch):
 
 
 def test_summarize_video_gives_up_after_max_attempts(monkeypatch):
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": ""})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": ""})
     body, outcome, decided, _sig = scraper._summarize_video(
         _vid("v1", ""), no_transcript_attempts=scraper.NO_TRANSCRIPT_MAX_ATTEMPTS - 1
     )
@@ -248,7 +248,7 @@ def test_summarize_video_gives_up_after_max_attempts(monkeypatch):
 def test_summarize_video_keeps_trying_while_inside_the_time_window(monkeypatch):
     # Attempts alone is the wrong unit: a fast polling schedule burns through
     # the count in hours, while auto-captions can take most of a day to appear.
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": ""})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": ""})
     body, outcome, decided, _sig = scraper._summarize_video(
         _vid("v1", ""),
         no_transcript_attempts=scraper.NO_TRANSCRIPT_MAX_ATTEMPTS + 5,
@@ -258,7 +258,7 @@ def test_summarize_video_keeps_trying_while_inside_the_time_window(monkeypatch):
 
 
 def test_summarize_video_gives_up_once_both_gates_pass(monkeypatch):
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": ""})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": ""})
     body, outcome, decided, _sig = scraper._summarize_video(
         _vid("v1", ""),
         no_transcript_attempts=scraper.NO_TRANSCRIPT_MAX_ATTEMPTS - 1,
@@ -269,7 +269,7 @@ def test_summarize_video_gives_up_once_both_gates_pass(monkeypatch):
 
 def test_summarize_video_time_window_alone_does_not_give_up(monkeypatch):
     # Long-waited but barely retried (e.g. runs were failing): keep trying.
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": ""})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": ""})
     body, outcome, decided, _sig = scraper._summarize_video(
         _vid("v1", ""), no_transcript_attempts=0,
         hours_since_first=scraper.NO_TRANSCRIPT_MIN_HOURS * 10,
@@ -304,7 +304,7 @@ def test_retry_backoff_disabled_by_zero(monkeypatch):
 
 
 def test_summarize_video_quota_deferral_not_decided(monkeypatch):
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "words"})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": "words"})
     monkeypatch.setattr(scraper, "summarize_transcript", lambda t, title, **kw: scraper.QUOTA_EXHAUSTED_SENTINEL)
     body, outcome, decided, _sig = scraper._summarize_video(_vid("v1", ""))
     assert outcome == "quota_deferred"
@@ -319,7 +319,7 @@ def test_summarize_video_compact_flag_passthrough(monkeypatch):
         captured["compact"] = compact
         return "TLDR"
 
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "words"})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": "words"})
     monkeypatch.setattr(scraper, "summarize_transcript", fake_summarize)
     scraper._summarize_video(_vid("v1", ""), compact=True)
     assert captured["compact"] is True
@@ -328,7 +328,7 @@ def test_summarize_video_compact_flag_passthrough(monkeypatch):
 
 
 def test_summarize_video_success(monkeypatch):
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "words"})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": "words"})
     monkeypatch.setattr(scraper, "summarize_transcript", lambda t, title, **kw: "TLDR\n\n• point")
     details = _vid("v1", "")
     body, outcome, decided, _sig = scraper._summarize_video(details)
@@ -372,7 +372,7 @@ def _run_main(monkeypatch, free_channel=None, premium_url=None, outcome="sent",
     monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: [video])
     monkeypatch.setattr(
         scraper, "_summarize_video",
-        summarize or (lambda details, attempts, compact=False, want_signals=False, hours_since_first=None: (body, outcome, True, None)),
+        summarize or (lambda details, attempts, compact=False, want_signals=False, hours_since_first=None, languages=None: (body, outcome, True, None)),
     )
 
     calls = {"message": [], "teaser": []}
@@ -462,7 +462,7 @@ def test_main_records_signals_when_enabled(monkeypatch):
     )
     import transcript_normalize as tn
 
-    def summarize(details, attempts, compact=False, want_signals=False, hours_since_first=None):
+    def summarize(details, attempts, compact=False, want_signals=False, hours_since_first=None, languages=None):
         details["normalized"] = tn.normalize_transcript("words", "v1")
         return "TL;DR line\n\n• detail 1", "sent", True, None
 
@@ -591,7 +591,7 @@ def test_main_resolves_handle_and_keys_state_by_id(monkeypatch):
     monkeypatch.setattr(scraper, "resolve_channel_handle",
                         lambda key, handle: calls.append(handle) or "UCresolved")
     monkeypatch.setattr(scraper, "get_recent_videos", lambda key, cid: [video] if cid == "UCresolved" else [])
-    monkeypatch.setattr(scraper, "_summarize_video", lambda d, a, compact=False, want_signals=False, hours_since_first=None: ("S", "sent", True, None))
+    monkeypatch.setattr(scraper, "_summarize_video", lambda d, a, compact=False, want_signals=False, hours_since_first=None, languages=None: ("S", "sent", True, None))
     monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
     scraper.main()
 
@@ -620,7 +620,7 @@ def test_main_skips_unresolvable_handle(monkeypatch):
 
 
 def test_summarize_video_uses_combined_call(monkeypatch):
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "text", "reason": "ok"})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": "text", "reason": "ok"})
     seen = {}
     monkeypatch.setattr(
         scraper, "summarize_with_signals",
@@ -644,7 +644,7 @@ def test_summarize_video_uses_combined_call(monkeypatch):
 
 
 def test_summarize_video_falls_back_when_combined_unusable(monkeypatch):
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "text"})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": "text"})
     monkeypatch.setattr(
         scraper, "summarize_with_signals",
         lambda t, title=None, compact=False, channel_name=None, context=None: None,
@@ -661,7 +661,7 @@ def test_summarize_video_sends_the_complete_normalized_transcript(monkeypatch):
     marker = "MID-MARKER-7f3a"
     raw = ("alpha beta gamma. " * 4200) + marker + (" delta epsilon zeta." * 4200)
     assert len(raw) > 120000
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": raw})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": raw})
     seen = {}
     monkeypatch.setattr(scraper, "summarize_transcript",
                         lambda t, title=None, compact=False, cache_key=None: seen.update(t=t, key=cache_key) or "S")
@@ -672,7 +672,7 @@ def test_summarize_video_sends_the_complete_normalized_transcript(monkeypatch):
 
 
 def test_summarize_video_skips_combined_when_signals_off(monkeypatch):
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": "text"})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": "text"})
     monkeypatch.setattr(
         scraper, "summarize_with_signals",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("combined call should not happen")),
@@ -744,7 +744,7 @@ def test_summarize_video_budget_deferral_is_silent(monkeypatch):
     # retry attempt consumed, watermark stays put.
     monkeypatch.setattr(
         scraper, "get_transcript_from_video",
-        lambda url: {"transcript": "", "budget_exhausted": True},
+        lambda url, languages=None: {"transcript": "", "budget_exhausted": True},
     )
     body, outcome, decided, sig = scraper._summarize_video(_vid("v1", ""), no_transcript_attempts=2)
     assert body is None and outcome == "budget_deferred" and decided is False and sig is None
@@ -754,7 +754,7 @@ def test_summarize_video_missing_transcript_still_reports(monkeypatch):
     # Without the budget flag, the normal give-up path is unchanged.
     monkeypatch.setattr(
         scraper, "get_transcript_from_video",
-        lambda url: {"transcript": "", "budget_exhausted": False},
+        lambda url, languages=None: {"transcript": "", "budget_exhausted": False},
     )
     body, outcome, decided, _ = scraper._summarize_video(
         _vid("v1", ""), no_transcript_attempts=scraper.NO_TRANSCRIPT_MAX_ATTEMPTS - 1)
@@ -808,7 +808,7 @@ def _filter_run(monkeypatch, only, titles):
     monkeypatch.setattr(scraper, "get_recent_videos", lambda k, c: feed)
     monkeypatch.setattr(
         scraper, "_summarize_video",
-        lambda d, a, compact=False, want_signals=False, hours_since_first=None: summarized.append(d["video_title"]) or ("S", "sent", True, None),
+        lambda d, a, compact=False, want_signals=False, hours_since_first=None, languages=None: summarized.append(d["video_title"]) or ("S", "sent", True, None),
     )
     monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
     scraper.main()
@@ -936,7 +936,7 @@ def test_main_duration_gate_skips_before_transcript(monkeypatch):
     })
     monkeypatch.setattr(
         scraper, "_summarize_video",
-        lambda d, a, compact=False, want_signals=False, hours_since_first=None: summarized.append(d["video_id"]) or ("S", "sent", True, None),
+        lambda d, a, compact=False, want_signals=False, hours_since_first=None, languages=None: summarized.append(d["video_id"]) or ("S", "sent", True, None),
     )
     monkeypatch.setattr(scraper, "send_telegram_message", lambda *a: True)
     scraper.main()
@@ -946,7 +946,7 @@ def test_main_duration_gate_skips_before_transcript(monkeypatch):
 def test_summarize_video_records_transcript_reason(monkeypatch):
     monkeypatch.setattr(
         scraper, "get_transcript_from_video",
-        lambda url: {"transcript": "", "budget_exhausted": False, "reason": "empty_content"},
+        lambda url, languages=None: {"transcript": "", "budget_exhausted": False, "reason": "empty_content"},
     )
     details = _vid("v1", "")
     scraper._summarize_video(details, no_transcript_attempts=0)
@@ -1031,7 +1031,7 @@ def test_a_gemini_success_is_not_reported_as_a_transcript_failure(monkeypatch):
     # gemini_http_400=1" — four successful transcripts counted as failures,
     # because scraper kept its own copy of the success reasons and it drifted
     # when the Gemini source was added.
-    def summarize(d, a, compact=False, want_signals=False, hours_since_first=None):
+    def summarize(d, a, compact=False, want_signals=False, hours_since_first=None, languages=None):
         d["transcript_reason"] = "gemini_ok"
         return ("S", "sent", True, None)
 
@@ -1041,7 +1041,7 @@ def test_a_gemini_success_is_not_reported_as_a_transcript_failure(monkeypatch):
 
 
 def test_a_real_transcript_failure_is_still_reported(monkeypatch):
-    def summarize(d, a, compact=False, want_signals=False, hours_since_first=None):
+    def summarize(d, a, compact=False, want_signals=False, hours_since_first=None, languages=None):
         d["transcript_reason"] = "gemini_too_large"
         return ("S", "no_transcript", True, None)
 

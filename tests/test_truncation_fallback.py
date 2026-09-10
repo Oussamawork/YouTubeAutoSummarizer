@@ -65,7 +65,7 @@ def isolated(tmp_path, monkeypatch):
                                   "api_key": "k", "model": "gemini-3.7-flash"}])
     monkeypatch.setattr(summarizer.time, "sleep", lambda *_: None)
     summarizer._EXHAUSTED_PROVIDERS.clear()
-    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url: {"transcript": TRANSCRIPT, "reason": "ok"})
+    monkeypatch.setattr(scraper, "get_transcript_from_video", lambda url, languages=None: {"transcript": TRANSCRIPT, "reason": "ok"})
     rows = []
     monkeypatch.setattr(scraper, "append_jsonl", lambda path, rec: rows.append((path, rec)) or True)
     yield rows

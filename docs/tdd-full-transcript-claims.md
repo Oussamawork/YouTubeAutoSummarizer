@@ -541,6 +541,67 @@ captured, and is recorded as `no_claims_found` with the reason in the
 warnings. The verdict lives in one place, `claims.empty_extraction_verdict`,
 used by the combined, standalone and chunked paths.
 
+### 13.3a Transcript language policy (`language_detect.verify_language`)
+
+A transcript is only a transcript of the video when it is in the language
+the channel speaks. YouTube keeps translated and auto-dubbed caption tracks
+beside the original, and a provider asked for "the transcript" may serve
+any of them: on 2026-09-05/08 Supadata returned Arabic translations for
+four English videos (More Crypto Online, Parkev Tatevosian) and English
+auto-dubs for two German HKCM videos. The Arabic text was summarized for
+readers, stored, and mined for claims whose subjects were Arabic strings
+with no ticker; the English HKCM text carried claims attributed to a
+German speaker who never said those words.
+
+*Policy.* Each channel line may carry `lang=xx`; without it
+`TRANSCRIPT_LANGUAGES` (default `en,de`, the guard's rule sets) applies.
+`transcript.get_transcript_from_video(url, languages)`:
+
+1. asks Supadata for that track (`lang=` when exactly one language is
+   configured — with two acceptable languages the provider picks and the
+   text is verified, since naming one could pull a translation of the
+   other);
+2. verifies whatever comes back — the body's `lang` tag, the writing
+   system of the letters, and stop-word detection — with
+   `verify_language`: a provider tag outside the accepted set, a
+   non-Latin script, a detected supported language outside the set, or a
+   long Latin-script text detection cannot place (a French track) is a
+   refusal. A short clip detection cannot judge is accepted on the tag, or
+   on trust without one;
+3. on a refused Supadata track, spends ONE more credit on an acceptable
+   track the body says the video has (`availableLangs`), else reports
+   `language_mismatch` for that source without rotating keys;
+4. moves to Gemini, told the language ("transcribe it in that language
+   exactly as spoken. Do not translate"), then youtube-transcript-api
+   asked for that language; each is verified the same way.
+
+When every source only had the wrong language the video has no
+transcript for this run (`reason = language_mismatch`, not
+`budget_exhausted`) and follows the normal no-transcript deferral. The
+verified language is the `transcript_language` on the video, the stored
+transcript, the research context and every claim; detection is only the
+fallback for a source that carried no tag.
+
+*Detection floors.* Real transcripts score 0.30–0.37 of their tokens in
+their language's stop-word set with 34–54 distinct stop words (29 stored
+transcripts). The floor is 0.10 with at least min(8, tokens/8) distinct
+stop words; the old 0.04 floor accepted a French text on the single word
+"des".
+
+*Stored captures.* `research_backfill.py --reject-foreign-transcripts`
+verifies every stored transcript against its channel's languages (the
+channel id from the entry, the capture, or the gate log for RSS videos
+recorded without one) and retires a mismatch: the file moves to
+`<id>.rejected-<hash12>.json.gz` (nothing captured is deleted), the index
+gains a row with `rejected: true`, the video's active run is superseded
+(`load_active_claims` drops every superseded key, active successor or
+not), and the video becomes `transcript_rejected` with
+`refetch_languages`. `--refetch` re-captures such videos through the same
+source chain and budget (bounded by `RESEARCH_REFETCH_MAX_VIDEOS`), stores
+the new text, and runs the normal extraction as a new run. The daily job
+runs both after the scraper. Summaries already delivered from a wrong
+track are not re-sent.
+
 ### 13.4 Evidence timestamps
 
 `NormalizedTranscript.cues` keeps every caption cue's normalized span and
@@ -792,7 +853,13 @@ What changed against the previous example:
   then need a re-fetch under the normal budget).
 - Legacy rows cannot gain evidence retroactively; the compatibility view for
   new videos reduces information by design and says so in `reduced`.
-- The claim's `sector` comes from the model's wording and is only used to
-  pick a sector benchmark when it matches a `BENCHMARKS` key; `exchange`
-  on the claim stays null (the scorecard resolves it from the symbol at
-  scoring time and records it on the scored row).
+- The claim's `sector` comes from the model's wording and is recorded as
+  `speaker_sector` only; the scorecard's exchange, sector and benchmark
+  come from `instruments.py`, and `exchange` on the claim stays null.
+- Language verification covers English and German; a channel in another
+  language needs `lang=` plus a stop-word set in `language_detect` before
+  its transcripts pass (until then they are refused as unrecognized). The
+  provider's `lang` tag is trusted when present; a mislabelled track in an
+  accepted language with matching script and detection would pass.
+  Summaries delivered from a wrong-language track before 2026-09-08 were
+  not re-sent; only the research data was repaired.

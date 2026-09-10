@@ -11,6 +11,12 @@ a second capture of the same video with a different hash is stored beside it
 as <video_id>.<hash12>.json.gz and the index gains a row. A persistence
 failure is logged and reported back so the research state can say so — it is
 never allowed to look like a successful capture.
+
+A capture found to be in the wrong language (a translated caption track —
+see language_detect) is REJECTED, not deleted: `reject_transcript` moves it
+to <video_id>.rejected-<hash12>.json.gz, so `load_transcript` no longer
+finds it and the video can be re-captured, and the index gains a row that
+says why. Nothing that was once captured disappears.
 """
 import gzip
 import hashlib
@@ -101,6 +107,35 @@ def store_transcript(video_details, raw_text, source, reason, language=None,
             except OSError:
                 pass
     return record
+
+
+def reject_transcript(video_id, reason, directory=None, index_path=None):
+    """
+    Retire a video's primary stored transcript because it must not be used
+    (e.g. `language_mismatch:ar`). Moves the file aside — it stays on disk
+    for the record — and appends an index row with `rejected: True`. Returns
+    the retired payload's metadata (without the text) or None when there was
+    nothing to retire. Never raises.
+    """
+    directory = directory or TRANSCRIPTS_DIR
+    index_path = index_path or TRANSCRIPT_INDEX
+    payload = load_transcript(video_id, directory=directory)
+    if not payload:
+        return None
+    digest = payload.get("transcript_hash") or transcript_hash(payload.get("raw_transcript"))
+    src = transcript_path(video_id, directory=directory)
+    dst = os.path.join(directory, f"{video_id}.rejected-{digest[:12]}.json.gz")
+    try:
+        os.replace(src, dst)
+    except OSError as e:
+        log_error(f"Could not retire transcript for {video_id}: {e}")
+        return None
+    meta = {k: v for k, v in payload.items() if k != "raw_transcript"}
+    row = dict(meta, path=dst, rejected=True, rejection_reason=reason,
+               rejected_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+    append_jsonl(index_path, row)
+    log_warn(f"Transcript for {video_id} retired ({reason}); it will be re-captured.")
+    return meta
 
 
 def load_transcript(video_id, digest=None, directory=None):

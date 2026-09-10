@@ -361,18 +361,21 @@ def test_all_keys_failing_without_credit_errors_reports_last_reason(monkeypatch)
 
 
 def test_get_transcript_reports_budget_exhaustion(monkeypatch):
-    monkeypatch.setattr(tr, "_fetch_supadata", lambda vid: ("", True, "no_credits"))
-    monkeypatch.setattr(tr, "_fetch_youtube_transcript_api", lambda vid: "")
+    monkeypatch.setattr(tr, "_fetch_supadata", lambda vid, languages=None: ("", True, "no_credits"))
+    monkeypatch.setattr(tr, "_fetch_youtube_transcript_api", lambda vid, languages=None: "")
     out = tr.get_transcript_from_video("https://www.youtube.com/watch?v=vid00000001")
-    assert out == {"transcript": "", "budget_exhausted": True, "reason": "no_credits"}
+    assert out == {"transcript": "", "budget_exhausted": True, "reason": "no_credits",
+                   "language": None, "language_check": None}
 
 
 def test_fallback_success_clears_budget_flag(monkeypatch):
-    monkeypatch.setattr(tr, "_fetch_supadata", lambda vid: ("", True, "no_credits"))
-    monkeypatch.setattr(tr, "_fetch_youtube_transcript_api", lambda vid: "from fallback")
+    monkeypatch.setattr(tr, "_fetch_supadata", lambda vid, languages=None: ("", True, "no_credits"))
+    monkeypatch.setattr(tr, "_fetch_youtube_transcript_api", lambda vid, languages=None: "from fallback")
     out = tr.get_transcript_from_video("https://www.youtube.com/watch?v=vid00000001")
-    assert out == {"transcript": "from fallback", "budget_exhausted": False,
-                   "reason": "fallback_ok"}
+    assert {k: out[k] for k in ("transcript", "budget_exhausted", "reason")} == {
+        "transcript": "from fallback", "budget_exhausted": False, "reason": "fallback_ok"}
+    # Too short to detect, no provider tag: accepted on trust, language unknown.
+    assert out["language"] == "unknown" and out["language_check"]["ok"] is True
 
 
 def test_all_keys_out_of_credits_defers_instead_of_writing_off(monkeypatch):

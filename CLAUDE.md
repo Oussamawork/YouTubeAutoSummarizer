@@ -15,7 +15,17 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   a monthly budget over the days left in the month. Gemini transcription rotates
   across `GEMINI_TRANSCRIPT_MODELS` (free quota is 20 requests/day *per model*);
   when every source is spent, videos defer silently via `budget_exhausted`
-  rather than being written off.
+  rather than being written off. **A transcript must be in the channel's
+  language**: YouTube keeps translated and auto-dubbed caption tracks beside
+  the original and Supadata served Arabic for English videos and English for
+  German ones (Sept 2026). `get_transcript_from_video(url, languages)` asks
+  Supadata for the channel's track (`lang=` when one language is
+  configured), verifies every source's text with
+  `language_detect.verify_language` (provider tag, writing system, stop-word
+  detection), swaps a wrong Supadata track for an acceptable one the video
+  has (one extra credit), and otherwise refuses it (`language_mismatch`) and
+  moves to the next source — Gemini is told the language and transcribes the
+  audio itself. The result carries `language` / `language_check`.
 - `summarizer.py` — provider-agnostic LLM summarization (OpenAI-compatible API);
   also exposes `complete()` for generic calls over the same provider chain.
   Gemini runs `GEMINI_MODEL` then `GEMINI_FALLBACK_MODELS` — each model is a
@@ -61,8 +71,13 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   to `reported_*`, `hypothetical_*` or `displaced_fields`)), and
   `claims_to_legacy_signals`, the documented reduction that keeps the
   `signals.jsonl` compatibility view working.
-- `language_detect.py` — deterministic stop-word language detection (en / de /
-  unknown) for the suspicious-empty guard; stored as `transcript_language`.
+- `language_detect.py` — deterministic language handling: a writing-system
+  census (`script_of`), stop-word detection (en / de / unknown; floors
+  measured on the stored transcripts) and `verify_language(text, accepted,
+  reported)`, the one rule for whether a caption track may be used.
+  `DEFAULT_LANGUAGES` (`TRANSCRIPT_LANGUAGES`, default en,de) applies to
+  channels without a `lang=` option. The verified language is stored as
+  `transcript_language`.
 - `research_budget.py` — keeps research from spending summary requests:
   `scraper.main` queues every separate claim extraction until all eligible
   videos are delivered, then runs each only when
@@ -119,7 +134,14 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `research_backfill.py` — `--retry` (pending / failed / quota-deferred /
   partial research from stored transcripts), `--reprocess` (stale versions),
   `--import-legacy` (old signals rows as `schema_version="legacy"`,
-  review-required, no fabricated evidence). Bounded, quota-aware, resumable.
+  review-required, no fabricated evidence), `--reject-foreign-transcripts`
+  (offline: retire every stored capture not in its channel's language —
+  `transcript_store.reject_transcript` moves the file aside, the video's run
+  is superseded so its claims leave the canonical set, status
+  `transcript_rejected`) and `--refetch` (re-capture those videos in the
+  channel's language through the daily job's source chain and budget, then
+  extract; `RESEARCH_REFETCH_MAX_VIDEOS`, default 3). The daily job runs the
+  last two after the scraper. Bounded, quota-aware, resumable.
 - `research_analytics.py` — analytics over canonical claims: data-quality
   header with denominators, descriptive counts, consensus of one current
   **view** per source/asset/horizon bucket, flips (same source, asset and
@@ -210,9 +232,10 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   the HTML, so a network failure never duplicates already-delivered chunks.
   `scraper._Outbox` is the one place that decides single message vs digest and
   premium vs free, and reports what Telegram accepted.
-- `helpers.py` — channel file parsing (`<id|@handle> [digest] [max=N] [only=a,b]` per
-  line; handles resolved at run time by `scraper.resolve_channel_handle`; `only=`
-  is a whole-word title filter applied before any transcript fetch), dedup
+- `helpers.py` — channel file parsing (`<id|@handle> [digest] [max=N] [only=a,b]
+  [lang=xx]` per line; handles resolved at run time by
+  `scraper.resolve_channel_handle`; `only=` is a whole-word title filter applied
+  before any transcript fetch; `lang=` the language its transcripts must be in), dedup
   state (v2 schema + v1 migration), `write_json_atomic` (used by every committed
   JSON state file), env parsing (`env_int` / `env_float` / `env_flag` — always
   use these: an unconfigured Actions variable arrives as `""`), summary cleaning.
