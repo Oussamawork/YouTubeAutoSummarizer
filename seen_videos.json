@@ -1,8 +1,8 @@
 {
   "channels": {
     "UC3AdN1bEmEonuSwXNS8LixQ": {
-      "last_published": "2026-09-13T18:00:17+00:00",
-      "last_video_id": "T7HiKdZ6OBI"
+      "last_published": "2026-09-14T16:00:01+00:00",
+      "last_video_id": "59tL1qMaxa8"
     },
     "UCTPm4y283GIygUCq4a_T96Q": {
       "last_published": "2026-09-12T23:55:34+00:00",
@@ -38,10 +38,6 @@
     }
   },
   "pending": {
-    "59tL1qMaxa8": {
-      "attempts": 0,
-      "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ"
-    },
     "f9Y5IMFjR4c": {
       "attempts": 0,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
