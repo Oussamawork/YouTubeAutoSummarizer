@@ -253,6 +253,20 @@ waste to remove. Leave it off. Re-open only if the failure line reappears.
   backstop. Revisit per Step 4.
 - `youtube-transcript-api` cannot be relied on from CI (datacenter IPs are
   blocked), so Supadata has no free fallback today. Option C would change that.
+- The local meter only counts what this pipeline spent, and the provider's
+  own count can run ahead of it: from 2026-09-10 every key answered every
+  request with 429 `limit-exceeded` while the meter showed 184 of 300 credits
+  left, and each video cost three rejected calls (243 in five days) before
+  falling through to Gemini. Since 2026-09-15 that verdict is remembered in
+  `supadata_usage.json` (`provider_spent`) once every key has given it:
+  Supadata is skipped for the rest of the day, re-probed with the first video
+  of each following day (one video's worth of calls, so a top-up is noticed
+  within a day), and forgotten on a served request, a changed key count or the
+  cycle rollover. The run log names the verdict at start-up; why the plan is
+  spent is a dashboard question this code cannot answer.
+- A deferred video (summary quota, truncated output, delivery not accepted)
+  used to be transcribed again on its retry; since 2026-09-15 the scraper
+  reuses the stored capture when it re-verifies as the channel's language.
 
 ---
 

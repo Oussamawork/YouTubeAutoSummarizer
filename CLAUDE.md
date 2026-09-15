@@ -8,11 +8,20 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 ## Module map
 - `scraper.py` — entry point / orchestration; RSS feed (primary) + YouTube Data API
   (fallback); candidate selection against the dedup watermark; per-video outcomes
-  (send / defer / give up); digest mode; `--video-url` on-demand path.
+  (send / defer / give up); digest mode; `--video-url` on-demand path. A video
+  that comes back after a summary-quota / truncation / delivery deferral
+  **reuses its stored transcript** (`_stored_transcript`, reason `stored`,
+  provenance kept from the original capture) once it re-verifies as the
+  channel's language, instead of spending a second transcript request.
 - `transcript.py` — transcript fetch, cheapest source first: Supadata → Gemini
   from the YouTube URL → youtube-transcript-api. Meters Supadata free-tier
   credits in `data/supadata_usage.json`, rotates across multiple keys, and paces
-  a monthly budget over the days left in the month. Gemini transcription rotates
+  a monthly budget over the days left in the month. The meter and the plan can
+  disagree (Sept 2026: every key answered `limit-exceeded` with 184 local
+  credits "left"), so once **every** key reports its plan limit the verdict is
+  remembered (`provider_spent`), Supadata is skipped for the rest of the day
+  and re-probed with the first video of each following day; a served request,
+  a changed key set or the cycle reset clears it. Gemini transcription rotates
   across `GEMINI_TRANSCRIPT_MODELS` (free quota is 20 requests/day *per model*);
   when every source is spent, videos defer silently via `budget_exhausted`
   rather than being written off. **A transcript must be in the channel's
