@@ -404,6 +404,10 @@ def test_credit_rejections_and_retries_are_not_metered(monkeypatch):
     monkeypatch.setattr(tr.requests, "get", lambda *a, **k: R())
     tr._fetch_supadata("vid00000001")
     assert tr._load_usage()["count"] == 0
+    # The rejection above also recorded the provider's verdict, which would
+    # (correctly) make the next video skip Supadata; this second scenario is
+    # about metering, so start it from a clean file.
+    os.remove(tr.SUPADATA_USAGE_FILE)
 
     calls = []
 
@@ -501,3 +505,139 @@ def test_http_error_reason_carries_status(monkeypatch):
 
     monkeypatch.setattr(tr.requests, "get", lambda *a, **k: R())
     assert tr._fetch_supadata("vid00000001")[2] == "http_404"
+
+
+# --- Provider-side exhaustion (the meter and the plan disagree) ----------------
+#
+# From 2026-09-10 every key answered "limit-exceeded" while the local meter
+# still showed credits: each video cost three rejected calls before falling
+# through to Gemini. The verdict is remembered for the day and re-probed once
+# a day.
+
+
+class _LimitExceeded:
+    status_code = 429
+    text = '{"error":"limit-exceeded","message":"Limit Exceeded"}'
+
+    def json(self):
+        return {"error": "limit-exceeded"}
+
+
+class _Served:
+    status_code = 200
+    text = "ok"
+
+    def json(self):
+        return {"content": "served text", "lang": "en"}
+
+
+def _three_spent_keys(monkeypatch):
+    monkeypatch.setenv("SUPADATA_API_KEY", "k1")
+    monkeypatch.setenv("SUPADATA_API_KEY_2", "k2")
+    monkeypatch.setenv("SUPADATA_API_KEY_3", "k3")
+    monkeypatch.setattr(tr.time, "sleep", lambda *_: None)
+
+
+def test_every_key_limit_exceeded_is_remembered_and_skips_the_next_video(monkeypatch):
+    _three_spent_keys(monkeypatch)
+    calls = []
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: calls.append(1) or _LimitExceeded())
+
+    assert tr._fetch_supadata("vid00000001") == ("", True, "no_credits")
+    assert len(calls) == 3  # one rejected call per key
+    usage = tr._load_usage()
+    assert usage["provider_spent"]["keys"] == 3
+    assert usage["provider_spent"]["checked_day"] == usage["day"]
+    assert usage["count"] == 0  # rejections are never metered
+
+    # The next video the same day goes straight to the next source: still
+    # deferred as exhaustion (so it is never written off), zero requests made.
+    assert tr._fetch_supadata("vid00000002") == ("", True, "no_credits")
+    assert len(calls) == 3
+    assert tr.provider_spent_status()["keys"] == 3
+
+
+def test_verdict_is_reprobed_once_a_day_and_cleared_when_a_key_serves(monkeypatch):
+    _three_spent_keys(monkeypatch)
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: _LimitExceeded())
+    tr._fetch_supadata("vid00000001")
+    usage = tr._load_usage()
+    assert usage["provider_spent"]
+    # Age the verdict: it was checked yesterday.
+    usage["provider_spent"]["checked_day"] = "2000-01-01"
+    usage["provider_spent"]["first_day"] = "2000-01-01"
+    tr._save_usage(usage)
+
+    # Still spent: the probe costs one video's worth of calls and re-stamps
+    # the verdict for today, keeping the day it was first seen.
+    calls = []
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: calls.append(1) or _LimitExceeded())
+    assert tr._fetch_supadata("vid00000002") == ("", True, "no_credits")
+    assert len(calls) == 3
+    usage = tr._load_usage()
+    assert usage["provider_spent"]["checked_day"] == usage["day"]
+    assert usage["provider_spent"]["first_day"] == "2000-01-01"
+
+    # Credits are back (top-up or reset): the probe serves and the verdict goes.
+    usage["provider_spent"]["checked_day"] = "2000-01-01"
+    tr._save_usage(usage)
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: _Served())
+    text, exhausted, reason = tr._fetch_supadata("vid00000003")
+    assert (text, exhausted, reason) == ("served text", False, "ok")
+    usage = tr._load_usage()
+    assert "provider_spent" not in usage
+    assert usage["count"] == 1
+    assert tr.provider_spent_status() is None
+
+
+def test_a_key_failing_some_other_way_does_not_record_the_verdict(monkeypatch):
+    # Two keys out of credits and one unreachable is still "at least one is
+    # out of credits" (defer), but not proof the plan is spent everywhere.
+    _three_spent_keys(monkeypatch)
+
+    def get(url, headers=None, params=None, timeout=None):
+        if headers["x-api-key"] == "k3":
+            raise tr.requests.ConnectionError("down")
+        return _LimitExceeded()
+
+    monkeypatch.setattr(tr.requests, "get", get)
+    assert tr._fetch_supadata("vid00000001") == ("", True, "no_credits")
+    assert "provider_spent" not in tr._load_usage()
+    assert tr.provider_spent_status() is None
+
+
+def test_verdict_is_forgotten_when_the_key_set_changes(monkeypatch):
+    _three_spent_keys(monkeypatch)
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: _LimitExceeded())
+    tr._fetch_supadata("vid00000001")
+    assert tr._load_usage()["provider_spent"]["keys"] == 3
+
+    # A fourth key was added: probe again, this key may have credits.
+    monkeypatch.setenv("SUPADATA_API_KEYS", "k4")
+    calls = []
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: calls.append(1) or _Served())
+    assert tr._fetch_supadata("vid00000002")[0] == "served text"
+    assert len(calls) == 1
+    assert "provider_spent" not in tr._load_usage()
+
+
+def test_verdict_does_not_survive_the_cycle_rollover(monkeypatch, tmp_path):
+    _three_spent_keys(monkeypatch)
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: _LimitExceeded())
+    tr._fetch_supadata("vid00000001")
+    assert tr._load_usage()["provider_spent"]
+    # _load_usage replaces the whole record when the cycle changes.
+    usage = tr._load_usage(date(2030, 6, 15))
+    assert "provider_spent" not in usage
+
+
+def test_budget_paced_skip_still_applies_before_any_probe(monkeypatch):
+    # The local pacing gate keeps its priority: nothing is probed when today's
+    # allowance is spent.
+    monkeypatch.setenv("SUPADATA_API_KEY", "k1")
+    monkeypatch.setenv("SUPADATA_MONTHLY_BUDGET", "1")
+    usage = tr._load_usage()
+    usage["count"] = usage["day_count"] = 1
+    tr._save_usage(usage)
+    monkeypatch.setattr(tr.requests, "get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no call")))
+    assert tr._fetch_supadata("vid00000001") == ("", True, "budget_paced")

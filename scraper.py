@@ -9,6 +9,7 @@ from transcript import (
     TRANSCRIPT_SUCCESS_REASONS,
     get_transcript_from_video,
     budget_status,
+    provider_spent_status,
 )
 from helpers import (
     read_channels, clean_summary, load_state, save_state, env_int, env_float,
@@ -563,8 +564,10 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     text is persisted BEFORE anything else touches it. The COMPLETE normalized
     transcript goes to the model — nothing is cut to fit.
     """
-    log_info(f"Fetching transcript for {video_details['video_url']} ...")
-    transcript = get_transcript_from_video(video_details['video_url'], languages=languages)
+    transcript = _stored_transcript(video_details, languages)
+    if transcript is None:
+        log_info(f"Fetching transcript for {video_details['video_url']} ...")
+        transcript = get_transcript_from_video(video_details['video_url'], languages=languages)
 
     # Check the actual transcript TEXT, not the dict (a dict is always truthy).
     transcript_text = transcript.get('transcript', '') if isinstance(transcript, dict) else ''
@@ -609,7 +612,10 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
         )
 
     video_details['transcript'] = transcript
-    video_details['transcript_source'] = _transcript_source(video_details.get('transcript_reason'))
+    video_details['transcript_source'] = (
+        transcript.get('stored_source') if transcript.get('reason') == "stored"
+        else _transcript_source(video_details.get('transcript_reason'))
+    )
     log_info("Transcript fetched successfully. Summarizing...")
 
     # Research capture happens before any destructive step: raw text on disk,
@@ -759,6 +765,54 @@ def _alert_delivery_stalled(token, chat_id, outcomes, transcript_reasons):
         "Nothing is lost — they stay queued and go out automatically once quota returns."
     ))
     return True
+
+
+def _stored_transcript(video_details, languages=None):
+    """
+    A transcript this pipeline already captured for the video, shaped like
+    get_transcript_from_video's result (reason "stored", `stored_source` the
+    original source), or None when there is none to reuse.
+
+    A video that comes back after a summary-quota, truncation or delivery
+    deferral used to be transcribed all over again: on 2026-09-14/15, with
+    Supadata dark and Gemini the one source left, three videos each spent a
+    second transcript request on text the store already held, on the day
+    that quota was the bottleneck. The stored copy is used only when it
+    verifies as one of the channel's languages; a foreign capture is left for
+    `research_backfill --reject-foreign-transcripts` and the video is fetched
+    fresh through the normal chain. Never raises.
+    """
+    vid = video_details.get('video_id')
+    if not PERSIST_TRANSCRIPTS or not vid:
+        return None
+    try:
+        stored = transcript_store.load_transcript(vid)
+    except Exception as e:  # reading the store is best-effort, like writing it
+        log_warn(f"Could not read the stored transcript for {vid}: {e}")
+        return None
+    text = (stored or {}).get("raw_transcript") if isinstance(stored, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return None
+    accepted = language_detect.normalize_languages(languages)
+    recorded = stored.get("transcript_language")
+    reported = recorded if isinstance(recorded, str) and recorded.isalpha() and recorded != "unknown" else None
+    verdict = language_detect.verify_language(text, accepted, reported=reported)
+    if not verdict["ok"]:
+        log_warn(
+            f"Stored transcript for {vid} is {verdict['language']} ({verdict['reason']}); "
+            f"this channel speaks {', '.join(accepted)}. Fetching a fresh one."
+        )
+        return None
+    source = stored.get("transcript_source") or "stored"
+    log_info(f"Reusing the stored {source} transcript for {vid} ({len(text):,} chars); no fetch needed.")
+    return {
+        "transcript": text,
+        "budget_exhausted": False,
+        "reason": "stored",
+        "language": verdict["language"],
+        "language_check": dict(verdict, source="stored"),
+        "stored_source": stored.get("transcript_source"),
+    }
 
 
 def _transcript_source(reason):
@@ -1174,6 +1228,13 @@ def main():
                 f"Transcript budget: {used}/{allowed} used today, "
                 f"{remaining} credit(s) left this month."
             )
+            spent = provider_spent_status()
+            if spent:
+                log_warn(
+                    f"Supadata itself reports its plan limit on all {spent['keys']} key(s) "
+                    f"(since {spent['first_day']}); the local meter is not what is "
+                    f"stopping transcripts — check the keys' usage on the Supadata dashboard."
+                )
 
         # Read channel entries (id + per-channel options) from the file
         channels = read_channels("channel_ids.txt")

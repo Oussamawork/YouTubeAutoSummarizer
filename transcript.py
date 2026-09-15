@@ -192,6 +192,58 @@ def budget_status(today=None):
     )
 
 
+# --- Provider-side exhaustion ------------------------------------------------
+#
+# The meter above counts what this pipeline spent; the provider counts what the
+# plan allows, and the two disagree. From 2026-09-10 every key answered every
+# request with 429 "limit-exceeded" while the local meter still showed 184 of
+# 300 credits left, so each video cost three rejected calls (with retries and
+# backoff) before falling through to Gemini — 243 wasted requests in five days
+# and minutes of run time. So a verdict from the provider is remembered: once
+# EVERY key has said "limit-exceeded" for one video, Supadata is skipped for
+# the rest of the day, re-probed with the first video of each following day
+# (one video's worth of calls, so a top-up or an earlier reset is noticed
+# within a day), and forgotten at the cycle rollover or when the key set
+# changes.
+
+
+def _provider_spent(usage, keys):
+    """The remembered "every key answered limit-exceeded" verdict while it
+    still applies (same cycle, same number of keys, already re-checked
+    today), else None."""
+    spent = usage.get("provider_spent")
+    if not isinstance(spent, dict):
+        return None
+    if spent.get("cycle") != usage.get("cycle") or spent.get("keys") != len(keys):
+        return None
+    if spent.get("checked_day") != usage.get("day"):
+        return None
+    return spent
+
+
+def _mark_provider_spent(usage, keys):
+    previous = usage.get("provider_spent") if isinstance(usage.get("provider_spent"), dict) else {}
+    same_cycle = previous.get("cycle") == usage.get("cycle")
+    usage["provider_spent"] = {
+        "cycle": usage.get("cycle"),
+        "keys": len(keys),
+        "first_day": previous.get("first_day") if same_cycle and previous.get("first_day") else usage.get("day"),
+        "checked_day": usage.get("day"),
+    }
+    _save_usage(usage)
+
+
+def _clear_provider_spent(usage):
+    if usage.pop("provider_spent", None) is not None:
+        _save_usage(usage)
+
+
+def provider_spent_status(today=None):
+    """The remembered provider verdict for the run log, or None."""
+    usage = _load_usage(today or datetime.now(timezone.utc).date())
+    return _provider_spent(usage, _supadata_keys())
+
+
 # --- Gemini video transcripts -----------------------------------------------
 #
 # Supadata's free tier runs dry (it did on 2026-08-11, and the pipeline went
@@ -225,7 +277,7 @@ GEMINI_TRANSCRIPT_MAX_OUTPUT_TOKENS = env_int("GEMINI_TRANSCRIPT_MAX_OUTPUT_TOKE
 # this set: it used to keep its own hand-written copy, and when `gemini_ok` was
 # added here the copy was not updated, so every Gemini success was counted and
 # reported as a transcript failure.
-TRANSCRIPT_SUCCESS_REASONS = frozenset({"ok", "gemini_ok", "fallback_ok"})
+TRANSCRIPT_SUCCESS_REASONS = frozenset({"ok", "gemini_ok", "fallback_ok", "stored"})
 # Google rejects an over-long video with a 400 naming the context window. Every
 # Gemini model here shares that 1,048,576-token window, so the rotation cannot
 # rescue it — trying the rest only spends requests to be told the same thing.
@@ -569,6 +621,14 @@ def _fetch_supadata(vid, languages=None):
         return "", False, "no_key"
 
     usage = _load_usage()
+    spent = _provider_spent(usage, keys)
+    if spent:
+        log_warn(
+            f"Supadata reported its plan limit on all {spent['keys']} key(s) (since "
+            f"{spent['first_day']}, re-checked {spent['checked_day']}); skipping it for "
+            f"{vid} — next re-check tomorrow or at the cycle reset."
+        )
+        return "", True, "no_credits"
     allowance = daily_allowance(usage)
     if usage.get("day_count", 0) >= allowance:
         remaining = max(0, monthly_budget() - usage.get("count", 0))
@@ -585,24 +645,34 @@ def _fetch_supadata(vid, languages=None):
     # is a key answering "this video has no captions" — it worked, its answer is
     # authoritative, and asking the other keys would just spend their credits to
     # be told the same thing.
-    saw_credit_failure = False
+    credit_failures = 0
     reason = "no_credits"
     for index, key in enumerate(keys):
         served, text, reason = _fetch_supadata_with_key(vid, key, usage, languages)
         if served:
+            _clear_provider_spent(usage)
             return text, False, reason
-        saw_credit_failure = saw_credit_failure or reason == "no_credits"
+        credit_failures += reason == "no_credits"
         if index + 1 < len(keys):
             log_warn(f"Supadata key {index + 1} failed ({reason}); trying key {index + 2}.")
 
     # Out of credits is exhaustion, not a video without captions: report it as
     # such so the caller defers instead of eventually writing the video off as
-    # untranscribable.
-    if saw_credit_failure:
+    # untranscribable. When EVERY key said so, remember it (see
+    # _provider_spent) so the next videos skip straight to the next source
+    # instead of repeating three rejected calls each; a key that merely failed
+    # some other way (unreachable, 5xx) keeps the door open.
+    if credit_failures:
         log_warn(
             f"All {len(keys)} Supadata key(s) failed and at least one is out of "
             f"credits; deferring this video."
         )
+        if credit_failures == len(keys):
+            _mark_provider_spent(usage, keys)
+            log_warn(
+                f"Every Supadata key reports its plan limit; Supadata is skipped for "
+                f"the rest of today and re-probed with the first video tomorrow."
+            )
         return "", True, "no_credits"
     log_warn(f"All {len(keys)} Supadata key(s) failed (last: {reason}).")
     return "", False, reason
