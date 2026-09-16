@@ -1,6 +1,12 @@
 {
   "cycle": "2026-09-01",
   "count": 116,
-  "day": "2026-09-10",
-  "day_count": 2
+  "day": "2026-09-16",
+  "day_count": 0,
+  "provider_spent": {
+    "cycle": "2026-09-01",
+    "keys": 3,
+    "first_day": "2026-09-16",
+    "checked_day": "2026-09-16"
+  }
 }
