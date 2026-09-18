@@ -386,7 +386,7 @@
       "extraction_model": null,
       "extraction_prompt_version": "2",
       "failed_chunk_ids": [],
-      "failure_reason": "llm_quota",
+      "failure_reason": "summary_reserve_protected",
       "last_attempt_at": null,
       "next_eligible_at": null,
       "normalization_version": "1",
@@ -408,7 +408,7 @@
       "transcript_language": "en",
       "transcript_source": "gemini_video",
       "transcript_stored": true,
-      "updated_at": "2026-09-18T07:29:26+00:00",
+      "updated_at": "2026-09-18T16:13:44+00:00",
       "video_id": "2pZNFiDvlWM",
       "video_title": "Why Is CAVA Stock Crashing, and is it a Buying Opportunity?"
     },

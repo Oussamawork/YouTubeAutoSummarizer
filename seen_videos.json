@@ -38,9 +38,37 @@
     }
   },
   "pending": {
+    "2UK3qgfs894": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
     "7ANm28rrZwE": {
       "attempts": 0,
       "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
+    },
+    "8RVMcu8FMLI": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
+    "AdAiP883fJw": {
+      "attempts": 0,
+      "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
+    },
+    "QRKgH0yx94s": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
+    "U0uCQJt_Ap0": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
+    "U5fp-wMPf18": {
+      "attempts": 0,
+      "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ"
+    },
+    "dFEFBi7Qfv4": {
+      "attempts": 0,
+      "channel_id": "UCrGLm-Drgv0vbbemwwHeXJw"
     }
   }
 }
