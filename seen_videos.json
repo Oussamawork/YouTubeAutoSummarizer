@@ -33,9 +33,18 @@
       "last_video_id": "wcWwlfBQ3eI"
     },
     "UCwKB_00dPL3x5XmHF9IJCrg": {
-      "last_published": "2026-09-19T14:45:09+00:00",
-      "last_video_id": "76L31hNjvZ8"
+      "last_published": "2026-09-20T12:45:06+00:00",
+      "last_video_id": "m13PZSlTUZA"
     }
   },
-  "pending": {}
+  "pending": {
+    "Dt0_MWNPBkk": {
+      "attempts": 0,
+      "channel_id": "UC_niVs5ITmD-qgnxph8CohA"
+    },
+    "tu84cNS_1s0": {
+      "attempts": 0,
+      "channel_id": "UCrGLm-Drgv0vbbemwwHeXJw"
+    }
+  }
 }
