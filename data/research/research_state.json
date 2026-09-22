@@ -5666,7 +5666,7 @@
       "extraction_model": null,
       "extraction_prompt_version": "2",
       "failed_chunk_ids": [],
-      "failure_reason": "llm_quota",
+      "failure_reason": "summary_reserve_protected",
       "last_attempt_at": null,
       "next_eligible_at": null,
       "normalization_version": "1",
@@ -5688,7 +5688,7 @@
       "transcript_language": "en",
       "transcript_source": "supadata",
       "transcript_stored": true,
-      "updated_at": "2026-09-22T07:55:41+00:00",
+      "updated_at": "2026-09-22T16:42:46+00:00",
       "video_id": "ssPzqhIDAlE",
       "video_title": "Nike Stock: Buy or Sell? | My Final Verdict | NKE Stock Deep Dive Part 5"
     },
