@@ -1,0 +1,97 @@
+{
+ "fixture_id": "btc-conditional-range",
+ "channel_name": "Demo Crypto",
+ "video_title": "Bitcoin into year end",
+ "published_at": "2026-08-10T16:00:00+00:00",
+ "transcript": "So here is my base case. If the Fed cuts in September, I see Bitcoin between 150 and 180 thousand next year. If it breaks below 90k I would sell everything, that is my line in the sand. Last year I said Bitcoin would double, and it did. And to be clear, I'm long Bitcoin.",
+ "expected_claims": [
+  {
+   "evidence_text": "If the Fed cuts in September, I see Bitcoin between 150 and 180 thousand next year",
+   "subject": "BTC",
+   "claim_type": "price_target",
+   "attribution_type": "speaker_personal_view",
+   "target_low": 150000,
+   "target_high": 180000,
+   "horizon_bucket": "long",
+   "ticker": "BTC",
+   "testability_type": "conditional_testable",
+   "condition_status": "not_evaluated"
+  },
+  {
+   "evidence_text": "If it breaks below 90k I would sell everything",
+   "subject": "BTC",
+   "claim_type": "recommendation",
+   "attribution_type": "speaker_personal_view",
+   "recommendation_action": "sell",
+   "ticker": "BTC",
+   "entity_resolution_method": "local_coreference"
+  },
+  {
+   "evidence_text": "Last year I said Bitcoin would double, and it did",
+   "subject": "BTC",
+   "claim_type": "historical_claim",
+   "attribution_type": "retrospective_claim"
+  },
+  {
+   "evidence_text": "I'm long Bitcoin",
+   "subject": "BTC",
+   "claim_type": "portfolio_disclosure",
+   "portfolio_disclosure": "long",
+   "stance": "not_applicable"
+  }
+ ],
+ "model_output": {
+  "claims": [
+   {
+    "attribution_type": "speaker_personal_view",
+    "claim_type": "price_target",
+    "is_forward_looking": true,
+    "subject_mention": "Bitcoin",
+    "asset_type": "crypto",
+    "stance": "bullish",
+    "target_kind": "range",
+    "target_low": 150000,
+    "target_high": 180000,
+    "currency": "USD",
+    "horizon_original": "next year",
+    "condition": "if the Fed cuts in September",
+    "certainty_original": "I see",
+    "certainty_level": "medium",
+    "evidence_text": "If the Fed cuts in September, I see Bitcoin between 150 and 180 thousand next year",
+    "extraction_confidence": "high"
+   },
+   {
+    "attribution_type": "speaker_personal_view",
+    "claim_type": "recommendation",
+    "is_forward_looking": true,
+    "subject_mention": "it",
+    "asset_type": "crypto",
+    "stance": "bearish",
+    "recommendation_action": "sell",
+    "condition": "if it breaks below 90k",
+    "evidence_text": "If it breaks below 90k I would sell everything",
+    "extraction_confidence": "medium"
+   },
+   {
+    "attribution_type": "retrospective_claim",
+    "claim_type": "historical_claim",
+    "is_forward_looking": false,
+    "subject_mention": "Bitcoin",
+    "asset_type": "crypto",
+    "evidence_text": "Last year I said Bitcoin would double, and it did",
+    "extraction_confidence": "high"
+   },
+   {
+    "attribution_type": "speaker_personal_view",
+    "claim_type": "portfolio_disclosure",
+    "is_forward_looking": false,
+    "subject_mention": "Bitcoin",
+    "asset_type": "crypto",
+    "portfolio_disclosure": "long",
+    "stance": "not_applicable",
+    "evidence_text": "I'm long Bitcoin",
+    "extraction_confidence": "high"
+   }
+  ]
+ }
+}

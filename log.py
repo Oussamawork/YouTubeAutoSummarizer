@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 
 import colorama
 from colorama import Fore, Style
@@ -46,5 +47,29 @@ def log_warn(message):
     _logger.warning(message)
 
 
-def log_error(message):
-    _logger.error(message)
+def log_error(message, exc_info=False):
+    """Log an error; `exc_info=True` appends the current traceback, for the
+    catch-all handlers whose one-line message otherwise hides the cause."""
+    _logger.error(message, exc_info=exc_info)
+
+
+# Credentials travel in URLs: the Telegram bot token is a path segment and the
+# YouTube API key a query parameter. `requests` embeds the request URL in its
+# exception text, so a naive f"{e}" prints them. GitHub Actions masks exact
+# secret values in its logs, but a local run or a copied log line does not.
+_SECRET_PATTERNS = (
+    re.compile(r"/bot[0-9]+:[A-Za-z0-9_-]+"),
+    re.compile(r"([?&](?:key|apikey|api_key)=)[^&\s'\"]+", re.IGNORECASE),
+)
+
+
+def redact(text):
+    """`text` with bot tokens and API keys replaced by a placeholder."""
+    text = str(text)
+    text = _SECRET_PATTERNS[0].sub("/bot<redacted>", text)
+    return _SECRET_PATTERNS[1].sub(r"\1<redacted>", text)
+
+
+def describe_error(exc):
+    """A redacted one-line description of an exception, for log messages."""
+    return f"{type(exc).__name__}: {redact(exc)}"

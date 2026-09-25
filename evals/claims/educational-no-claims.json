@@ -1,0 +1,11 @@
+{
+ "fixture_id": "educational-no-claims",
+ "channel_name": "Demo Educator",
+ "video_title": "What is a P/E ratio?",
+ "published_at": "2026-08-12T09:00:00+00:00",
+ "transcript": "Let me explain what a price to earnings ratio is. A P/E of 20 means that you are paying 20 dollars for every dollar of earnings. Historically the S&P 500 has returned about 10 percent per year, and in 2022 it fell about 19 percent. For example, imagine a company earning 5 dollars per share trading at 100 dollars. That is a P/E of 20. Thanks for watching.",
+ "expected_claims": [],
+ "model_output": {
+  "claims": []
+ }
+}

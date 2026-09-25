@@ -84,10 +84,10 @@ def test_read_channels_plain_and_options(tmp_path):
         "UCboth digest max=2\n"
     )
     assert helpers.read_channels(str(p)) == [
-        {"channel_id": "UCplain", "digest": False, "max_per_run": None, "only": []},
-        {"channel_id": "UCdigest", "digest": True, "max_per_run": None, "only": []},
-        {"channel_id": "UCcapped", "digest": False, "max_per_run": 5, "only": []},
-        {"channel_id": "UCboth", "digest": True, "max_per_run": 2, "only": []},
+        {"channel_id": "UCplain", "digest": False, "max_per_run": None, "only": [], "language": None},
+        {"channel_id": "UCdigest", "digest": True, "max_per_run": None, "only": [], "language": None},
+        {"channel_id": "UCcapped", "digest": False, "max_per_run": 5, "only": [], "language": None},
+        {"channel_id": "UCboth", "digest": True, "max_per_run": 2, "only": [], "language": None},
     ]
 
 
@@ -96,7 +96,7 @@ def test_read_channels_ignores_bad_options(tmp_path):
     p = tmp_path / "channels.txt"
     p.write_text("UCx digset max=oops\n")
     assert helpers.read_channels(str(p)) == [
-        {"channel_id": "UCx", "digest": False, "max_per_run": None, "only": []}
+        {"channel_id": "UCx", "digest": False, "max_per_run": None, "only": [], "language": None}
     ]
 
 
@@ -209,3 +209,22 @@ def test_read_channels_parses_only_option(tmp_path):
     assert channels[1]["only"] == ["eth", "solana"] and channels[1]["max_per_run"] == 2
     assert channels[2]["only"] == []
     assert channels[3]["only"] == []
+
+
+def test_read_channels_parses_lang_option(tmp_path):
+    path = tmp_path / "channels.txt"
+    path.write_text("UC1 lang=de\nUC2 LANG=en-US digest\nUC3 lang=english\nUC4\n", encoding="utf-8")
+    channels = helpers.read_channels(str(path))
+    assert channels[0]["language"] == "de"
+    assert channels[1]["language"] == "en" and channels[1]["digest"] is True
+    assert channels[2]["language"] is None          # malformed: logged, channel kept
+    assert channels[3]["language"] is None          # unset: pipeline default applies
+
+
+def test_env_str_list(monkeypatch):
+    monkeypatch.delenv("X_LIST", raising=False)
+    assert helpers.env_str_list("X_LIST", ("en", "de")) == ["en", "de"]
+    monkeypatch.setenv("X_LIST", "")
+    assert helpers.env_str_list("X_LIST", ("en",)) == ["en"]
+    monkeypatch.setenv("X_LIST", " De, en ,de,, ")
+    assert helpers.env_str_list("X_LIST", ()) == ["de", "en"]

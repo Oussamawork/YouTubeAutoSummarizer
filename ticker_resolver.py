@@ -24,6 +24,9 @@ import re
 from difflib import SequenceMatcher
 from datetime import datetime, timezone
 
+import channel_scorecard as cs
+import summarizer
+from helpers import write_json_atomic
 from log import log_info, log_warn
 
 # How alike two words must be to count as the same name. 0.8 sits between the
@@ -112,14 +115,8 @@ def load(path=MAP_FILE):
 
 def save(entries, path=MAP_FILE):
     """Write the learned map. Returns True on success; never raises."""
-    try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"version": MAP_VERSION, "tickers": dict(sorted(entries.items()))},
-                      f, indent=1, sort_keys=True)
-            f.write("\n")
-    except OSError as e:
-        log_warn(f"Could not write the ticker map to {path}: {e}")
+    payload = {"version": MAP_VERSION, "tickers": dict(sorted(entries.items()))}
+    if not write_json_atomic(path, payload, indent=1):
         return False
     resolved = sum(1 for e in entries.values() if e.get("ticker"))
     log_info(f"Ticker map saved: {resolved} resolved, {len(entries) - resolved} unlisted.")
@@ -202,7 +199,6 @@ def search_candidates(query, api_key, searcher=None, recorded_ticker=None,
                       asset_name=None):
     """Usable listings for a query, best match first."""
     if searcher is None:
-        import channel_scorecard as cs
         searcher = cs.search_symbols
     rows = [row for row in (searcher(query, api_key) or [])
             if _usable_listing(row, recorded_ticker)]
@@ -226,7 +222,6 @@ def llm_candidates(asset_name, recorded_ticker=None, completer=None):
     this company. Returns [] on any failure or quota exhaustion.
     """
     if completer is None:
-        import summarizer
         completer = summarizer.complete
     prompt = f"Company as heard in the video: {asset_name!r}."
     if recorded_ticker:
@@ -292,10 +287,8 @@ def resolve(asset_name, recorded_ticker, api_key, searcher=None, completer=None)
                     return entry(symbol, row, "search")
                 if names_match(asset_name, row.get("instrument_name")):
                     return entry(symbol, row, "search")
-    except Exception as e:
-        if type(e).__name__ == "SearchUnavailable":
-            return entry(None, None, "unchecked")
-        raise
+    except cs.SearchUnavailable:
+        return entry(None, None, "unchecked")
 
     # 2. Let the model propose, then verify each proposal against the
     #    catalogue — both that the ticker exists and that it is this company.
@@ -308,10 +301,8 @@ def resolve(asset_name, recorded_ticker, api_key, searcher=None, completer=None)
             rows = search_candidates(candidate, api_key, searcher=searcher,
                                      recorded_ticker=recorded_ticker,
                                      asset_name=asset_name)
-        except Exception as e:
-            if type(e).__name__ == "SearchUnavailable":
-                return entry(None, None, "unchecked")
-            raise
+        except cs.SearchUnavailable:
+            return entry(None, None, "unchecked")
         for row in rows:
             if row.get("symbol", "").upper() != candidate:
                 continue

@@ -68,3 +68,38 @@ def _isolated_ticker_map():
     market_pulse.reset_learned_tickers({})
     yield
     market_pulse.reset_learned_tickers(None)
+
+
+@pytest.fixture(autouse=True)
+def _offline_model_metadata(tmp_path, monkeypatch):
+    """No live capability or token-count lookups in tests, and every research
+    data product goes to a scratch directory.
+
+    The live paths hit generativelanguage.googleapis.com; the registry and the
+    conservative estimate are what the suite exercises. Research state,
+    transcripts, partials and the capability cache are committed data in
+    production, so a test must never read or write the real files.
+    """
+    import model_capabilities
+    import research_state
+    import signals
+    import summarizer
+    import token_budget
+    import transcript_store
+
+    monkeypatch.setattr(model_capabilities, "LIVE_CAPABILITIES", False)
+    monkeypatch.setattr(model_capabilities, "CAPABILITIES_CACHE_FILE",
+                        str(tmp_path / "model_capabilities.json"))
+    model_capabilities.reset_cache()
+    monkeypatch.setattr(token_budget, "LIVE_COUNT_TOKENS", False)
+    token_budget.reset_count_cache()
+    monkeypatch.setattr(research_state, "RESEARCH_DIR", str(tmp_path / "research"))
+    monkeypatch.setattr(transcript_store, "TRANSCRIPTS_DIR", str(tmp_path / "transcripts"))
+    monkeypatch.setattr(transcript_store, "TRANSCRIPT_INDEX",
+                        str(tmp_path / "research" / "transcript_records.jsonl"))
+    monkeypatch.setattr(summarizer, "PARTIALS_DIR", str(tmp_path / "partials"))
+    monkeypatch.setattr(scraper, "SIGNALS_FILE", str(tmp_path / "signals.jsonl"))
+    monkeypatch.setattr(signals, "EXHAUSTIVE_RESEARCH_MODE", False)
+    yield
+    model_capabilities.reset_cache()
+    token_budget.reset_count_cache()

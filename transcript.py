@@ -7,7 +7,8 @@ from urllib.parse import urlparse, parse_qs
 
 import requests
 import gemini_quota
-from helpers import env_flag, env_int
+import language_detect
+from helpers import env_flag, env_int, write_json_atomic
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
@@ -141,16 +142,10 @@ def _load_usage(today=None):
 
 
 def _save_usage(usage):
-    try:
-        directory = os.path.dirname(SUPADATA_USAGE_FILE)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(SUPADATA_USAGE_FILE, "w", encoding="utf-8") as f:
-            json.dump(usage, f, indent=2)
-    except OSError as e:
-        # Losing a counter update is better than losing the run; the worst case
-        # is over-counting next run, which errs toward saving credits.
-        log_warn(f"Could not persist Supadata usage: {e}")
+    # Atomic, like the dedup state: a counter file truncated by a crash reads
+    # as "nothing spent" and authorises draining the pool. Losing one update
+    # is better than losing the run, so a failure is logged, never raised.
+    write_json_atomic(SUPADATA_USAGE_FILE, usage, sort_keys=False)
 
 
 def _record_call(usage):
@@ -197,6 +192,58 @@ def budget_status(today=None):
     )
 
 
+# --- Provider-side exhaustion ------------------------------------------------
+#
+# The meter above counts what this pipeline spent; the provider counts what the
+# plan allows, and the two disagree. From 2026-09-10 every key answered every
+# request with 429 "limit-exceeded" while the local meter still showed 184 of
+# 300 credits left, so each video cost three rejected calls (with retries and
+# backoff) before falling through to Gemini — 243 wasted requests in five days
+# and minutes of run time. So a verdict from the provider is remembered: once
+# EVERY key has said "limit-exceeded" for one video, Supadata is skipped for
+# the rest of the day, re-probed with the first video of each following day
+# (one video's worth of calls, so a top-up or an earlier reset is noticed
+# within a day), and forgotten at the cycle rollover or when the key set
+# changes.
+
+
+def _provider_spent(usage, keys):
+    """The remembered "every key answered limit-exceeded" verdict while it
+    still applies (same cycle, same number of keys, already re-checked
+    today), else None."""
+    spent = usage.get("provider_spent")
+    if not isinstance(spent, dict):
+        return None
+    if spent.get("cycle") != usage.get("cycle") or spent.get("keys") != len(keys):
+        return None
+    if spent.get("checked_day") != usage.get("day"):
+        return None
+    return spent
+
+
+def _mark_provider_spent(usage, keys):
+    previous = usage.get("provider_spent") if isinstance(usage.get("provider_spent"), dict) else {}
+    same_cycle = previous.get("cycle") == usage.get("cycle")
+    usage["provider_spent"] = {
+        "cycle": usage.get("cycle"),
+        "keys": len(keys),
+        "first_day": previous.get("first_day") if same_cycle and previous.get("first_day") else usage.get("day"),
+        "checked_day": usage.get("day"),
+    }
+    _save_usage(usage)
+
+
+def _clear_provider_spent(usage):
+    if usage.pop("provider_spent", None) is not None:
+        _save_usage(usage)
+
+
+def provider_spent_status(today=None):
+    """The remembered provider verdict for the run log, or None."""
+    usage = _load_usage(today or datetime.now(timezone.utc).date())
+    return _provider_spent(usage, _supadata_keys())
+
+
 # --- Gemini video transcripts -----------------------------------------------
 #
 # Supadata's free tier runs dry (it did on 2026-08-11, and the pipeline went
@@ -230,7 +277,7 @@ GEMINI_TRANSCRIPT_MAX_OUTPUT_TOKENS = env_int("GEMINI_TRANSCRIPT_MAX_OUTPUT_TOKE
 # this set: it used to keep its own hand-written copy, and when `gemini_ok` was
 # added here the copy was not updated, so every Gemini success was counted and
 # reported as a transcript failure.
-TRANSCRIPT_SUCCESS_REASONS = frozenset({"ok", "gemini_ok", "fallback_ok"})
+TRANSCRIPT_SUCCESS_REASONS = frozenset({"ok", "gemini_ok", "fallback_ok", "stored"})
 # Google rejects an over-long video with a 400 naming the context window. Every
 # Gemini model here shares that 1,048,576-token window, so the rotation cannot
 # rescue it — trying the rest only spends requests to be told the same thing.
@@ -252,6 +299,17 @@ GEMINI_TRANSCRIPT_PROMPT = (
     "text. Do not summarize, do not paraphrase, do not add commentary, "
     "speaker labels or timestamps. Output only the transcript text."
 )
+
+
+def _gemini_transcript_prompt(languages=None):
+    """The transcription prompt, naming the language(s) the channel speaks so
+    the model transcribes the original audio rather than a dubbed track and
+    never translates."""
+    if not languages:
+        return GEMINI_TRANSCRIPT_PROMPT
+    names = language_detect.language_names(languages)
+    return (GEMINI_TRANSCRIPT_PROMPT + f" The speech is in {names}: transcribe it in that "
+            "language exactly as spoken. Do not translate.")
 
 
 def _gemini_transcript_models():
@@ -277,7 +335,7 @@ def _gemini_text_from_payload(data):
     return "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
 
 
-def _fetch_gemini_with_model(vid, model, api_key):
+def _fetch_gemini_with_model(vid, model, api_key, languages=None):
     """
     One model's attempt at transcribing a video. Returns (text, reason); an
     empty text with reason "quota" means this model's daily requests are spent,
@@ -285,7 +343,7 @@ def _fetch_gemini_with_model(vid, model, api_key):
     """
     payload = {
         "contents": [{"parts": [
-            {"text": GEMINI_TRANSCRIPT_PROMPT},
+            {"text": _gemini_transcript_prompt(languages)},
             {"file_data": {"file_uri": f"https://www.youtube.com/watch?v={vid}"}},
         ]}],
         "generationConfig": {
@@ -356,7 +414,7 @@ def _fetch_gemini_with_model(vid, model, api_key):
     return "", "retries_exhausted"
 
 
-def _fetch_gemini_transcript(vid):
+def _fetch_gemini_transcript(vid, languages=None):
     """
     Transcribe a video with the first model that can. Returns
     (text, quota_exhausted, reason): quota_exhausted is True when every model
@@ -382,7 +440,7 @@ def _fetch_gemini_transcript(vid):
         # the verdict has lapsed. Remember that, because how the probe turns out
         # decides whether this is a budget problem or a broken video.
         reprobe = gemini_quota.written_off(model)
-        text, reason = _fetch_gemini_with_model(vid, model, api_key)
+        text, reason = _fetch_gemini_with_model(vid, model, api_key, languages)
         if text:
             gemini_quota.record(model)
             return text, False, "gemini_ok"
@@ -463,11 +521,14 @@ def _extract_video_id(video_url_or_id):
     return ""
 
 
-def _fetch_youtube_transcript_api(vid):
-    """Fallback source: scrape captions directly. Returns "" on any failure."""
+def _fetch_youtube_transcript_api(vid, languages=None):
+    """Fallback source: scrape captions directly, in one of the channel's
+    languages (the library picks an original or auto-generated track in that
+    language and never a translation). Returns "" on any failure."""
     try:
         log_info(f"Fetching transcript via youtube-transcript-api for video ID: {vid}")
-        fetched = YouTubeTranscriptApi().fetch(vid)
+        api = YouTubeTranscriptApi()
+        fetched = api.fetch(vid, languages=list(languages)) if languages else api.fetch(vid)
         text = " ".join(snippet.text for snippet in fetched).strip()
         log_info(f"youtube-transcript-api returned {len(text)} chars")
         return text
@@ -499,6 +560,28 @@ def _supadata_text_from_payload(data):
     return ""
 
 
+def _supadata_languages_from_payload(data):
+    """(language of the served track, [languages of the tracks the video
+    has]) from a Supadata body — both may be empty when the body carries
+    neither. Tags are normalized to ISO 639-1."""
+    if not isinstance(data, dict):
+        return "", []
+    served = language_detect.normalize_code(data.get("lang"))
+    if not served:
+        content = data.get("content")
+        if isinstance(content, list):
+            for seg in content:
+                if isinstance(seg, dict) and seg.get("lang"):
+                    served = language_detect.normalize_code(seg.get("lang"))
+                    break
+    available = []
+    for tag in data.get("availableLangs") or []:
+        code = language_detect.normalize_code(tag)
+        if code and code not in available:
+            available.append(code)
+    return served, available
+
+
 def _is_credit_exhausted(resp):
     """
     True when a response means "this key's credit pool is spent" (rotate to the
@@ -519,7 +602,7 @@ def _is_credit_exhausted(resp):
     return isinstance(error, str) and error.strip().lower() in SUPADATA_CREDIT_ERRORS
 
 
-def _fetch_supadata(vid):
+def _fetch_supadata(vid, languages=None):
     """
     Primary source: Supadata hosted API (free tier). Server-side fetch, so it
     works from blocked CI IPs. Returns (text, budget_exhausted, reason): text is
@@ -529,12 +612,23 @@ def _fetch_supadata(vid):
     short tag naming what happened, so a run can report *why* fetches failed
     rather than only how often.
     Uses mode=native so only existing captions are returned (no paid AI generation).
+    `languages` are the codes the channel speaks: the request asks for that
+    track and a served track in any other language is refused
+    (reason language_mismatch) — see _fetch_supadata_with_key.
     """
     keys = _supadata_keys()
     if not keys:
         return "", False, "no_key"
 
     usage = _load_usage()
+    spent = _provider_spent(usage, keys)
+    if spent:
+        log_warn(
+            f"Supadata reported its plan limit on all {spent['keys']} key(s) (since "
+            f"{spent['first_day']}, re-checked {spent['checked_day']}); skipping it for "
+            f"{vid} — next re-check tomorrow or at the cycle reset."
+        )
+        return "", True, "no_credits"
     allowance = daily_allowance(usage)
     if usage.get("day_count", 0) >= allowance:
         remaining = max(0, monthly_budget() - usage.get("count", 0))
@@ -551,45 +645,98 @@ def _fetch_supadata(vid):
     # is a key answering "this video has no captions" — it worked, its answer is
     # authoritative, and asking the other keys would just spend their credits to
     # be told the same thing.
-    saw_credit_failure = False
+    credit_failures = 0
     reason = "no_credits"
     for index, key in enumerate(keys):
-        served, text, reason = _fetch_supadata_with_key(vid, key, usage)
+        served, text, reason = _fetch_supadata_with_key(vid, key, usage, languages)
         if served:
+            _clear_provider_spent(usage)
             return text, False, reason
-        saw_credit_failure = saw_credit_failure or reason == "no_credits"
+        credit_failures += reason == "no_credits"
         if index + 1 < len(keys):
             log_warn(f"Supadata key {index + 1} failed ({reason}); trying key {index + 2}.")
 
     # Out of credits is exhaustion, not a video without captions: report it as
     # such so the caller defers instead of eventually writing the video off as
-    # untranscribable.
-    if saw_credit_failure:
+    # untranscribable. When EVERY key said so, remember it (see
+    # _provider_spent) so the next videos skip straight to the next source
+    # instead of repeating three rejected calls each; a key that merely failed
+    # some other way (unreachable, 5xx) keeps the door open.
+    if credit_failures:
         log_warn(
             f"All {len(keys)} Supadata key(s) failed and at least one is out of "
             f"credits; deferring this video."
         )
+        if credit_failures == len(keys):
+            _mark_provider_spent(usage, keys)
+            log_warn(
+                f"Every Supadata key reports its plan limit; Supadata is skipped for "
+                f"the rest of today and re-probed with the first video tomorrow."
+            )
         return "", True, "no_credits"
     log_warn(f"All {len(keys)} Supadata key(s) failed (last: {reason}).")
     return "", False, reason
 
 
-def _fetch_supadata_with_key(vid, api_key, usage):
+def _fetch_supadata_with_key(vid, api_key, usage, languages=None):
     """
-    One key's attempt at a transcript. Returns (served, text, reason): `served`
-    is True when this key gave an answer worth accepting — a transcript, or an
+    One key's attempt at a transcript. Returns (served, text, reason): served
+    is True when the key answered authoritatively — a transcript, or an
     authoritative "this video has no captions" — and False for every failure,
-    which tells the caller to rotate to the next key. `reason` names the outcome
-    for run diagnostics. Only requests that consume a credit are metered.
+    which tells the caller to rotate to the next key. `reason` names the
+    outcome for run diagnostics. Only requests that consume a credit are metered.
+
+    Language: YouTube keeps translated and auto-dubbed caption tracks beside
+    the original and Supadata serves whichever it picks unless told which.
+    When the channel's language is configured (one code) the request names
+    it. Whatever comes back is verified (the body's `lang` tag plus the text
+    itself); a track in another language is not a transcript of this video
+    for this pipeline. If the body lists an acceptable track the video does
+    have, ONE more request (one more credit) asks for it by code; otherwise
+    the key reports language_mismatch and the caller moves to the next
+    source, which transcribes the audio itself.
     """
     headers = {"x-api-key": api_key}
+    accepted = language_detect.normalize_languages(languages)
     params = {
         "url": f"https://www.youtube.com/watch?v={vid}",
         "text": "true",
         "mode": "native",
     }
-    log_info(f"Fetching transcript via Supadata for video ID: {vid}")
+    if languages and len(accepted) == 1:
+        params["lang"] = accepted[0]
+    log_info(f"Fetching transcript via Supadata for video ID: {vid}"
+             + (f" (lang={params['lang']})" if "lang" in params else ""))
 
+    tried = set()
+    for _round in range(2):
+        tried.add(params.get("lang"))
+        served, text, reason, payload = _supadata_request(vid, headers, params, usage)
+        if not served or not text:
+            return served, text, reason
+        reported, available = _supadata_languages_from_payload(payload)
+        verdict = language_detect.verify_language(text, accepted, reported=reported)
+        if verdict["ok"]:
+            return True, text, "ok"
+        log_warn(
+            f"Supadata served a {verdict['language']} track for {vid} ({verdict['reason']}); "
+            f"this channel speaks {', '.join(accepted)}."
+        )
+        retry = next((code for code in accepted if code in available and code not in tried), None)
+        if retry is None:
+            break
+        log_info(f"Video {vid} also has a {retry} track; requesting it (one more credit).")
+        params["lang"] = retry
+    return True, "", "language_mismatch"
+
+
+def _supadata_request(vid, headers, params, usage):
+    """
+    One Supadata request with transient-error retries. Returns
+    (served, text, reason, payload): `served`/`text`/`reason` as in
+    _fetch_supadata_with_key, `payload` the decoded 200 body (or the async
+    job's final body) so the caller can read the track's language.
+    """
     for attempt in range(1, SUPADATA_MAX_RETRIES + 1):
         try:
             resp = requests.get(SUPADATA_URL, headers=headers, params=params, timeout=SUPADATA_TIMEOUT)
@@ -599,13 +746,13 @@ def _fetch_supadata_with_key(vid, api_key, usage):
                 time.sleep(SUPADATA_RETRY_BACKOFF * attempt)
                 continue
             log_error("Supadata unreachable after retries.")
-            return False, "", "unreachable"
+            return False, "", "unreachable", None
 
         # Out of credits on this key: rotate rather than retry. Nothing was
         # delivered, so this must not be metered.
         if _is_credit_exhausted(resp):
             log_warn(f"Supadata key rejected ({resp.status_code}): {resp.text[:120]}")
-            return False, "", "no_credits"
+            return False, "", "no_credits", None
 
         # Meter only answers that consume a credit — a served transcript (200)
         # or an accepted async job (202). Counting rejections and transient
@@ -621,26 +768,27 @@ def _fetch_supadata_with_key(vid, api_key, usage):
                 job_id = None
             if not job_id:
                 log_warn("Supadata returned 202 without a jobId.")
-                return False, "", "job_no_id"
-            job_text = _poll_supadata_job(job_id, headers)
+                return False, "", "job_no_id", None
+            job_text, job_payload = _poll_supadata_job(job_id, headers)
             if job_text:
-                return True, job_text, "ok"
-            return False, "", "job_incomplete"
+                return True, job_text, "ok", job_payload
+            return False, "", "job_incomplete", None
 
         if resp.status_code == 200:
             try:
-                text = _supadata_text_from_payload(resp.json())
+                payload = resp.json()
             except ValueError as e:
                 log_error(f"Supadata returned invalid JSON: {e}")
-                return False, "", "invalid_json"
+                return False, "", "invalid_json", None
+            text = _supadata_text_from_payload(payload)
             if not text:
                 # 200 with no content is Supadata saying "this video has no
                 # captions I can serve" — the single most useful thing to
                 # distinguish, since it is a wasted credit by definition.
                 log_warn(f"Supadata returned 200 but no transcript content for {vid}.")
-                return True, "", "empty_content"
+                return True, "", "empty_content", payload
             log_info(f"Supadata returned {len(text)} chars")
-            return True, text, "ok"
+            return True, text, "ok", payload
 
         # Retry transient server/rate-limit errors; give up on anything else.
         if resp.status_code in SUPADATA_TRANSIENT_STATUS and attempt < SUPADATA_MAX_RETRIES:
@@ -652,13 +800,14 @@ def _fetch_supadata_with_key(vid, api_key, usage):
             continue
 
         log_warn(f"Supadata returned {resp.status_code}: {resp.text[:200]}")
-        return False, "", f"http_{resp.status_code}"
+        return False, "", f"http_{resp.status_code}", None
 
-    return False, "", "retries_exhausted"
+    return False, "", "retries_exhausted", None
 
 
 def _poll_supadata_job(job_id, headers):
-    """Poll an async Supadata job until it completes, fails, or attempts run out."""
+    """Poll an async Supadata job until it completes, fails, or attempts run
+    out. Returns (text, payload) — ("", None) when nothing was delivered."""
     job_url = f"{SUPADATA_URL}/{job_id}"
     for attempt in range(SUPADATA_POLL_ATTEMPTS):
         time.sleep(SUPADATA_POLL_DELAY)
@@ -671,52 +820,85 @@ def _poll_supadata_job(job_id, headers):
             status = data.get("status")
             if status == "failed":
                 log_warn(f"Supadata job {job_id} failed.")
-                return ""
+                return "", None
             text = _supadata_text_from_payload(data)
             if text:
                 log_info(f"Supadata job {job_id} completed with {len(text)} chars")
-                return text
+                return text, data
             log_info(f"Supadata job {job_id} not ready (attempt {attempt + 1}).")
         except Exception as e:
             log_warn(f"Supadata job poll error: {e}")
     log_warn(f"Supadata job {job_id} did not complete in time.")
-    return ""
+    return "", None
 
 
-def get_transcript_from_video(video_id):
+def get_transcript_from_video(video_id, languages=None):
     """
-    Fetch the transcript for a YouTube video.
+    Fetch the transcript for a YouTube video, in one of `languages` (ISO
+    639-1 codes: the channel's configured language, else
+    language_detect.DEFAULT_LANGUAGES).
 
     Sources are tried cheapest-first: Supadata (one credit, ~9k tokens of
     transcript), then Gemini from the video itself (no credit, but ~123k tokens
     and one request from a per-model daily quota), then youtube-transcript-api
-    (free, no key, works locally — but IP-blocked from CI runners).
+    (free, no key, works locally — but IP-blocked from CI runners). Every
+    source's text is verified (`language_detect.verify_language`): a track in
+    another language — a translation or auto-dub YouTube keeps beside the
+    original — is refused and the next source tried, because a summary or
+    claim mined from it is not what the channel said.
 
     `video_id` may be a full URL or a bare ID. Always returns a dict shaped
-    {"transcript": <str>, "budget_exhausted": <bool>, "reason": <str>} so
-    callers never have to handle exceptions or None; an empty transcript means
-    none was available, budget_exhausted marks the "every source we metered is
-    spent" case (retry later rather than report as missing), and reason names
-    the outcome so a run can report why fetches failed.
+    {"transcript": <str>, "budget_exhausted": <bool>, "reason": <str>,
+    "language": <code | "unknown" | None>, "language_check": <dict | None>}
+    so callers never have to handle exceptions or None; an empty transcript
+    means none was available (reason "language_mismatch" when every source
+    only had the wrong language), budget_exhausted marks the "every source we
+    metered is spent" case (retry later rather than report as missing), and
+    reason names the outcome so a run can report why fetches failed.
     """
     vid = _extract_video_id(video_id)
     if not vid:
         log_warn("No valid video ID; cannot fetch transcript.")
-        return {"transcript": "", "budget_exhausted": False, "reason": "bad_video_id"}
+        return {"transcript": "", "budget_exhausted": False, "reason": "bad_video_id",
+                "language": None, "language_check": None}
+    accepted = language_detect.normalize_languages(languages)
+    checks = []
 
-    text, budget_exhausted, reason = _fetch_supadata(vid)
+    def accept(text, source):
+        """The text when it is in an accepted language, else "" (logged)."""
+        if not text:
+            return ""
+        verdict = language_detect.verify_language(text, accepted)
+        checks.append(dict(verdict, source=source))
+        if verdict["ok"]:
+            return text
+        log_warn(
+            f"{source} transcript for {vid} is {verdict['language']} ({verdict['reason']}); "
+            f"this channel speaks {', '.join(accepted)}. Trying the next source."
+        )
+        return ""
+
+    text, budget_exhausted, reason = _fetch_supadata(vid, accepted)
+    text = accept(text, "supadata")
+    if not text and checks and reason == "ok":
+        reason = "language_mismatch"
     if not text:
-        gemini_text, gemini_quota, gemini_reason = _fetch_gemini_transcript(vid)
+        # Not named `gemini_quota`: that is the imported module, and a local
+        # of the same name would shadow it for the rest of this function.
+        gemini_text, gemini_spent, gemini_reason = _fetch_gemini_transcript(vid, accepted)
+        gemini_text = accept(gemini_text, "gemini")
         if gemini_text:
             text, reason = gemini_text, gemini_reason
+        elif gemini_reason == "gemini_ok":
+            reason = "language_mismatch"
         elif gemini_reason != "no_gemini_key":
             # Gemini actually tried, so its outcome is the more informative one.
             # Its quota being spent defers the video just like Supadata's is:
             # the transcript exists, we simply have nothing left to spend today.
             reason = gemini_reason
-            budget_exhausted = budget_exhausted or gemini_quota
+            budget_exhausted = budget_exhausted or gemini_spent
     if not text:
-        fallback = _fetch_youtube_transcript_api(vid)
+        fallback = accept(_fetch_youtube_transcript_api(vid, accepted), "youtube_transcript_api")
         if fallback:
             text, reason = fallback, "fallback_ok"
 
@@ -725,4 +907,6 @@ def get_transcript_from_video(video_id):
     elif not budget_exhausted:
         log_warn(f"No transcript available for video {vid} from any source (reason: {reason}).")
 
-    return {"transcript": text, "budget_exhausted": budget_exhausted, "reason": reason}
+    check = checks[-1] if checks else None
+    return {"transcript": text, "budget_exhausted": budget_exhausted, "reason": reason,
+            "language": check["language"] if (text and check) else None, "language_check": check}

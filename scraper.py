@@ -9,20 +9,28 @@ from transcript import (
     TRANSCRIPT_SUCCESS_REASONS,
     get_transcript_from_video,
     budget_status,
+    provider_spent_status,
 )
 from helpers import (
-    read_channels, save_to_json, clean_summary, load_state, save_state, env_int,
-    env_float, append_jsonl, title_matches,
+    read_channels, clean_summary, load_state, save_state, env_int, env_float,
+    env_flag, append_jsonl, title_matches,
 )
-from signals import extract_signals, summarize_with_signals
+from signals import extract_research, summarize_with_signals
 from summarizer import (
     summarize_transcript,
     INSUFFICIENT_TRANSCRIPT_SENTINEL,
     QUOTA_EXHAUSTED_SENTINEL,
     TRUNCATED_SENTINEL,
+    LAST_CALL_TELEMETRY,
 )
-from log import log_info, log_error, log_warn, log_debug
+from log import log_info, log_error, log_warn, log_debug, redact
 import gemini_quota
+import language_detect
+import research_budget
+import research_state
+import transcript_store
+from claims import SCHEMA_VERSION, EXTRACTION_PROMPT_VERSION
+from transcript_normalize import normalize_transcript
 from sendToTelegram import (
     send_telegram_message, send_telegram_digest, send_telegram_teaser,
     send_telegram_text, build_teaser,
@@ -87,15 +95,17 @@ PENDING_RETRY_MIN_HOURS = env_float("PENDING_RETRY_MIN_HOURS", 3.0)
 # Shorts and clips rarely carry usable captions and aren't worth summarizing.
 # 0 disables the check.
 MIN_VIDEO_SECONDS = env_int("MIN_VIDEO_SECONDS", 90)
-
-
-def _env_flag(name, default=False):
-    """Boolean env flag. Unset or empty (an unconfigured GitHub Actions repo
-    variable arrives as "") falls back to `default`."""
-    value = (os.getenv(name) or "").strip().lower()
-    if not value:
-        return default
-    return value in {"1", "true", "yes", "on"}
+# Wall-clock budget for one run, in minutes. A single video can legitimately
+# take a long time (a Gemini transcript is ~2 minutes per model tried, a
+# summary up to several LLM calls), and the workflow kills the job at 45. Videos
+# not started by the deadline defer to the next run instead of being cut off
+# mid-flight, and the run still gets to flush its digests and save its state.
+# 0 disables the deadline.
+RUN_DEADLINE_MINUTES = env_float("RUN_DEADLINE_MINUTES", 35.0)
+# Raw transcripts are persisted (gzip, data/transcripts/) before any cleaning
+# so research can be reprocessed without another transcript credit. Off
+# disables only the storage; the research state then records it as unstored.
+PERSIST_TRANSCRIPTS = env_flag("PERSIST_TRANSCRIPTS", default=True)
 
 
 def _hours_since(timestamp, now=None):
@@ -426,6 +436,10 @@ def _evict_orphaned_pending(pending, channel_id, feed_video_ids):
         if isinstance(record, dict)
         and record.get("channel_id") == channel_id
         and video_id not in feed_video_ids
+        # A finished summary that Telegram has not accepted yet carries
+        # everything needed to deliver it and needs no feed entry; dropping
+        # it here would lose paid-for work.
+        and not _undelivered(record)
     ]
     for video_id in orphaned:
         pending.pop(video_id, None)
@@ -494,7 +508,7 @@ def get_latest_video(YOUTUBE_api_key, channel_id):
             log_error("YouTube API unreachable after retries.")
             return None
 
-        log_debug(f"GET request to: {response.url}")
+        log_debug(f"GET request to: {redact(response.url)}")
 
         if response.status_code == 200:
             log_debug("Received 200 OK from YouTube API")
@@ -512,12 +526,19 @@ def get_latest_video(YOUTUBE_api_key, channel_id):
             time.sleep(RETRY_BACKOFF * attempt)
             continue
 
-        log_error(f"YouTube API returned status code {response.status_code} | {response.text}")
+        log_error(f"YouTube API returned status code {response.status_code} | {response.text[:300]}")
         return None
 
 
+def _channel_languages(channel):
+    """The languages a channel's transcripts must be in: its `lang=` line
+    option when set, else the pipeline default (TRANSCRIPT_LANGUAGES)."""
+    code = (channel or {}).get("language")
+    return [code] if code else list(language_detect.DEFAULT_LANGUAGES)
+
+
 def _summarize_video(video_details, no_transcript_attempts=0, compact=False, want_signals=False,
-                     hours_since_first=None):
+                     hours_since_first=None, languages=None):
     """
     Fetch and summarize one video's transcript. `compact` requests a short
     TL;DR-style summary (for digest-mode channels) instead of a full one.
@@ -529,17 +550,24 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     request instead of two), falling back to a plain summary call if the
     combined response isn't usable.
 
-    Returns (telegram_body, outcome, decided, signals):
+    Returns (telegram_body, outcome, decided, research):
       telegram_body — text to deliver, or None when nothing should be sent yet
         (silent deferral while waiting for captions to appear);
       outcome — key for the run-summary tally;
       decided — True when the video is final (advance dedup state), False when
         it must be retried on a later run;
-      signals — extracted signals dict when the combined call produced them,
-        else None (the caller can extract separately).
+      research — the research result from the combined call (see
+        signals.build_research) when it produced one, else None (the caller
+        extracts separately, or later).
+
+    The transcript is normalized (formatting only) and, when enabled, the raw
+    text is persisted BEFORE anything else touches it. The COMPLETE normalized
+    transcript goes to the model — nothing is cut to fit.
     """
-    log_info(f"Fetching transcript for {video_details['video_url']} ...")
-    transcript = get_transcript_from_video(video_details['video_url'])
+    transcript = _stored_transcript(video_details, languages)
+    if transcript is None:
+        log_info(f"Fetching transcript for {video_details['video_url']} ...")
+        transcript = get_transcript_from_video(video_details['video_url'], languages=languages)
 
     # Check the actual transcript TEXT, not the dict (a dict is always truthy).
     transcript_text = transcript.get('transcript', '') if isinstance(transcript, dict) else ''
@@ -584,19 +612,60 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
         )
 
     video_details['transcript'] = transcript
+    video_details['transcript_source'] = (
+        transcript.get('stored_source') if transcript.get('reason') == "stored"
+        else _transcript_source(video_details.get('transcript_reason'))
+    )
     log_info("Transcript fetched successfully. Summarizing...")
-    raw_summary, signals = None, None
+
+    # Research capture happens before any destructive step: raw text on disk,
+    # then a deterministic normalization whose output is what every model
+    # call reads. Neither can block the summary — failures are recorded.
+    nt = normalize_transcript(transcript_text, video_details.get('video_id') or "")
+    video_details['normalized'] = nt
+    # The transcript's language decides which suspicious-empty rule set the
+    # research side may use (English and German are covered); recorded with
+    # the stored transcript, the claims and the research context. The fetch
+    # already verified the track is one the channel speaks; its verdict
+    # (provider tag or detection) is the language, detection the fallback.
+    verified = transcript.get("language") if isinstance(transcript, dict) else None
+    video_details['transcript_language'] = (
+        verified if verified in language_detect.SUPPORTED_LANGUAGES
+        else language_detect.detect_language(nt.text)["language"]
+    )
+    video_details['transcript_record'] = None
+    if PERSIST_TRANSCRIPTS and want_signals and video_details.get('video_id'):
+        try:
+            video_details['transcript_record'] = transcript_store.store_transcript(
+                video_details, transcript_text, video_details['transcript_source'],
+                video_details.get('transcript_reason'), language=video_details['transcript_language'],
+            )
+        except Exception as e:  # persistence is best-effort by contract
+            log_error(f"Transcript persistence failed for {video_details.get('video_id')}: {e}")
+            video_details['transcript_record'] = {"stored": False, "error": str(e)}
+    log_info(
+        f"Transcript: {nt.raw_char_count:,} raw chars, {nt.normalized_char_count:,} normalized, "
+        f"{len(nt.segments)} segment(s), flags {nt.quality_flags}."
+    )
+    transcript_text = nt.text
+
+    raw_summary, research = None, None
     if want_signals:
         # One call for both; None means "not usable" — fall back to the plain
         # summary call so a combined-format hiccup can never cost a summary.
+        # (None, research) means the combined OUTPUT was truncated by the
+        # claims array: the summary is fetched on its own below and delivered,
+        # and `research` says the claims must be extracted separately.
         combined = summarize_with_signals(
             transcript_text, video_details['video_title'], compact=compact,
             channel_name=video_details.get('channel_name'),
+            context=_research_context(video_details),
         )
         if combined is not None:
-            raw_summary, signals = combined
+            raw_summary, research = combined
     if raw_summary is None:
-        raw_summary = summarize_transcript(transcript_text, video_details['video_title'], compact=compact)
+        raw_summary = summarize_transcript(transcript_text, video_details['video_title'],
+                                           compact=compact, cache_key=nt.transcript_hash)
 
     if raw_summary == INSUFFICIENT_TRANSCRIPT_SENTINEL:
         # A transcript existed but was too garbled/incomplete for the model to
@@ -656,8 +725,9 @@ def _summarize_video(video_details, no_transcript_attempts=0, compact=False, wan
     summary = clean_summary(raw_summary)
     if summary:
         video_details['summary'] = summary
+        video_details['summary_telemetry'] = dict(LAST_CALL_TELEMETRY)
         log_info("Summary generated.")
-        return summary, "sent", True, signals
+        return summary, "sent", True, research
 
     # Transcript existed but the summarizer produced nothing.
     video_details['summary'] = "Summary not available."
@@ -697,33 +767,426 @@ def _alert_delivery_stalled(token, chat_id, outcomes, transcript_reasons):
     return True
 
 
-def _record_market_signals(channel_id, video_details, summary, signals=None):
+def _stored_transcript(video_details, languages=None):
     """
-    Best-effort: append the delivered summary plus its market signals to
-    SIGNALS_FILE. `signals` comes free from the combined summarize+extract
-    call; when it's None (combined path unavailable or unusable) a separate
-    extraction call is made. Any failure is logged and swallowed — signal
-    recording must never affect delivery, outcomes, or dedup state.
+    A transcript this pipeline already captured for the video, shaped like
+    get_transcript_from_video's result (reason "stored", `stored_source` the
+    original source), or None when there is none to reuse.
+
+    A video that comes back after a summary-quota, truncation or delivery
+    deferral used to be transcribed all over again: on 2026-09-14/15, with
+    Supadata dark and Gemini the one source left, three videos each spent a
+    second transcript request on text the store already held, on the day
+    that quota was the bottleneck. The stored copy is used only when it
+    verifies as one of the channel's languages; a foreign capture is left for
+    `research_backfill --reject-foreign-transcripts` and the video is fetched
+    fresh through the normal chain. Never raises.
+    """
+    vid = video_details.get('video_id')
+    if not PERSIST_TRANSCRIPTS or not vid:
+        return None
+    try:
+        stored = transcript_store.load_transcript(vid)
+    except Exception as e:  # reading the store is best-effort, like writing it
+        log_warn(f"Could not read the stored transcript for {vid}: {e}")
+        return None
+    text = (stored or {}).get("raw_transcript") if isinstance(stored, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return None
+    accepted = language_detect.normalize_languages(languages)
+    recorded = stored.get("transcript_language")
+    reported = recorded if isinstance(recorded, str) and recorded.isalpha() and recorded != "unknown" else None
+    verdict = language_detect.verify_language(text, accepted, reported=reported)
+    if not verdict["ok"]:
+        log_warn(
+            f"Stored transcript for {vid} is {verdict['language']} ({verdict['reason']}); "
+            f"this channel speaks {', '.join(accepted)}. Fetching a fresh one."
+        )
+        return None
+    source = stored.get("transcript_source") or "stored"
+    log_info(f"Reusing the stored {source} transcript for {vid} ({len(text):,} chars); no fetch needed.")
+    return {
+        "transcript": text,
+        "budget_exhausted": False,
+        "reason": "stored",
+        "language": verdict["language"],
+        "language_check": dict(verdict, source="stored"),
+        "stored_source": stored.get("transcript_source"),
+    }
+
+
+def _transcript_source(reason):
+    """Which source produced the transcript, from its reason tag."""
+    if reason == "ok":
+        return "supadata"
+    if reason == "gemini_ok":
+        return "gemini_video"
+    if reason == "fallback_ok":
+        return "youtube_transcript_api"
+    return None
+
+
+def _research_context(video_details, channel_id=None):
+    return {
+        "video_id": video_details.get("video_id"),
+        "channel_id": channel_id or video_details.get("channel_id"),
+        "channel_name": video_details.get("channel_name"),
+        "video_title": video_details.get("video_title"),
+        "published_at": video_details.get("published_at"),
+        "transcript_source": video_details.get("transcript_source"),
+        "transcript_language": video_details.get("transcript_language"),
+        "normalized": video_details.get("normalized"),
+    }
+
+
+def _queue_research(queue, channel_id, video_details, summary, research=None):
+    """
+    Hold a delivered video's separate claim extraction until the delivery
+    loop is done (research_budget). The research ledger records the video
+    as pending with the reason right away, so a run that dies before the
+    queue is drained leaves the video for the retry job — delivery state is
+    already final and is never touched again.
+    """
+    reason = "deferred_to_run_end"
+    if research and research.get("retry_separately"):
+        reason = f"{research.get('failure_reason') or 'combined_output_truncated'};deferred_to_run_end"
+    try:
+        _persist_research(channel_id, video_details, summary, {"status": "pending", "failure_reason": reason},
+                          signals_row=False)
+    except Exception as e:
+        log_error(f"Could not record pending research for {video_details.get('video_url')}: {e}", exc_info=True)
+    queue.append((channel_id, video_details, summary, research))
+
+
+def _drain_research(queue, run_started=None):
+    """
+    Run the queued separate extractions once every eligible video has been
+    processed, each only when the reserve check passes; the rest are left
+    quota_deferred / summary_reserve_protected for the retry job. Returns
+    {"extracted": n, "reserve_protected": n, "deadline_deferred": n}.
+    """
+    tally = {"extracted": 0, "reserve_protected": 0, "deadline_deferred": 0}
+    for channel_id, video_details, summary, research in queue:
+        nt = video_details.get("normalized")
+        prefer_chunked = bool(research and research.get("retry_separately"))
+        try:
+            if (run_started is not None and RUN_DEADLINE_MINUTES > 0
+                    and (time.monotonic() - run_started) / 60.0 >= RUN_DEADLINE_MINUTES):
+                tally["deadline_deferred"] += 1
+                _persist_research(channel_id, video_details, summary,
+                                  {"status": "pending", "failure_reason": "deferred_run_deadline"})
+                continue
+            verdict = research_budget.check(nt, prefer_chunked=prefer_chunked)
+            if not verdict["allowed"]:
+                tally["reserve_protected"] += 1
+                _persist_research(channel_id, video_details, summary, {
+                    "status": "quota_deferred", "failure_reason": "summary_reserve_protected",
+                    "budget_check": verdict, "run_key": (research or {}).get("run_key"),
+                })
+                continue
+        except Exception as e:
+            log_error(f"Research budget check failed for {video_details.get('video_url')}: {e}", exc_info=True)
+        tally["extracted"] += 1
+        _record_market_signals(channel_id, video_details, summary, research)
+    queue.clear()
+    return tally
+
+
+def _record_market_signals(channel_id, video_details, summary, research=None):
+    """
+    Best-effort research capture for a delivered summary. `research` comes
+    free from the combined summarize+claims call; when it is None (combined
+    path unavailable or unusable) one separate extraction call is made from
+    the complete transcript — inside `main` only after the delivery loop and
+    only past the summary reserve (see _queue_research / research_budget). Whatever the result, the research ledger records
+    it — complete, no_claims_found, needs_review, quota_deferred or
+    failed_retryable — and the legacy signals row is written from the
+    validated claims. A failed extraction is written as `signals: null` with
+    the research status beside it, never as an empty asset list. Any failure
+    here is logged and swallowed: research must never affect delivery,
+    outcomes, or dedup state.
     """
     try:
-        if signals is None:
-            signals = extract_signals(
-                summary, video_details.get("video_title"), video_details.get("channel_name")
-            )
-        record = {
-            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            "video_id": video_details.get("video_id"),
-            "channel_id": channel_id,
-            "channel_name": video_details.get("channel_name"),
-            "video_title": video_details.get("video_title"),
-            "video_url": video_details.get("video_url"),
-            "published_at": video_details.get("published_at"),
-            "summary": summary,
-            "signals": signals,
-        }
-        append_jsonl(SIGNALS_FILE, record)
+        nt = video_details.get("normalized")
+        if research is None and nt is not None:
+            research = extract_research(nt, _research_context(video_details, channel_id))
+        elif research is not None and research.get("retry_separately") and nt is not None:
+            # The combined response was cut off by the size of its claims
+            # array and the summary went out from a summary-only call. The
+            # claims are extracted now on their own, in chunks small enough
+            # to fit the output cap; if that cannot finish either, the ledger
+            # keeps the truncation reason and the retry job picks it up.
+            second = extract_research(nt, _research_context(video_details, channel_id), prefer_chunked=True)
+            if second.get("status") not in ("failed_retryable", "failed_final") or second.get("claims"):
+                research = second
+            else:
+                research = dict(research, failure_reason=(
+                    f"combined_output_truncated;standalone:{second.get('failure_reason') or second.get('status')}"))
+        _persist_research(channel_id, video_details, summary, research)
     except Exception as e:
-        log_error(f"Market-signal recording failed for {video_details.get('video_url')}: {e}")
+        log_error(f"Market-signal recording failed for {video_details.get('video_url')}: {e}", exc_info=True)
+
+
+def _persist_research(channel_id, video_details, summary, research, signals_row=True):
+    """Write the research state, canonical products and the legacy signals
+    row (`signals_row=False` while the extraction is merely queued: the row
+    is written once, when the research result — or its deferral — is known)."""
+    video_id = video_details.get("video_id")
+    status = (research or {}).get("status") or "pending"
+    signals = (research or {}).get("signals")
+    row = {
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "video_id": video_id,
+        "channel_id": channel_id,
+        "channel_name": video_details.get("channel_name"),
+        "video_title": video_details.get("video_title"),
+        "video_url": video_details.get("video_url"),
+        "published_at": video_details.get("published_at"),
+        "summary": summary,
+        "signals": signals,
+        "research_status": status,
+        "coverage_status": (research or {}).get("coverage_status"),
+    }
+    if signals_row:
+        append_jsonl(SIGNALS_FILE, row)
+
+    if not video_id:
+        return  # on-demand runs carry no id; nothing to key research state by
+    nt = video_details.get("normalized")
+    state = research_state.load_state()
+    stored = video_details.get("transcript_record") or {}
+    fields = {
+        "delivery_status": "sent",
+        "research_status": status,
+        "transcript_hash": nt.transcript_hash if nt else None,
+        "transcript_source": video_details.get("transcript_source"),
+        "transcript_language": video_details.get("transcript_language"),
+        "transcript_stored": bool(stored.get("stored")) if stored else False,
+        "schema_version": SCHEMA_VERSION,
+        "normalization_version": nt.normalization_version if nt else None,
+        "extraction_prompt_version": EXTRACTION_PROMPT_VERSION,
+        "extraction_model": (research or {}).get("extraction_model")
+        or ((research or {}).get("telemetry") or {}).get("model"),
+        "coverage_status": (research or {}).get("coverage_status"),
+        "failure_reason": (research or {}).get("failure_reason"),
+        "processed_chunk_ids": (research or {}).get("processed_chunk_ids") or [],
+        "failed_chunk_ids": (research or {}).get("failed_chunk_ids") or [],
+        "run_identity": (research or {}).get("run_identity"),
+        "budget_check": (research or {}).get("budget_check"),
+        "channel_id": channel_id,
+        "channel_name": video_details.get("channel_name"),
+        "video_title": video_details.get("video_title"),
+        "published_at": video_details.get("published_at"),
+    }
+    previous = research_state.get(state, video_id) or {}
+    already_recorded = bool(nt) and previous.get("transcript_hash") == nt.transcript_hash
+    entry = research_state.update(state, video_id, **fields)
+    if status not in ("quota_deferred", "pending"):
+        research_state.note_attempt(state, video_id, counts=status not in ("complete", "no_claims_found"))
+    if status in ("failed_retryable", "partial") and entry["attempt_count"] >= research_state.MAX_RESEARCH_ATTEMPTS:
+        research_state.update(state, video_id, research_status="failed_final")
+    research_state.record_run({
+        "video_id": video_id, "run_key": (research or {}).get("run_key"), "status": status,
+        "identity": (research or {}).get("run_identity"),
+        "chunk_boundaries": (research or {}).get("chunk_boundaries"),
+        "coverage_status": (research or {}).get("coverage_status"),
+        "claims": len((research or {}).get("claims") or []),
+        "warnings": (research or {}).get("warnings") or [],
+        "failure_reason": (research or {}).get("failure_reason"),
+        "telemetry": (research or {}).get("telemetry") or {},
+        "summary_telemetry": video_details.get("summary_telemetry") or {},
+        "transcript_stored": fields["transcript_stored"],
+        "recorded_at": research_state.now_iso(),
+    })
+    if nt is not None:
+        research_state.store_segments(video_id, nt)
+    if not already_recorded:
+        research_state.record_video(video_details, channel_id, {
+            "transcript_source": video_details.get("transcript_source"),
+            "transcript_language": video_details.get("transcript_language"),
+            "transcript_hash": nt.transcript_hash if nt else None,
+            "raw_char_count": nt.raw_char_count if nt else None,
+            "normalized_char_count": nt.normalized_char_count if nt else None,
+            "transcript_quality_flags": nt.quality_flags if nt else None,
+        })
+    claims = (research or {}).get("claims") or []
+    if claims and status in ("complete", "needs_review", "no_claims_found", "partial"):
+        research_state.store_claims(claims, state, video_id, (research or {}).get("run_key"))
+    research_state.save_state(state)
+
+
+def _gate(channel_id, video, outcome, channel=None, **kw):
+    """Record why a discovered video was or was not analyzed. Best-effort."""
+    try:
+        research_state.record_gate_outcome(
+            channel_id, video, outcome, channel_config=channel,
+            discovery_source="rss", min_duration=MIN_VIDEO_SECONDS, **kw,
+        )
+    except Exception as e:  # never let bookkeeping touch the run
+        log_warn(f"Could not record gate outcome for {video.get('video_id')}: {e}")
+
+
+def _newer_than_watermark(video, channel_state):
+    """True for a feed video the watermark has not passed yet (the ones a
+    filter decision is worth recording for)."""
+    if not channel_state:
+        return True
+    watermark = _parse_timestamp(channel_state.get("last_published"))
+    ts = _parse_timestamp(video.get("published_at"))
+    if watermark is None or ts is None:
+        return video.get("video_id") != channel_state.get("last_video_id")
+    return ts > watermark
+
+
+# --- Delivery -----------------------------------------------------------------
+#
+# A video is "decided" once its outcome is final AND Telegram has accepted the
+# message. Advancing the watermark before the send was confirmed lost the
+# summary for good on any Telegram failure: the transcript and LLM call had been
+# paid for, the send failed, and the video was never looked at again. So the
+# finished text is held in the pending record (`undelivered`) until a send
+# succeeds — a failed or interrupted delivery is retried on the next run from
+# that text, with no transcript or LLM cost.
+
+_ENTRY_FIELDS = ("channel_name", "video_title", "video_url", "published_at")
+
+# Per-video outcome -> the gate outcome recorded for the research universe.
+_GATE_BY_OUTCOME = {
+    "sent": "included", "no_transcript_deferred": "transcript_unavailable",
+    "no_transcript": "transcript_unavailable", "budget_deferred": "budget_deferred",
+    "quota_deferred": "model_quota_deferred", "truncated_deferred": "model_quota_deferred",
+    "truncated": "manual_review", "insufficient": "manual_review",
+    "summary_failed": "manual_review",
+}
+
+
+def _undelivered(record):
+    """The held-for-delivery block of a pending record, or None."""
+    block = (record or {}).get("undelivered") if isinstance(record, dict) else None
+    return block if isinstance(block, dict) and block.get("body") else None
+
+
+def _hold_for_delivery(pending, channel_id, video_details, attempts, body, outcome):
+    """Remember a finished message so it can be delivered later without being
+    regenerated. Keeps any retry bookkeeping already on the record."""
+    record = pending.setdefault(video_id := video_details["video_id"],
+                                {"channel_id": channel_id, "attempts": attempts})
+    record["undelivered"] = {
+        "video_id": video_id,
+        "body": body,
+        "outcome": outcome,
+        **{field: video_details.get(field, "") for field in _ENTRY_FIELDS},
+    }
+
+
+def _finalize_video(channels_state, pending, channel_id, video_details):
+    """The video is done and delivered: advance the watermark, drop its record."""
+    _advance_channel_state(channels_state, channel_id, video_details)
+    pending.pop(video_details["video_id"], None)
+
+
+def _undelivered_candidates(pending, channel_id, feed_video_ids):
+    """
+    Videos of this channel that were summarized on an earlier run but never
+    accepted by Telegram and have since left the feed. Rebuilt from the held
+    record so they can still be delivered; ones still in the feed come through
+    _select_candidates like any other pending video. Oldest first.
+    """
+    found = []
+    for video_id, record in pending.items():
+        block = _undelivered(record)
+        if (block and isinstance(record, dict) and record.get("channel_id") == channel_id
+                and video_id not in feed_video_ids):
+            found.append({"video_id": video_id,
+                          **{field: block.get(field, "") for field in _ENTRY_FIELDS}})
+    return sorted(found, key=lambda v: v.get("published_at") or "")
+
+
+class _Outbox:
+    """
+    Sends video messages, immediately or batched into digests, and reports
+    what Telegram accepted so the caller can decide which videos are done.
+
+    `send` returns True/False for an immediate send and None when the entry
+    was buffered; `flush_channel` / `flush_run` send a buffer as one digest
+    (or a single message when it holds one entry) and return whether the
+    premium send succeeded. Teasers for the free channel are best-effort and
+    only go out after the premium copy landed: they never affect the result.
+    """
+
+    def __init__(self, token, chat_id, free_chat_id=None, premium_url=None):
+        self.token = token
+        self.chat_id = chat_id
+        self.free_chat_id = free_chat_id
+        self.premium_url = premium_url
+        self.premium_cta = f"🔓 Full summaries: {premium_url}" if premium_url else None
+        self.channel_batch = []
+        self.run_batch = []
+
+    @staticmethod
+    def _entry(video_details, body):
+        return {**{field: video_details.get(field, "") for field in _ENTRY_FIELDS},
+                "body": body}
+
+    def send(self, video_details, body, teaser="", buffer=None):
+        """Deliver now (buffer=None) or hold for a "channel" or "run" digest."""
+        entry = self._entry(video_details, body)
+        if buffer == "run":
+            self.run_batch.append((entry, teaser))
+            return None
+        if buffer == "channel":
+            self.channel_batch.append((entry, teaser))
+            return None
+        ok = send_telegram_message(
+            self.token, self.chat_id, entry["channel_name"], entry["video_title"],
+            entry["video_url"], entry["published_at"], body,
+        )
+        if ok and teaser and self.free_chat_id:
+            send_telegram_teaser(
+                self.token, self.free_chat_id, entry["channel_name"],
+                entry["video_title"], entry["video_url"], teaser, self.premium_url,
+            )
+        return ok
+
+    def flush_channel(self):
+        batch, self.channel_batch = self.channel_batch, []
+        title = f"New from {batch[0][0]['channel_name']}" if batch else None
+        return self._flush(batch, title)
+
+    def flush_run(self):
+        batch, self.run_batch = self.run_batch, []
+        return self._flush(batch, None)
+
+    def discard_channel(self):
+        """Drop the channel buffer (the channel failed mid-way). The held
+        pending records still carry the text, so nothing is lost."""
+        self.channel_batch = []
+
+    def _flush(self, batch, title):
+        if not batch:
+            return True
+        entries = [entry for entry, _ in batch]
+        kwargs = {"title": title} if title else {}
+        if len(entries) == 1:
+            entry = entries[0]
+            ok = send_telegram_message(
+                self.token, self.chat_id, entry["channel_name"], entry["video_title"],
+                entry["video_url"], entry["published_at"], entry["body"],
+            )
+        else:
+            ok = send_telegram_digest(self.token, self.chat_id, entries, **kwargs)
+        teasers = [{**entry, "body": teaser} for entry, teaser in batch if teaser]
+        if ok and teasers and self.free_chat_id:
+            if len(teasers) == 1:
+                entry = teasers[0]
+                send_telegram_teaser(
+                    self.token, self.free_chat_id, entry["channel_name"],
+                    entry["video_title"], entry["video_url"], entry["body"], self.premium_url,
+                )
+            else:
+                send_telegram_digest(self.token, self.free_chat_id, teasers,
+                                     footer=self.premium_cta, **kwargs)
+        return ok
 
 
 def main():
@@ -765,6 +1228,13 @@ def main():
                 f"Transcript budget: {used}/{allowed} used today, "
                 f"{remaining} credit(s) left this month."
             )
+            spent = provider_spent_status()
+            if spent:
+                log_warn(
+                    f"Supadata itself reports its plan limit on all {spent['keys']} key(s) "
+                    f"(since {spent['first_day']}); the local meter is not what is "
+                    f"stopping transcripts — check the keys' usage on the Supadata dashboard."
+                )
 
         # Read channel entries (id + per-channel options) from the file
         channels = read_channels("channel_ids.txt")
@@ -772,29 +1242,54 @@ def main():
             log_warn("No channel IDs found. Check your channel_ids.txt file.")
         else:
             log_info(f"Beginning process to fetch video details for each channel.")
-            results = []
+            run_started = time.monotonic()
+            deadline_hit = False
             state = load_state(STATE_FILE)
             channels_state = state["channels"]
             pending = state["pending"]
 
             # Digest mode: buffer one entry per video and send a single combined
             # message at the end of the run instead of one message per video.
-            digest_mode = _env_flag("DAILY_DIGEST")
-            digest_entries = []
+            digest_mode = env_flag("DAILY_DIGEST")
             # Market-signal recording (data/signals.jsonl) — on by default,
             # disable with MARKET_SIGNALS=false.
-            market_signals = _env_flag("MARKET_SIGNALS", default=True)
-            # Teaser copies of the digest entries for the free channel (only
-            # populated when the free/premium split is enabled).
-            free_digest_entries = []
-            premium_cta = f"🔓 Full summaries: {PREMIUM_INVITE_URL}" if PREMIUM_INVITE_URL else None
+            market_signals = env_flag("MARKET_SIGNALS", default=True)
+            outbox = _Outbox(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID,
+                             TELEGRAM_FREE_CHANNEL_ID, PREMIUM_INVITE_URL)
+            # Videos whose final message sits in a digest buffer, as
+            # (channel_id, video_details): they are finalized only once the
+            # digest they belong to has been accepted by Telegram.
+            awaiting_run_digest = []
+            # Separate claim extractions held until every eligible video has
+            # been delivered (see research_budget): (channel_id,
+            # video_details, summary, research-so-far).
+            deferred_research = []
+
+            def settle(awaiting, delivered):
+                """Finalize buffered videos after their digest went out, or
+                count them as failed deliveries (their text stays held in
+                `pending` for the next run)."""
+                for cid, details in awaiting:
+                    if delivered:
+                        _finalize_video(channels_state, pending, cid, details)
+                    else:
+                        outcomes["delivery_failed"] += 1
+                if awaiting:
+                    if not delivered:
+                        log_warn(
+                            f"Digest with {len(awaiting)} video(s) was not accepted by "
+                            "Telegram; they stay queued and go out on the next run."
+                        )
+                    save_state(STATE_FILE, state)
+                awaiting.clear()
 
             # Per-channel outcome tally for the end-of-run summary report.
             outcomes = {
-                "sent": 0, "unchanged": 0, "no_transcript": 0, "no_transcript_deferred": 0,
-                "insufficient": 0, "summary_failed": 0, "quota_deferred": 0,
-                "budget_deferred": 0, "retry_backoff": 0, "truncated_deferred": 0,
-                "truncated": 0, "no_video": 0, "error": 0,
+                "sent": 0, "redelivered": 0, "unchanged": 0, "no_transcript": 0,
+                "no_transcript_deferred": 0, "insufficient": 0, "summary_failed": 0,
+                "quota_deferred": 0, "budget_deferred": 0, "retry_backoff": 0,
+                "truncated_deferred": 0, "truncated": 0, "delivery_failed": 0,
+                "deadline_deferred": 0, "no_video": 0, "error": 0,
             }
 
             # Counts reported in the run summary: retry records dropped because
@@ -806,7 +1301,7 @@ def main():
             # Opt-in: the API's caption flag tracks uploaded captions and is
             # commonly false for auto-captioned videos, so skipping on it is
             # off until a run's diagnostics show it is safe here.
-            skip_uncaptioned = _env_flag("SKIP_UNCAPTIONED")
+            skip_uncaptioned = env_flag("SKIP_UNCAPTIONED")
             # Why transcript fetches failed this run, for the run summary.
             transcript_reasons = {}
 
@@ -844,6 +1339,9 @@ def main():
                         kept = [v for v in videos if title_matches(v["video_title"], channel.get("only"))]
                         if len(kept) != len(videos):
                             filtered_out += len(videos) - len(kept)
+                            for v in videos:
+                                if v not in kept and _newer_than_watermark(v, channels_state.get(channel_id)):
+                                    _gate(channel_id, v, "title_filtered", channel)
                             log_info(
                                 f"Title filter kept {len(kept)}/{len(videos)} videos for "
                                 f"channel {channel_id} (only={','.join(channel.get('only') or [])})."
@@ -862,9 +1360,13 @@ def main():
                         details = fetch_video_details(
                             YOUTUBE_API_KEY, [v["video_id"] for v in videos]
                         )
+                        before_gate = list(videos)
                         videos, n_short, n_uncaptioned = filter_by_duration(
                             videos, details, MIN_VIDEO_SECONDS, skip_uncaptioned
                         )
+                        for v in before_gate:
+                            if v not in videos and _newer_than_watermark(v, channels_state.get(channel_id)):
+                                _gate(channel_id, v, "duration_filtered", channel)
                         skipped_short += n_short
                         skipped_uncaptioned += n_uncaptioned
                         if n_short or n_uncaptioned:
@@ -885,10 +1387,14 @@ def main():
                         pending, channel_id, {v["video_id"] for v in videos}
                     )
 
+                    feed_ids = {v["video_id"] for v in videos}
                     candidates = _select_candidates(
                         videos, channels_state.get(channel_id), pending,
                         limit=channel["max_per_run"],
                     )
+                    # Finished-but-undelivered videos that have since left the
+                    # feed are still owed to the reader; they cost nothing.
+                    candidates = _undelivered_candidates(pending, channel_id, feed_ids) + candidates
                     if not candidates:
                         log_info(f"No new videos for channel {channel_id}. Skipping.")
                         outcomes["unchanged"] += 1
@@ -897,50 +1403,79 @@ def main():
                     # Digest-flagged channels (prolific posters) get one bundled
                     # message per run with compact TL;DR entries, instead of one
                     # full-summary message per video.
-                    channel_entries = []
-                    free_channel_entries = []
+                    buffer = "run" if digest_mode else ("channel" if channel["digest"] else None)
+                    awaiting_channel_digest = []
 
                     for video_details in candidates:
                         video_id = video_details["video_id"]
                         record = pending.get(video_id) or {}
                         attempts = record.get("attempts", 0)
-                        wait = _retry_wait_remaining(record)
-                        if wait > 0:
-                            log_info(
-                                f"Retried {video_id} recently; waiting {wait:.1f}h more "
-                                "before spending another transcript credit on it."
+                        held = _undelivered(record)
+                        redelivery = held is not None
+
+                        if redelivery:
+                            # Summarized on an earlier run; Telegram never
+                            # accepted it. Deliver the held text as-is: no
+                            # transcript credit, no LLM request, no new signal
+                            # row (that was recorded when it was generated).
+                            log_info(f"Re-delivering held summary for {video_id}.")
+                            telegram_body, outcome, decided, signals = (
+                                held["body"], held.get("outcome") or "sent", True, None
                             )
-                            outcomes["retry_backoff"] += 1
-                            continue
-                        log_info(
-                            f"Processing video: {video_details['video_title']} "
-                            f"(published: {video_details['published_at']})"
-                        )
+                            outcomes["redelivered"] += 1
+                        else:
+                            if (not deadline_hit and RUN_DEADLINE_MINUTES > 0
+                                    and (time.monotonic() - run_started) / 60.0 >= RUN_DEADLINE_MINUTES):
+                                deadline_hit = True
+                                log_warn(
+                                    f"Run deadline of {RUN_DEADLINE_MINUTES:g} min reached; "
+                                    "remaining videos defer to the next run."
+                                )
+                            if deadline_hit:
+                                outcomes["deadline_deferred"] += 1
+                                _gate(channel_id, video_details, "deadline_deferred", channel)
+                                continue
+                            wait = _retry_wait_remaining(record)
+                            if wait > 0:
+                                log_info(
+                                    f"Retried {video_id} recently; waiting {wait:.1f}h more "
+                                    "before spending another transcript credit on it."
+                                )
+                                outcomes["retry_backoff"] += 1
+                                _gate(channel_id, video_details, "retry_backoff", channel)
+                                continue
+                            log_info(
+                                f"Processing video: {video_details['video_title']} "
+                                f"(published: {video_details['published_at']})"
+                            )
 
-                        telegram_body, outcome, decided, signals = _summarize_video(
-                            video_details, attempts, compact=channel["digest"],
-                            want_signals=market_signals,
-                            hours_since_first=_hours_since(record.get("first_attempt")),
-                        )
-                        outcomes[outcome] += 1
-                        reason = video_details.get("transcript_reason")
-                        if reason and reason not in TRANSCRIPT_SUCCESS_REASONS:
-                            transcript_reasons[reason] = transcript_reasons.get(reason, 0) + 1
+                            # The feed carries no channel id on its entries;
+                            # the research records key on it.
+                            video_details.setdefault("channel_id", channel_id)
+                            telegram_body, outcome, decided, signals = _summarize_video(
+                                video_details, attempts, compact=channel["digest"],
+                                want_signals=market_signals,
+                                hours_since_first=_hours_since(record.get("first_attempt")),
+                                languages=_channel_languages(channel),
+                            )
+                            outcomes[outcome] += 1
+                            _gate(channel_id, video_details, _GATE_BY_OUTCOME.get(outcome, "other"),
+                                  channel, latest_only=not channels_state.get(channel_id),
+                                  reason=video_details.get("transcript_reason"))
+                            reason = video_details.get("transcript_reason")
+                            if reason and reason not in TRANSCRIPT_SUCCESS_REASONS:
+                                transcript_reasons[reason] = transcript_reasons.get(reason, 0) + 1
 
-                        # One notice per run per deferral kind is enough; later
-                        # ones are logged only. Without this a run that defers
-                        # ten videos posts ten identical messages.
-                        if outcome in ("quota_deferred", "truncated_deferred") and outcomes[outcome] > 1:
-                            telegram_body = None
+                            # One notice per run per deferral kind is enough;
+                            # later ones are logged only. Without this a run
+                            # that defers ten videos posts ten identical messages.
+                            if outcome in ("quota_deferred", "truncated_deferred") and outcomes[outcome] > 1:
+                                telegram_body = None
 
+                        # True/False for an immediate send, None when buffered
+                        # into a digest, True when there is nothing to send.
+                        delivered = True
                         if telegram_body is not None:
-                            entry = {
-                                "channel_name": video_details['channel_name'],
-                                "video_title": video_details['video_title'],
-                                "video_url": video_details['video_url'],
-                                "published_at": video_details['published_at'],
-                                "body": telegram_body,
-                            }
                             # Free/premium split: only real summaries get a
                             # teaser — warning/deferral notices stay premium-only.
                             # A failed teaser send is logged inside the sender
@@ -948,32 +1483,40 @@ def main():
                             teaser = ""
                             if TELEGRAM_FREE_CHANNEL_ID and outcome == "sent":
                                 teaser = build_teaser(telegram_body)
-                            if digest_mode:
-                                digest_entries.append(entry)
-                                if teaser:
-                                    free_digest_entries.append({**entry, "body": teaser})
-                            elif channel["digest"]:
-                                channel_entries.append(entry)
-                                if teaser:
-                                    free_channel_entries.append({**entry, "body": teaser})
+                            delivered = outbox.send(video_details, telegram_body, teaser, buffer)
+
+                        if market_signals and outcome == "sent" and not redelivery:
+                            if signals is not None and not signals.get("retry_separately"):
+                                # Research came free with the combined call:
+                                # nothing more is spent by recording it.
+                                _record_market_signals(channel_id, video_details, telegram_body, signals)
                             else:
-                                send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, video_details['channel_name'], video_details['video_title'], video_details['video_url'], video_details['published_at'], telegram_body)
-                                if teaser:
-                                    send_telegram_teaser(
-                                        TELEGRAM_TOKEN, TELEGRAM_FREE_CHANNEL_ID,
-                                        video_details['channel_name'], video_details['video_title'],
-                                        video_details['video_url'], teaser, PREMIUM_INVITE_URL,
-                                    )
+                                # A separate extraction would spend summary
+                                # requests mid-run; it waits for the queue.
+                                _queue_research(deferred_research, channel_id, video_details,
+                                                telegram_body, signals)
 
-                        if market_signals and outcome == "sent":
-                            _record_market_signals(channel_id, video_details, telegram_body, signals)
-
-                        if decided:
-                            # Final outcome: advance the watermark and drop any
-                            # pending-retry record for this video.
-                            _advance_channel_state(channels_state, channel_id, video_details)
-                            pending.pop(video_id, None)
-                            results.append(video_details)
+                        if decided and delivered is True:
+                            # Final outcome, accepted by Telegram: advance the
+                            # watermark and drop any pending record.
+                            _finalize_video(channels_state, pending, channel_id, video_details)
+                        elif decided:
+                            # Final outcome, but not delivered yet: keep the
+                            # finished text so it is never regenerated. Either it
+                            # is waiting in a digest buffer (finalized once that
+                            # digest goes out) or the send failed (retried next
+                            # run from the held text).
+                            _hold_for_delivery(pending, channel_id, video_details,
+                                               attempts, telegram_body, outcome)
+                            if delivered is None:
+                                awaiting = awaiting_run_digest if buffer == "run" else awaiting_channel_digest
+                                awaiting.append((channel_id, video_details))
+                            else:
+                                outcomes["delivery_failed"] += 1
+                                log_warn(
+                                    f"Telegram did not accept the message for {video_id}; "
+                                    "keeping it queued for the next run."
+                                )
                         else:
                             # Retryable outcome: leave the watermark alone and
                             # remember the video so the next run picks it up.
@@ -994,57 +1537,26 @@ def main():
                         # already-sent videos to be re-sent.
                         save_state(STATE_FILE, state)
 
-                    if channel_entries:
-                        if len(channel_entries) == 1:
-                            entry = channel_entries[0]
-                            send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, entry['channel_name'], entry['video_title'], entry['video_url'], entry['published_at'], entry['body'])
-                        else:
-                            send_telegram_digest(
-                                TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, channel_entries,
-                                title=f"New from {channel_entries[0]['channel_name']}",
-                            )
-                    if free_channel_entries:
-                        if len(free_channel_entries) == 1:
-                            entry = free_channel_entries[0]
-                            send_telegram_teaser(
-                                TELEGRAM_TOKEN, TELEGRAM_FREE_CHANNEL_ID,
-                                entry['channel_name'], entry['video_title'],
-                                entry['video_url'], entry['body'], PREMIUM_INVITE_URL,
-                            )
-                        else:
-                            send_telegram_digest(
-                                TELEGRAM_TOKEN, TELEGRAM_FREE_CHANNEL_ID, free_channel_entries,
-                                title=f"New from {free_channel_entries[0]['channel_name']}",
-                                footer=premium_cta,
-                            )
+                    settle(awaiting_channel_digest, outbox.flush_channel())
                 except Exception as e:
                     # Don't let one channel's failure sink the rest of the batch.
-                    log_error(f"Unexpected error processing channel {channel_id}: {e}")
+                    # Anything buffered for this channel's digest stays held in
+                    # `pending` and is delivered on the next run.
+                    log_error(f"Unexpected error processing channel {channel_id}: {e}", exc_info=True)
+                    outbox.discard_channel()
                     outcomes["error"] += 1
                     continue
 
-            if digest_entries:
-                if len(digest_entries) == 1:
-                    entry = digest_entries[0]
-                    send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, entry['channel_name'], entry['video_title'], entry['video_url'], entry['published_at'], entry['body'])
-                else:
-                    send_telegram_digest(TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, digest_entries)
-            if free_digest_entries:
-                if len(free_digest_entries) == 1:
-                    entry = free_digest_entries[0]
-                    send_telegram_teaser(
-                        TELEGRAM_TOKEN, TELEGRAM_FREE_CHANNEL_ID,
-                        entry['channel_name'], entry['video_title'],
-                        entry['video_url'], entry['body'], PREMIUM_INVITE_URL,
-                    )
-                else:
-                    send_telegram_digest(
-                        TELEGRAM_TOKEN, TELEGRAM_FREE_CHANNEL_ID, free_digest_entries,
-                        footer=premium_cta,
-                    )
+            settle(awaiting_run_digest, outbox.flush_run())
+
+            # Every eligible video has been delivered or deferred; only now
+            # may research spend requests, and only above the reserve.
+            research_tally = _drain_research(deferred_research, run_started) if deferred_research else {}
 
             # End-of-run report: one line summarizing what happened this run.
             summary_line = ", ".join(f"{k}={v}" for k, v in outcomes.items() if v)
+            if research_tally:
+                summary_line += ", research " + ", ".join(f"{k}={v}" for k, v in research_tally.items() if v)
             if evicted_pending:
                 summary_line += f", pending_evicted={evicted_pending}"
             if filtered_out:
@@ -1071,15 +1583,6 @@ def main():
             _alert_delivery_stalled(
                 TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID, outcomes, transcript_reasons
             )
-
-            # Save the results to a JSON file
-            if results:
-                filename = 'video_details_' + datetime.now().strftime('%Y-%m-%d_%H-%M-%S') + '.json'
-                log_info(f"Saving results to {filename} ...")
-                save_to_json(results, filename)
-                log_info(f"Process completed successfully.")
-            else:
-                log_warn("No results to save.")
 
     log_info("Main script finished.")
 

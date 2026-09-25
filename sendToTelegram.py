@@ -1,9 +1,10 @@
 import html
 import json
 import os
+import time
 
 import requests
-from log import log_info, log_warn, log_error
+from log import log_info, log_warn, log_error, describe_error
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 TELEGRAM_PHOTO_API = "https://api.telegram.org/bot{token}/sendPhoto"
@@ -14,6 +15,23 @@ TELEGRAM_UPLOAD_TIMEOUT = 60
 TELEGRAM_MAX_LEN = 4096  # Telegram's hard limit on message text length
 TELEGRAM_ALBUM_MAX = 10  # Telegram's hard limit on media items per album
 TELEGRAM_CAPTION_MAX = 1024  # Telegram's hard limit on media caption length
+# Delivery is the last step of a pipeline that has already paid for the
+# transcript and the LLM call, so a transient failure here is retried like
+# every other network call in the project instead of costing the summary.
+TELEGRAM_MAX_RETRIES = 3
+TELEGRAM_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
+# Telegram answers a burst of channel posts (roughly 20 a minute) with 429 +
+# parameters.retry_after. Honored, but capped so one huge value cannot stall
+# the run past its deadline.
+TELEGRAM_RETRY_AFTER_CAP = 60
+TELEGRAM_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+
+# Outcomes of one send. REJECTED is Telegram refusing the content (a 4xx such
+# as an HTML entity-parse error): the same text will be refused again, but a
+# differently formatted rendering may not be. FAILED is a transient problem
+# that outlived the retries: the content is fine, and resending it in another
+# format would only duplicate the chunks that did get through.
+SENT, REJECTED, FAILED = "sent", "rejected", "failed"
 
 
 def _build_html_message(channel_name, video_title, video_url, published_at, summary):
@@ -75,26 +93,102 @@ def _split_message(text, limit=TELEGRAM_MAX_LEN):
     return chunks
 
 
-def _post(bot_token, chat_id, text, parse_mode=None):
+def _retry_after_seconds(resp):
+    """Telegram's requested wait from a 429 body, capped; None when absent."""
+    try:
+        value = (resp.json() or {}).get("parameters", {}).get("retry_after")
+        return max(0, min(int(value), TELEGRAM_RETRY_AFTER_CAP))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _post_chunk(url, data):
     """
-    POST a message to Telegram, splitting it across multiple sends if it exceeds
-    the 4096-char limit (rather than silently truncating). Returns True only if
-    every chunk was accepted (HTTP 200).
+    POST one message to Telegram, retrying transient failures. Returns SENT,
+    REJECTED or FAILED (see the constants above).
+    """
+    for attempt in range(1, TELEGRAM_MAX_RETRIES + 1):
+        try:
+            resp = requests.post(url, data=data, timeout=TELEGRAM_TIMEOUT)
+        except requests.RequestException as e:
+            log_warn(
+                f"Telegram request failed (attempt {attempt}/{TELEGRAM_MAX_RETRIES}): "
+                f"{describe_error(e)}"
+            )
+            if attempt < TELEGRAM_MAX_RETRIES:
+                time.sleep(TELEGRAM_RETRY_BACKOFF * attempt)
+                continue
+            return FAILED
+        if resp.status_code == 200:
+            return SENT
+        if resp.status_code in TELEGRAM_TRANSIENT_STATUS:
+            wait = _retry_after_seconds(resp) if resp.status_code == 429 else None
+            if wait is None:
+                wait = TELEGRAM_RETRY_BACKOFF * attempt
+            log_warn(
+                f"Transient Telegram status {resp.status_code} "
+                f"(attempt {attempt}/{TELEGRAM_MAX_RETRIES}): {resp.text[:200]}"
+            )
+            if attempt < TELEGRAM_MAX_RETRIES:
+                time.sleep(wait)
+                continue
+            return FAILED
+        log_warn(f"Telegram rejected the message ({resp.status_code}): {resp.text[:200]}")
+        return REJECTED
+    return FAILED
+
+
+def _post_status(bot_token, chat_id, text, parse_mode=None):
+    """
+    Send `text`, splitting it across several messages when it exceeds the
+    4096-char limit rather than silently truncating. Returns (status,
+    chunks_sent): status is SENT only when every chunk was accepted, and
+    chunks_sent says how many landed before a failure, so a caller can tell a
+    partial delivery from none.
     """
     url = TELEGRAM_API.format(token=bot_token)
+    sent = 0
     for chunk in _split_message(text):
         data = {"chat_id": chat_id, "text": chunk}
         if parse_mode:
             data["parse_mode"] = parse_mode
-        try:
-            resp = requests.post(url, data=data, timeout=TELEGRAM_TIMEOUT)
-        except requests.RequestException as e:
-            log_error(f"Telegram request failed: {e}")
-            return False
-        if resp.status_code != 200:
-            log_warn(f"Telegram send failed ({resp.status_code}): {resp.text[:200]}")
-            return False
-    return True
+        status = _post_chunk(url, data)
+        if status != SENT:
+            return status, sent
+        sent += 1
+    return SENT, sent
+
+
+def _post(bot_token, chat_id, text, parse_mode=None):
+    """True only if every chunk of `text` was accepted by Telegram."""
+    return _post_status(bot_token, chat_id, text, parse_mode)[0] == SENT
+
+
+def _send_with_fallback(bot_token, chat_id, html_text, plain_text, what):
+    """
+    Send the HTML rendering, falling back to the plain-text one only when
+    Telegram REJECTED the HTML (an entity-parse error). A transient failure is
+    not retried as plain text: the content was never the problem, the retries
+    inside _post_chunk are already spent, and a second attempt in another
+    format would only duplicate the chunks that did get through. Returns True
+    when either rendering was fully delivered.
+    """
+    status, sent = _post_status(bot_token, chat_id, html_text, parse_mode="HTML")
+    if status == SENT:
+        log_info(f"{what} sent to Telegram.")
+        return True
+    if status == REJECTED:
+        if sent:
+            log_warn(
+                f"HTML {what} rejected after {sent} chunk(s) were delivered; "
+                "the plain-text retry resends from the start."
+            )
+        log_warn(f"HTML {what} rejected; retrying as plain text.")
+        if _post(bot_token, chat_id, plain_text):
+            log_info(f"{what} sent to Telegram as plain text (fallback).")
+            return True
+    log_error(f"Failed to send Telegram {what}.")
+    return False
 
 
 # Separator between per-video sections in a digest. Newline-heavy on purpose:
@@ -145,17 +239,12 @@ def send_telegram_digest(bot_token, chat_id, entries, title="Daily digest", foot
     """
     if not entries:
         return True
-    if _post(bot_token, chat_id, _build_html_digest(entries, title, footer), parse_mode="HTML"):
-        log_info(f"Digest with {len(entries)} entries sent to Telegram.")
-        return True
-
-    log_warn("HTML digest send failed; retrying as plain text.")
-    if _post(bot_token, chat_id, _build_plain_digest(entries, title, footer)):
-        log_info("Digest sent to Telegram as plain text (fallback).")
-        return True
-
-    log_error("Failed to send Telegram digest (HTML and plain text both failed).")
-    return False
+    return _send_with_fallback(
+        bot_token, chat_id,
+        _build_html_digest(entries, title, footer),
+        _build_plain_digest(entries, title, footer),
+        f"digest with {len(entries)} entries",
+    )
 
 
 def send_telegram_text(bot_token, chat_id, text):
@@ -228,7 +317,7 @@ def send_telegram_photo_album(bot_token, chat_id, photo_paths, caption=None):
                     for handle in handles:
                         handle.close()
         except (OSError, requests.RequestException) as e:
-            log_error(f"Telegram photo album send failed: {e}")
+            log_error(f"Telegram photo album send failed: {describe_error(e)}")
             return False
         if resp.status_code != 200:
             log_warn(f"Telegram album send failed ({resp.status_code}): {resp.text[:200]}")
@@ -293,19 +382,12 @@ def send_telegram_teaser(bot_token, chat_id, channel_name, video_title, video_ur
         log_warn("Empty teaser; skipping free-channel send.")
         return False
 
-    html_message = _build_html_teaser(channel_name, video_title, video_url, teaser, premium_url)
-    if _post(bot_token, chat_id, html_message, parse_mode="HTML"):
-        log_info("Teaser sent to free Telegram channel.")
-        return True
-
-    log_warn("HTML teaser send failed; retrying as plain text.")
-    plain_message = _build_plain_teaser(channel_name, video_title, video_url, teaser, premium_url)
-    if _post(bot_token, chat_id, plain_message):
-        log_info("Teaser sent to free Telegram channel as plain text (fallback).")
-        return True
-
-    log_error("Failed to send Telegram teaser (HTML and plain text both failed).")
-    return False
+    return _send_with_fallback(
+        bot_token, chat_id,
+        _build_html_teaser(channel_name, video_title, video_url, teaser, premium_url),
+        _build_plain_teaser(channel_name, video_title, video_url, teaser, premium_url),
+        "teaser",
+    )
 
 
 def send_telegram_message(bot_token, chat_id, channel_name, video_title, video_url, published_at, summary):
@@ -316,16 +398,9 @@ def send_telegram_message(bot_token, chat_id, channel_name, video_title, video_u
     error), retries once as plain text so a summary is never lost to a
     formatting issue. Returns True if either attempt succeeds.
     """
-    html_message = _build_html_message(channel_name, video_title, video_url, published_at, summary)
-    if _post(bot_token, chat_id, html_message, parse_mode="HTML"):
-        log_info("Message sent successfully to Telegram channel.")
-        return True
-
-    log_warn("HTML send failed; retrying as plain text.")
-    plain_message = _build_plain_message(channel_name, video_title, video_url, published_at, summary)
-    if _post(bot_token, chat_id, plain_message):
-        log_info("Message sent to Telegram as plain text (fallback).")
-        return True
-
-    log_error("Failed to send Telegram message (HTML and plain text both failed).")
-    return False
+    return _send_with_fallback(
+        bot_token, chat_id,
+        _build_html_message(channel_name, video_title, video_url, published_at, summary),
+        _build_plain_message(channel_name, video_title, video_url, published_at, summary),
+        "message",
+    )

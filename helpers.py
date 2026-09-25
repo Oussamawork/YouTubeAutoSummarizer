@@ -44,6 +44,22 @@ def env_float(name, default):
         return default
 
 
+def env_str_list(name, default=()):
+    """
+    Comma-separated env var as a list of lower-cased, stripped, de-duplicated
+    items; unset/empty (an unconfigured Actions variable is "") gives `default`.
+    """
+    value = (os.getenv(name) or "").strip()
+    if not value:
+        return list(default)
+    out = []
+    for item in value.split(","):
+        item = item.strip().lower()
+        if item and item not in out:
+            out.append(item)
+    return out or list(default)
+
+
 # Function to read channel entries from a file
 def read_channels(file_path):
     """
@@ -62,14 +78,20 @@ def read_channels(file_path):
       only=a,b,c — process a video only when its title mentions one of these
                keywords (whole words, case-insensitive). Filtering happens
                before the transcript fetch, so skipped videos cost nothing.
+      lang=xx — the language the channel speaks (ISO 639-1, e.g. lang=de).
+               Only a transcript in that language is accepted: a translated
+               or auto-dubbed caption track is rejected and the next source
+               tried. Without it, any language in TRANSCRIPT_LANGUAGES
+               (default: every language the claims guard covers) passes.
 
     Unknown or malformed options are logged and ignored, so a typo can't make
     the whole channel list unreadable.
 
-    Returns a list of {"channel_id", "digest", "max_per_run", "only"} dicts.
+    Returns a list of {"channel_id", "digest", "max_per_run", "only",
+    "language"} dicts.
     """
     try:
-        with open(file_path, "r") as file:
+        with open(file_path, "r", encoding="utf-8") as file:
             channels = []
             for line in file:
                 # Strip inline comments too, so an entry can be annotated with
@@ -79,7 +101,7 @@ def read_channels(file_path):
                     continue
                 tokens = line.split()
                 entry = {"channel_id": tokens[0], "digest": False, "max_per_run": None,
-                         "only": []}
+                         "only": [], "language": None}
                 for token in tokens[1:]:
                     option = token.lower()
                     if option == "digest":
@@ -95,6 +117,12 @@ def read_channels(file_path):
                             entry["only"].extend(keywords)
                         else:
                             log_error(f"Ignoring empty channel option '{token}' for {tokens[0]}")
+                    elif option.startswith("lang="):
+                        code = option[5:].strip().replace("_", "-").split("-", 1)[0]
+                        if re.fullmatch(r"[a-z]{2,3}", code):
+                            entry["language"] = code
+                        else:
+                            log_error(f"Ignoring malformed channel option '{token}' for {tokens[0]}")
                     else:
                         log_error(f"Ignoring unknown channel option '{token}' for {tokens[0]}")
                 channels.append(entry)
@@ -123,7 +151,7 @@ def load_state(file_path):
     empty state if the file is missing or unreadable; never raises.
     """
     try:
-        with open(file_path, "r") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
         return _empty_state()
@@ -149,24 +177,31 @@ def load_state(file_path):
     }
 
 
-def save_state(file_path, seen):
+def write_json_atomic(file_path, data, indent=2, sort_keys=True):
     """
-    Persist the dedup state atomically.
+    Write `data` as JSON so that the file is never seen half-written.
 
-    Writes to a temp file in the same directory and os.replace()s it into place,
-    so a crash mid-write can't leave a truncated/corrupt dedup file (which would
-    reset state and cause already-sent summaries to be re-sent).
+    Writes to a temp file in the same directory and os.replace()s it into
+    place. Every JSON state file the workflows commit back (dedup state, the
+    Supadata and Gemini counters, the price cache, the ticker map) is read by
+    the next run, and a truncated file reads as "no state" — which re-sends
+    summaries or re-spends a budget. Creates parent directories as needed.
+    Returns True on success; a failure is logged, never raised.
     """
     tmp = None
     try:
         directory = os.path.dirname(os.path.abspath(file_path)) or "."
-        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".seen_", suffix=".tmp")
-        with os.fdopen(fd, "w") as f:
-            json.dump(seen, f, indent=2, sort_keys=True)
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp_", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent, sort_keys=sort_keys)
+            f.write("\n")
         os.replace(tmp, file_path)
         tmp = None  # replaced successfully; nothing to clean up
-    except OSError as e:
-        log_error(f"Could not write seen-videos file {file_path}: {e}")
+        return True
+    except (OSError, TypeError, ValueError) as e:
+        log_error(f"Could not write {file_path}: {e}")
+        return False
     finally:
         if tmp and os.path.exists(tmp):
             try:
@@ -175,7 +210,11 @@ def save_state(file_path, seen):
                 pass
 
 
-# Function to save results to a JSON file
+def save_state(file_path, seen):
+    """Persist the dedup state atomically (see write_json_atomic)."""
+    write_json_atomic(file_path, seen)
+
+
 def title_matches(title, keywords):
     """
     True when `title` mentions any keyword as a whole word (case-insensitive),
@@ -214,14 +253,6 @@ def append_jsonl(path, record):
         log_error(f"Could not append record to {path}: {e}")
         return False
 
-
-def save_to_json(data, filename):
-    try:
-        with open(filename, 'w') as json_file:
-            json.dump(data, json_file, indent=4)
-        print(f"Data saved to {filename}")
-    except Exception as e:
-        print(f"Error saving data to JSON file: {e}")
 
 def clean_summary(summary: str) -> str:
     """

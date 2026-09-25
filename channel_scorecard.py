@@ -9,48 +9,43 @@ import requests
 from dotenv import load_dotenv
 
 import price_cache
+import scorecard_pricing as sp
+from helpers import env_int
 from log import log_info, log_warn, log_error
-from market_pulse import (
+from sendToTelegram import send_telegram_text
+from signals_data import (
     SIGNALS_FILE, load_signals, _parse_date, _iter_assets, canonical_ticker,
     UNPRICEABLE_TICKERS,
 )
-from sendToTelegram import send_telegram_text
 
-# Weekly per-channel accuracy scorecard: joins the directional calls recorded
-# in data/signals.jsonl with free daily price data (Stooq, keyless CSV) and
-# measures each channel's hit rate — was the price higher after a bullish call,
-# lower after a bearish one — at 7- and 30-day horizons. Runs every Friday from
-# weekly-scorecard.yml; silently skips until the dataset spans at least a week.
+# Weekly per-source accuracy scorecard (Fridays, weekly-scorecard.yml).
+#
+# PRODUCTION PATH (main): canonical claims through canonical_claims.load_
+# canonical_claims, scored by research_analytics.scorecard under the rules in
+# scorecard_pricing (exchange-aware next-close entry, split-adjusted prices
+# with recorded provenance, per-claim benchmarks or an honest null). It is
+# reported as EXPERIMENTAL and unranked until SCORECARD_RANKINGS=true.
+#
+# LEGACY PATH (evaluate / build_scorecard / generate_scorecard, --legacy):
+# the original fixed 7/30-day directional hit rate over data/signals.jsonl —
+# kept as a compatibility consumer of the legacy view and for
+# market_pulse's track-record weighting, never as the headline scorecard.
 # Hit rates over tiny samples are noise: the report always shows sample sizes,
 # and remains research input, not investment advice.
 
 load_dotenv('.env')
 
-STOOQ_URL = "https://stooq.com/q/d/l/?s={symbol}&d1={d1}&d2={d2}&i=d"
-# Stooq is behind a JavaScript browser check and is NOT usable server-side as
-# of 2026-08-17, measured directly:
-#   - default python-requests UA  -> 404 for every symbol
-#   - browser UA (these headers)  -> 200 whose body is the JS challenge page,
-#                                    not CSV, so the parser still yields nothing
-# The 404 masqueraded as "no such ticker" in the logs, which is how this went
-# unnoticed from the first scheduled run (2026-07-27) onward: every price lookup
-# has failed since, silently disabling implied-upside annotations, track-record
-# weighting, the scorecard and the price-target chart. These headers are kept
-# because they are correct for a CSV client and cost nothing if Stooq drops the
-# challenge, but restoring prices needs a different provider — do not read their
-# presence as "prices work".
-STOOQ_HEADERS = {
-    "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
-    "Accept": "text/csv,text/plain,*/*",
-}
 REQUEST_TIMEOUT = 15
 MAX_RETRIES = 3
 RETRY_BACKOFF = 2
 
-# Twelve Data is the price source once TWELVEDATA_API is set: unlike Stooq it
-# is built for server-side use, and its free tier (800 requests/day, 8 per
-# minute) comfortably covers a weekly pulse and scorecard.
+# Twelve Data is the price source; TWELVEDATA_API must be set for any price
+# lookup to work. It is built for server-side use, and its free tier (800
+# requests/day, 8 per minute) comfortably covers a weekly pulse and scorecard.
+# The keyless predecessor, Stooq, sat behind a JavaScript browser check from
+# 2026-08-17 and silently returned nothing from the first scheduled run
+# (2026-07-27) until Twelve Data replaced it; it has been removed rather than
+# kept as a fallback that only ever produced an empty result.
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 TWELVEDATA_SEARCH_URL = "https://api.twelvedata.com/symbol_search"
 # The plan allows 8 credits/minute; we pace below it on purpose. Measured
@@ -68,7 +63,7 @@ TWELVEDATA_RATE_LIMIT_COOLDOWN = 62
 # The cap keeps a run bounded (120 -> ~15 minutes) and degrades the way the
 # rest of this module does — callers that get {} just skip those assets.
 # Callers spend it in priority order, so the visible features are funded first.
-TWELVEDATA_MAX_REQUESTS = int(os.getenv("TWELVEDATA_MAX_REQUESTS", "120") or 120)
+TWELVEDATA_MAX_REQUESTS = env_int("TWELVEDATA_MAX_REQUESTS", 120)
 # A signal dated on a weekend/holiday uses the next trading day's close, up to
 # this many days later; beyond that the price point is treated as missing.
 MAX_PRICE_LAG_DAYS = 5
@@ -84,7 +79,7 @@ DISCLAIMER = (
 
 def symbol_for(asset):
     """
-    Map an asset entry to a Stooq symbol, or None when it isn't priceable.
+    Map an asset entry to an internal symbol, or None when it isn't priceable.
     Uses the canonical ticker (recorded, else the curated alias table), so a
     call on "Chevron" scores even though the speaker never said "CVX" — a
     third of directional calls were ticker-less and invisible before this.
@@ -98,7 +93,7 @@ def symbol_for(asset):
         return f"{ticker}.us"
     if asset_type == "crypto":
         return f"{ticker}usd"
-    return None  # index/commodity/macro naming on Stooq is too inconsistent
+    return None  # index/commodity/macro symbols vary too much per provider
 
 
 def twelvedata_key():
@@ -244,10 +239,22 @@ def _twelvedata_pace(now=None, _calls=[]):
     _calls.append(now)
 
 
+class Bars(dict):
+    """A {date: close} dict that also carries the day's high and low
+    (`.highs`, `.lows`, {date: value}) when the provider returned bars. Every
+    existing caller keeps reading closes; the scorecard's price-target
+    methods read the range (scorecard_pricing.evaluate_target)."""
+
+    def __init__(self, closes=None, highs=None, lows=None):
+        super().__init__(closes or {})
+        self.highs = dict(highs or {})
+        self.lows = dict(lows or {})
+
+
 def _parse_twelvedata(payload, symbol):
-    """{date: close} from a Twelve Data time_series body. The API reports its
-    own errors inside a 200 body (status="error"), so that is checked before
-    the values are read."""
+    """Daily closes (a Bars dict, highs/lows beside them) from a Twelve Data
+    time_series body. The API reports its own errors inside a 200 body
+    (status="error"), so that is checked before the values are read."""
     if not isinstance(payload, dict):
         log_warn(f"Unexpected Twelve Data response for {symbol}.")
         return {}
@@ -255,7 +262,7 @@ def _parse_twelvedata(payload, symbol):
         log_warn(f"Twelve Data error for {symbol}: "
                  f"{payload.get('code')} {payload.get('message', '')[:120]}")
         return {}
-    prices = {}
+    prices, highs, lows = {}, {}, {}
     for row in payload.get("values") or []:
         day = _parse_date((row.get("datetime") or "")[:10])
         try:
@@ -264,9 +271,14 @@ def _parse_twelvedata(payload, symbol):
             continue
         if day:
             prices[day] = close
+            try:
+                highs[day], lows[day] = float(row.get("high")), float(row.get("low"))
+            except (TypeError, ValueError):
+                highs.pop(day, None), lows.pop(day, None)
     if not prices:
         log_warn(f"No usable price data from Twelve Data for {symbol}.")
-    return prices
+        return {}
+    return Bars(prices, highs, lows)
 
 
 def _spend_request_budget(_state=[0]):
@@ -295,6 +307,10 @@ def fetch_prices_twelvedata(symbol, start, end, api_key):
         "symbol": td_symbol, "interval": "1day",
         "start_date": start.isoformat(), "end_date": end.isoformat(),
         "order": "ASC", "format": "JSON", "outputsize": 5000, "apikey": api_key,
+        # Split-adjusted at minimum ("splits", the provider default); "all"
+        # folds dividends in for a total-return series. Recorded with the
+        # closes so a cached series is never mistaken for the other kind.
+        "adjust": sp.PRICE_ADJUSTMENT,
     }
     # A bare ticker listed on several exchanges is rejected with a 400 asking
     # for disambiguation — that is what NU (Nu Holdings), AMTM (Amentum) and
@@ -333,20 +349,20 @@ def fetch_prices_twelvedata(symbol, start, end, api_key):
     return {}
 
 
-def fetch_prices_live(symbol, start, end):
+def fetch_prices_live(symbol, start, end, _warned=[]):
     """
-    Daily closes straight from the provider: Twelve Data when a key is
-    configured, Stooq otherwise. Returns {} on any failure (logged, never
-    raises).
-
-    Stooq is the keyless legacy path and has been unusable server-side since
-    2026-08-17 (see STOOQ_HEADERS) — without a Twelve Data key this returns
-    nothing, which market_pulse.fetch_latest_prices reports as one loud line.
+    Daily closes straight from the provider. Returns {} on any failure
+    (logged, never raises). Without a Twelve Data key there is no provider:
+    that is said once per run, and market_pulse.fetch_latest_prices then
+    reports the resulting "no prices for any ticker" in one loud line.
     """
     api_key = twelvedata_key()
     if api_key:
         return fetch_prices_twelvedata(symbol, start, end, api_key)
-    return fetch_prices_stooq(symbol, start, end)
+    if not _warned:
+        _warned.append(True)
+        log_warn("No price API key configured (TWELVEDATA_API); price lookups are off.")
+    return {}
 
 
 def fetch_prices(symbol, start, end, cache=None):
@@ -363,55 +379,47 @@ def fetch_prices(symbol, start, end, cache=None):
     """
     cache = price_cache.active() if cache is None else cache
     entry = cache.get(symbol)
-    if price_cache.covered(entry, start, end):
+    adjustment = sp.adjustment_label()
+    if price_cache.covered(entry, start, end, adjustment):
         return price_cache.slice_range(entry, start, end)
 
     prices = fetch_prices_live(symbol, start, end)
     if prices:
-        price_cache.remember(cache, symbol, start, end, prices)
+        price_cache.remember(cache, symbol, start, end, prices, adjustment)
         return price_cache.slice_range(cache[symbol], start, end)
+    if entry and (entry.get("adjustment") or "split_adjusted") != adjustment:
+        return {}  # never serve a differently adjusted series as this one
     return price_cache.slice_range(entry, start, end)
 
 
-def fetch_prices_stooq(symbol, start, end):
-    """Daily closes for `symbol` from Stooq as {date: close}; {} on failure."""
-    url = STOOQ_URL.format(
-        symbol=symbol, d1=start.strftime("%Y%m%d"), d2=end.strftime("%Y%m%d")
+# What every series served by fetch_prices is: the scorecard records it per
+# scored claim and refuses series whose adjustment it does not know.
+fetch_prices.price_provenance = {
+    "provider": "twelvedata", "adjustment": sp.adjustment_label(),
+    "corporate_action_status": sp.adjustment_label(),
+}
+
+
+def fetch_price_series(symbol, start, end, cache=None):
+    """
+    The scorecard's price fetcher: a scorecard_pricing.PriceSeries with the
+    closes from fetch_prices (cache first, live for gaps) plus the daily
+    highs and lows the cache holds for the same days, so price targets can
+    be tested by intraday touch where bars exist and are reported as
+    closes-only where they do not.
+    """
+    cache = price_cache.active() if cache is None else cache
+    closes = fetch_prices(symbol, start, end, cache)
+    entry = cache.get(symbol) or {}
+    return sp.PriceSeries(
+        symbol=symbol, closes=dict(closes), provider="twelvedata", adjustment=sp.adjustment_label(),
+        corporate_action_status=sp.adjustment_label(), requested_start=start, requested_end=end,
+        highs=price_cache.slice_range(entry, start, end, "highs") or None,
+        lows=price_cache.slice_range(entry, start, end, "lows") or None,
     )
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = requests.get(url, headers=STOOQ_HEADERS, timeout=REQUEST_TIMEOUT)
-        except requests.RequestException as e:
-            log_warn(f"Stooq request error for {symbol} (attempt {attempt}/{MAX_RETRIES}): {e}")
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF * attempt)
-                continue
-            return {}
-        if resp.status_code != 200:
-            log_warn(f"Stooq returned {resp.status_code} for {symbol}.")
-            return {}
-        return _parse_stooq_csv(resp.text, symbol)
-    return {}
 
 
-def _parse_stooq_csv(text, symbol):
-    lines = (text or "").strip().splitlines()
-    if len(lines) < 2 or not lines[0].lower().startswith("date"):
-        log_warn(f"No usable price data from Stooq for {symbol}.")
-        return {}
-    prices = {}
-    for line in lines[1:]:
-        parts = line.split(",")
-        if len(parts) < 5:
-            continue
-        day = _parse_date(parts[0])
-        try:
-            close = float(parts[4])
-        except ValueError:
-            continue
-        if day is not None:
-            prices[day] = close
-    return prices
+fetch_price_series.price_provenance = fetch_prices.price_provenance
 
 
 def price_on_or_after(prices, day, max_lag=MAX_PRICE_LAG_DAYS):
@@ -543,14 +551,47 @@ def generate_scorecard(today=None, path=SIGNALS_FILE, price_fetcher=fetch_prices
     return build_scorecard(stats, today)
 
 
+def generate_canonical_scorecard(today=None, price_fetcher=fetch_price_series, claims=None):
+    """
+    The production scorecard: canonical claims (active runs, no legacy rows,
+    no repeats) scored under scorecard_pricing. Returns "" when nothing is
+    scorable yet. Experimental and unranked unless SCORECARD_RANKINGS=true.
+    """
+    import canonical_claims
+    import research_analytics as ra
+    today = today or datetime.now(timezone.utc).date()
+    claims = canonical_claims.load_canonical_claims() if claims is None else claims
+    if not claims:
+        log_info("No canonical claims yet; the scorecard starts once research data accumulates.")
+        return ""
+    sc = ra.scorecard(claims, today, price_fetcher)
+    excluded, min_sample = sc.pop("_excluded"), sc.pop("_min_sample")
+    rankings_on = sc.pop("_rankings_enabled")
+    if not sc:
+        log_info(f"No matured, scorable forecasts yet (excluded: {excluded}).")
+        return ""
+    rankable = ra.rankable_sources(sc, min_sample)
+    lines = [f"🎯 Source Scorecard — as of {today.isoformat()} "
+             f"({'ranked' if rankings_on and rankable else sp.SCORECARD_EXPERIMENTAL_LABEL})",
+             "Data: canonical claims (data/research/claims.jsonl, active runs only)", "",
+             ra.format_scorecard_lines(sc, excluded, min_sample, rankings_on, rankable), ""]
+    conditional = ra.format_conditional_report(ra.conditional_forecast_report(claims, today))
+    if conditional:
+        lines += [conditional, ""]
+    lines.append(DISCLAIMER)
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Per-channel accuracy scorecard from data/signals.jsonl + Stooq prices"
+        description="Per-source accuracy scorecard from canonical claims + daily prices"
     )
     parser.add_argument("--dry-run", action="store_true", help="Print instead of sending")
+    parser.add_argument("--legacy", action="store_true",
+                        help="Use the legacy 7/30-day scorecard over data/signals.jsonl (compatibility only)")
     args = parser.parse_args()
 
-    scorecard = generate_scorecard()
+    scorecard = generate_scorecard() if args.legacy else generate_canonical_scorecard()
     if not scorecard:
         log_info("Nothing to score this week; skipping the scorecard.")
         return 0

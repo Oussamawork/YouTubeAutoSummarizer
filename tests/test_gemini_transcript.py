@@ -28,7 +28,7 @@ def _payload(text):
     return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
 
 
-LONG = "word " * 500  # comfortably over the minimum-length floor
+LONG = "so the stock is going to move and we think that it will be higher " * 60  # over the length floor, in English
 
 
 @pytest.fixture
@@ -81,7 +81,7 @@ class TestFetchGeminiTranscript:
 
         monkeypatch.setattr(transcript.requests, "post", fake_post)
         text, exhausted, reason = transcript._fetch_gemini_transcript("vid00000001")
-        assert text.startswith("word")
+        assert text.startswith("so the stock")
         assert (exhausted, reason) == (False, "gemini_ok")
         assert len(calls) == 1 and "gemini-3.5-flash" in calls[0]
 
@@ -216,10 +216,10 @@ class TestFetchGeminiTranscript:
 class TestSourceOrder:
     def test_supadata_wins_and_gemini_is_not_called(self, monkeypatch, gemini_key):
         monkeypatch.setattr(transcript, "_fetch_supadata",
-                            lambda vid: ("supadata text", False, "ok"))
+                            lambda vid, languages=None: ("supadata text", False, "ok"))
         called = []
         monkeypatch.setattr(transcript, "_fetch_gemini_transcript",
-                            lambda vid: called.append(1) or ("", False, "x"))
+                            lambda vid, languages=None: called.append(1) or ("", False, "x"))
         result = transcript.get_transcript_from_video("https://youtu.be/dQw4w9WgXcQ")
         assert result["transcript"] == "supadata text"
         # Supadata costs ~9k tokens against Gemini's ~123k, so it must stay first.
@@ -227,9 +227,9 @@ class TestSourceOrder:
 
     def test_gemini_used_when_supadata_is_out_of_credits(self, monkeypatch, gemini_key):
         monkeypatch.setattr(transcript, "_fetch_supadata",
-                            lambda vid: ("", True, "no_credits"))
+                            lambda vid, languages=None: ("", True, "no_credits"))
         monkeypatch.setattr(transcript, "_fetch_gemini_transcript",
-                            lambda vid: (LONG, False, "gemini_ok"))
+                            lambda vid, languages=None: (LONG, False, "gemini_ok"))
         result = transcript.get_transcript_from_video("https://youtu.be/dQw4w9WgXcQ")
         assert result["transcript"] == LONG
         assert result["reason"] == "gemini_ok"
@@ -239,19 +239,19 @@ class TestSourceOrder:
 
     def test_both_budgets_spent_defers(self, monkeypatch, gemini_key):
         monkeypatch.setattr(transcript, "_fetch_supadata",
-                            lambda vid: ("", True, "no_credits"))
+                            lambda vid, languages=None: ("", True, "no_credits"))
         monkeypatch.setattr(transcript, "_fetch_gemini_transcript",
-                            lambda vid: ("", True, "gemini_quota"))
-        monkeypatch.setattr(transcript, "_fetch_youtube_transcript_api", lambda vid: "")
+                            lambda vid, languages=None: ("", True, "gemini_quota"))
+        monkeypatch.setattr(transcript, "_fetch_youtube_transcript_api", lambda vid, languages=None: "")
         result = transcript.get_transcript_from_video("https://youtu.be/dQw4w9WgXcQ")
         assert result["budget_exhausted"] is True
         assert result["reason"] == "gemini_quota"
 
     def test_youtube_api_still_the_last_resort(self, monkeypatch, gemini_key):
-        monkeypatch.setattr(transcript, "_fetch_supadata", lambda vid: ("", False, "empty_content"))
+        monkeypatch.setattr(transcript, "_fetch_supadata", lambda vid, languages=None: ("", False, "empty_content"))
         monkeypatch.setattr(transcript, "_fetch_gemini_transcript",
-                            lambda vid: ("", False, "gemini_too_short"))
-        monkeypatch.setattr(transcript, "_fetch_youtube_transcript_api", lambda vid: "local text")
+                            lambda vid, languages=None: ("", False, "gemini_too_short"))
+        monkeypatch.setattr(transcript, "_fetch_youtube_transcript_api", lambda vid, languages=None: "local text")
         result = transcript.get_transcript_from_video("https://youtu.be/dQw4w9WgXcQ")
         assert result["transcript"] == "local text"
         assert result["reason"] == "fallback_ok"
@@ -374,21 +374,21 @@ class TestSuccessReasonsAreShared:
         # used to hold a hand-written copy, so adding `gemini_ok` here silently
         # made every Gemini success show up as a reported failure:
         #   "Transcript failures by reason: gemini_ok=4, gemini_http_400=1"
-        monkeypatch.setattr(transcript, "_fetch_supadata", lambda vid: ("", False, "empty"))
+        monkeypatch.setattr(transcript, "_fetch_supadata", lambda vid, languages=None: ("", False, "empty"))
         monkeypatch.setattr(transcript, "_fetch_gemini_transcript",
-                            lambda vid: (LONG, False, "gemini_ok"))
+                            lambda vid, languages=None: (LONG, False, "gemini_ok"))
         result = transcript.get_transcript_from_video("https://youtu.be/dQw4w9WgXcQ")
         assert result["transcript"]
         assert result["reason"] in transcript.TRANSCRIPT_SUCCESS_REASONS
 
     def test_supadata_and_fallback_successes_are_declared_too(self, monkeypatch, gemini_key):
-        monkeypatch.setattr(transcript, "_fetch_supadata", lambda vid: ("text", False, "ok"))
+        monkeypatch.setattr(transcript, "_fetch_supadata", lambda vid, languages=None: ("text", False, "ok"))
         assert transcript.get_transcript_from_video(
             "https://youtu.be/dQw4w9WgXcQ")["reason"] in transcript.TRANSCRIPT_SUCCESS_REASONS
 
-        monkeypatch.setattr(transcript, "_fetch_supadata", lambda vid: ("", False, "empty"))
+        monkeypatch.setattr(transcript, "_fetch_supadata", lambda vid, languages=None: ("", False, "empty"))
         monkeypatch.setattr(transcript, "_fetch_gemini_transcript",
-                            lambda vid: ("", False, "gemini_too_short"))
-        monkeypatch.setattr(transcript, "_fetch_youtube_transcript_api", lambda vid: "text")
+                            lambda vid, languages=None: ("", False, "gemini_too_short"))
+        monkeypatch.setattr(transcript, "_fetch_youtube_transcript_api", lambda vid, languages=None: "text")
         assert transcript.get_transcript_from_video(
             "https://youtu.be/dQw4w9WgXcQ")["reason"] in transcript.TRANSCRIPT_SUCCESS_REASONS

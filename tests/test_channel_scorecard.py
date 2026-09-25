@@ -29,14 +29,6 @@ def test_symbol_mapping():
     assert cs.symbol_for({"ticker": None, "type": "stock"}) is None
 
 
-def test_parse_stooq_csv():
-    csv = "Date,Open,High,Low,Close,Volume\n2026-07-01,10,11,9,10.5,1000\nbad,line\n2026-07-02,10.5,12,10,11.0,900\n"
-    prices = cs._parse_stooq_csv(csv, "x.us")
-    assert prices == {date(2026, 7, 1): 10.5, date(2026, 7, 2): 11.0}
-    assert cs._parse_stooq_csv("No data", "x.us") == {}
-    assert cs._parse_stooq_csv("", "x.us") == {}
-
-
 def test_price_on_or_after_skips_weekend():
     prices = {date(2026, 7, 6): 100.0}  # Monday
     assert cs.price_on_or_after(prices, date(2026, 7, 4)) == 100.0  # Saturday signal
@@ -177,20 +169,18 @@ def test_fetch_prices_uses_twelvedata_when_key_set(monkeypatch):
         ]})
 
     monkeypatch.setattr(cs.requests, "get", fake_get)
-    monkeypatch.setattr(cs, "fetch_prices_stooq",
-                        lambda *a: pytest.fail("Stooq must not be called with a key set"))
     prices = cs.fetch_prices("nvda.us", date(2026, 8, 10), date(2026, 8, 16))
     assert prices == {date(2026, 8, 14): 180.5, date(2026, 8, 15): 182.25}
     assert seen["params"]["symbol"] == "NVDA"
     assert seen["params"]["apikey"] == "tok"
 
 
-def test_fetch_prices_falls_back_to_stooq_without_key(monkeypatch):
+def test_fetch_prices_without_key_is_empty_and_never_hits_the_network(monkeypatch):
     monkeypatch.delenv("TWELVEDATA_API", raising=False)
     monkeypatch.delenv("TWELVEDATA_API_KEY", raising=False)
-    monkeypatch.setattr(cs, "fetch_prices_stooq",
-                        lambda symbol, start, end: {date(2026, 8, 14): 1.0})
-    assert cs.fetch_prices("nvda.us", date(2026, 8, 10), date(2026, 8, 16))
+    monkeypatch.setattr(cs.requests, "get",
+                        lambda *a, **k: pytest.fail("no provider without a key"))
+    assert cs.fetch_prices("nvda.us", date(2026, 8, 10), date(2026, 8, 16)) == {}
 
 
 def test_twelvedata_reports_error_body_and_yields_nothing(monkeypatch):

@@ -1,0 +1,21 @@
+{
+ "fixture_id": "news-third-party-target-missed",
+ "channel_name": "Demo News",
+ "video_title": "Analyst moves today",
+ "published_at": "2026-08-13T13:30:00+00:00",
+ "transcript": "In analyst moves today, Morgan Stanley raised its price target on Micron to $150 from $120, citing memory pricing. Micron shares rose 3 percent on the news. Separately, Reuters reported that Intel will cut 15 percent of its workforce.",
+ "expected_claims": [
+  {
+   "evidence_text": "Morgan Stanley raised its price target on Micron to $150",
+   "subject": "MU",
+   "claim_type": "third_party_view",
+   "attribution_type": "speaker_reporting_news",
+   "host_position": "neutral",
+   "target_value": 150,
+   "ticker": "MU"
+  }
+ ],
+ "model_output": {
+  "claims": []
+ }
+}

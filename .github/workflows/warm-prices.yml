@@ -48,17 +48,24 @@ jobs:
           pip install -r requirements.txt
 
       - name: Warm the price cache
+        # Inputs reach the shell through environment variables, never by
+        # expanding `${{ }}` inside the script: an expansion is pasted into the
+        # command text before the shell sees it, so a crafted input could run
+        # arbitrary commands with this job's secrets.
         run: |
-          if [ "${{ inputs.resolve }}" = "true" ]; then
+          if [ "${RESOLVE}" = "true" ]; then
             python warm_prices.py --resolve
-          elif [ -n "${{ inputs.find }}" ]; then
-            python warm_prices.py --find "${{ inputs.find }}"
-          elif [ -n "${{ inputs.probe }}" ]; then
-            python warm_prices.py --probe "${{ inputs.probe }}"
+          elif [ -n "${FIND}" ]; then
+            python warm_prices.py --find "${FIND}"
+          elif [ -n "${PROBE}" ]; then
+            python warm_prices.py --probe "${PROBE}"
           else
             python warm_prices.py
           fi
         env:
+          RESOLVE: ${{ inputs.resolve }}
+          FIND: ${{ inputs.find }}
+          PROBE: ${{ inputs.probe }}
           TWELVEDATA_API: ${{ secrets.TWELVEDATA_API }}
           # This job is the slow one by design, so it gets a far larger share
           # of the 800/day quota than the interactive weekly jobs.
@@ -76,14 +83,29 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add -- data/prices.json data/ticker_map.json
             git commit -m "chore: warm price cache [skip ci]"
+            # Same loop as daily-summary.yml, for the same reason: the daily
+            # job commits to this branch up to twelve times a day, so a rebase
+            # conflict here is routine. `|| true` on the rebase used to leave a
+            # conflicted, detached HEAD that `git push` reported as
+            # "Everything up-to-date" with exit 0 — the whole 90-minute warm run
+            # silently discarded. Abort and retry instead, and trust the ref
+            # rather than the push's exit code.
             pushed=false
             for attempt in 1 2 3; do
-              git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
-              if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              if ! git pull --rebase --autostash origin "${GITHUB_REF_NAME}"; then
+                echo "Rebase onto ${GITHUB_REF_NAME} failed; aborting it rather than pushing a stranded HEAD."
+                git rebase --abort || true
+                sleep $((attempt * 5))
+                continue
+              fi
+              local_head="$(git rev-parse HEAD)"
+              if git push origin "HEAD:${GITHUB_REF_NAME}" \
+                && git fetch origin "${GITHUB_REF_NAME}" \
+                && git merge-base --is-ancestor "${local_head}" FETCH_HEAD; then
                 pushed=true
                 break
               fi
-              echo "Push attempt ${attempt} failed; retrying in $((attempt * 5))s..."
+              echo "Push attempt ${attempt} did not land; retrying in $((attempt * 5))s..."
               sleep $((attempt * 5))
             done
             if [ "${pushed}" != "true" ]; then

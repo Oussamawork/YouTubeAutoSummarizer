@@ -10,11 +10,15 @@ So closes are cached in `data/prices.json` and topped up by a separate weekly
 job (`warm-prices.yml`, Sundays) that has the time to be slow. The pulse and the
 scorecard then read the cache and only reach the network for what it is missing.
 
-Cache shape, keyed by our internal (Stooq-style, provider-independent) symbol:
+Cache shape, keyed by our internal, provider-independent symbol (`nvda.us`,
+`btcusd`; see channel_scorecard.symbol_for):
 
     {"version": 1, "symbols": {
         "nvda.us": {"from": "2026-07-01", "to": "2026-08-16",
-                    "closes": {"2026-07-01": 180.5, ...}}}}
+                    "closes": {"2026-07-01": 180.5, ...},
+                    "adjustment": "split_adjusted",
+                    "highs": {"2026-07-01": 182.0, ...},   # optional daily bars,
+                    "lows": {"2026-07-01": 178.9, ...}}}}  # for intraday target tests
 
 `from`/`to` record the range actually *requested*, which is what makes coverage
 decidable: closes alone can't distinguish "no trading that day" (a weekend)
@@ -22,8 +26,9 @@ from "never fetched".
 """
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
+from helpers import write_json_atomic
 from log import log_info, log_warn
 
 CACHE_FILE = "data/prices.json"
@@ -71,14 +76,31 @@ def load(path=CACHE_FILE):
                 closes[parsed] = float(close)
             except (TypeError, ValueError):
                 continue
-        cache[symbol] = {"from": start, "to": end, "closes": closes}
+        # Entries written before adjustment was recorded came from the
+        # provider's default request (Twelve Data adjust=splits), so they are
+        # split-adjusted; the field is filled in rather than left ambiguous.
+        cache[symbol] = {"from": start, "to": end, "closes": closes,
+                         "adjustment": entry.get("adjustment") or "split_adjusted"}
+        # Daily highs/lows (optional; entries older than the price-target
+        # methods carry none, and read as closes-only granularity).
+        for field in ("highs", "lows"):
+            values = {}
+            for day, value in (entry.get(field) or {}).items():
+                parsed = _parse_day(day)
+                try:
+                    if parsed is not None:
+                        values[parsed] = float(value)
+                except (TypeError, ValueError):
+                    continue
+            if values:
+                cache[symbol][field] = values
     return cache
 
 
 def save(cache, path=CACHE_FILE, today=None):
     """Write the cache, trimming history beyond MAX_HISTORY_DAYS. Returns True
     on success; a write failure is logged, never raised."""
-    today = today or datetime.utcnow().date()
+    today = today or datetime.now(timezone.utc).date()
     cutoff = today - timedelta(days=MAX_HISTORY_DAYS)
     symbols = {}
     for symbol, entry in sorted(cache.items()):
@@ -90,47 +112,62 @@ def save(cache, path=CACHE_FILE, today=None):
             "from": max(entry["from"], cutoff).isoformat(),
             "to": entry["to"].isoformat(),
             "closes": closes,
+            "adjustment": entry.get("adjustment") or "split_adjusted",
         }
-    try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"version": CACHE_VERSION, "symbols": symbols}, f,
-                      indent=1, sort_keys=True)
-            f.write("\n")
-    except OSError as e:
-        log_warn(f"Could not write the price cache to {path}: {e}")
+        for field in ("highs", "lows"):
+            values = {d.isoformat(): v for d, v in sorted((entry.get(field) or {}).items()) if d >= cutoff}
+            if values:
+                symbols[symbol][field] = values
+    if not write_json_atomic(path, {"version": CACHE_VERSION, "symbols": symbols}, indent=1):
         return False
     total = sum(len(entry["closes"]) for entry in symbols.values())
     log_info(f"Price cache saved: {len(symbols)} symbols, {total} closes.")
     return True
 
 
-def covered(entry, start, end):
+def covered(entry, start, end, adjustment=None):
     """True when the cached range spans [start, end] — i.e. the request can be
-    answered without touching the network."""
-    return bool(entry) and entry["from"] <= start and entry["to"] >= end
+    answered without touching the network — and, when `adjustment` is given,
+    the cached closes carry that adjustment (a split-adjusted series never
+    answers a total-return request, or the reverse)."""
+    if not entry or entry["from"] > start or entry["to"] < end:
+        return False
+    return adjustment is None or (entry.get("adjustment") or "split_adjusted") == adjustment
 
 
-def slice_range(entry, start, end):
-    """The cached closes falling inside [start, end]."""
-    if not entry:
+def slice_range(entry, start, end, field="closes"):
+    """The cached closes (or highs / lows) falling inside [start, end]."""
+    if not entry or not entry.get(field):
         return {}
-    return {d: c for d, c in entry["closes"].items() if start <= d <= end}
+    return {d: c for d, c in entry[field].items() if start <= d <= end}
 
 
-def remember(cache, symbol, start, end, closes):
+def remember(cache, symbol, start, end, closes, adjustment=None, highs=None, lows=None):
     """Merge a freshly fetched range into the cache, widening the symbol's
     covered range. `start`/`end` are what was *asked for*, so a symbol that
     simply had no trading days in the window still counts as covered and is
-    not asked for again."""
+    not asked for again. A series under a different adjustment replaces the
+    old one outright rather than being merged into it. `highs` / `lows`
+    (daily bars) are kept beside the closes when the provider returned them;
+    a closes dict that carries them as attributes (channel_scorecard.Bars)
+    is unpacked."""
+    highs = highs if highs is not None else getattr(closes, "highs", None)
+    lows = lows if lows is not None else getattr(closes, "lows", None)
     entry = cache.get(symbol)
+    if entry and adjustment and (entry.get("adjustment") or "split_adjusted") != adjustment:
+        entry = None
     if entry:
         entry["from"] = min(entry["from"], start)
         entry["to"] = max(entry["to"], end)
         entry["closes"].update(closes)
+        entry.setdefault("adjustment", adjustment or "split_adjusted")
     else:
-        cache[symbol] = {"from": start, "to": end, "closes": dict(closes)}
-    return cache[symbol]
+        entry = cache[symbol] = {"from": start, "to": end, "closes": dict(closes),
+                                 "adjustment": adjustment or "split_adjusted"}
+    for field, values in (("highs", highs), ("lows", lows)):
+        if values:
+            entry.setdefault(field, {}).update(values)
+    return entry
 
 
 # The process-wide cache. Loaded once on first use so every caller in a run
