@@ -205,13 +205,16 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   resolved ticker and a clean review. The full data-quality header goes to
   the workflow log, not Telegram. The legacy pulse over `data/signals.jsonl`
   survives for compatibility and runs only with `PULSE_DATA_SOURCE=legacy`.
-- `pulse_charts.py` — the pulse's companion PNG charts (consensus board, flip
-  slope, weekly tone, bull-bear spread line, agreement-vs-attention map,
-  target-upside ladder), styled for non-technical readers and sent as a Telegram
-  photo album after the text pulse. Data prep is pure/testable; matplotlib
-  imports lazily and every chart is best-effort — chart failures never block the
-  text pulse. A chart with too little history to mean anything is either skipped
-  (`MIN_SPREAD_WEEKS`) or labels itself as early days (`MATURE_SPREAD_WEEKS`).
+- `pulse_charts.py` — the pulse's companion PNG charts, drawn 6.4in wide so
+  text survives Telegram's ~380px album preview, each titled with its
+  takeaway (`consensus_title`, `tone_title`, `upside_title`). The album is
+  consensus board (assets with 2+ creators), weekly mood, and price-target
+  ladder (single-creator targets faded); the flip slope, agreement map and
+  optimism-gap line join only when `_chart_ready` says they add something
+  (2+ well-attended reversals; 6+ points incl. a bearish/contested one;
+  `MIN_SPREAD_WEEKS` = 9 weeks of history). Data prep is pure/testable;
+  matplotlib imports lazily and every chart is best-effort — chart failures
+  never block the text pulse.
 - `ticker_resolver.py` — learns the real ticker for assets the transcript named
   badly, into `data/ticker_map.json` (filled by `warm_prices.py --resolve`).
   The provider's catalogue is tried first; only when it can't match the spelling

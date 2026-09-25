@@ -299,7 +299,9 @@ def video_tone(claims):
 def _display_name(key):
     """Readable label for an un-tickered asset key: "OIL" -> "Oil", keeping
     short all-caps index names ("S&P 500") as they are."""
-    return key if any(ch.isdigit() or ch == "&" for ch in key) else key.title()
+    if any(ch.isdigit() or ch == "&" for ch in key):
+        return key
+    return " ".join(w if len(w) <= 2 else w.title() for w in key.split())
 
 
 def aggregate_views_by_asset(claims, channel_weights=None):

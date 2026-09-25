@@ -411,7 +411,7 @@ def _disagreement_line(entry, fmt):
     bears = sorted(s for s, v in entry["votes"].items() if v == "bearish")
     minority, side = (bulls, "bullish") if len(bulls) < len(bears) else (bears, "bearish")
     return (f"{EMOJI['mixed']} {fmt.b(entry['label'])} — {len(bulls)} bullish vs {len(bears)} bearish "
-            f"({side}: {fmt.esc(', '.join(minority))})")
+            f"({side}: {fmt.esc('; '.join(minority))})")
 
 
 def _attention_movers(current, previous):
@@ -665,6 +665,7 @@ def generate_charts(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None,
             data = pulse_charts.build_chart_data(
                 [], current, previous, inputs["window_start"], today,
                 tone=inputs["tone"], videos=inputs["videos"], channels=inputs["channels"],
+                min_creators=MIN_CREATORS,
             )
         else:
             if not inputs["current"]:
