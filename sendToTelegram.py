@@ -263,6 +263,18 @@ def send_telegram_text(bot_token, chat_id, text):
     return False
 
 
+def send_telegram_html(bot_token, chat_id, html_text, plain_text, what="Text message"):
+    """
+    Send an HTML-formatted non-video message (the weekly pulse), with the
+    plain rendering as the fallback when Telegram rejects the markup. The
+    caller escapes every dynamic string. Returns True on success.
+    """
+    if not (html_text or "").strip():
+        log_warn("Empty text; nothing to send to Telegram.")
+        return False
+    return _send_with_fallback(bot_token, chat_id, html_text, plain_text, what)
+
+
 def send_telegram_photo_album(bot_token, chat_id, photo_paths, caption=None):
     """
     Send local image files as one photo album (sendMediaGroup), with `caption`

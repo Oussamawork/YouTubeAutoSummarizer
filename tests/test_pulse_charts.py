@@ -158,27 +158,49 @@ def test_upside_rows_math_and_order():
     assert round(avgo["pct"], 1) == 11.9
 
 
+def _full_chart_data():
+    week = lambda i, n, bull, bear: {"label": f"W{i}", "short_label": f"W{i}", "weeks_ago": i, "n": n,
+                                     "bullish": bull, "bearish": bear, "mixed": n - bull - bear, "neutral": 0,
+                                     "partial": False}
+    return {
+        "window": "Aug 10 - 16, 2026", "videos": 40, "channels": 6,
+        "consensus": [{"label": l, "bull": b, "bear": r, "neutral": 0, "channels": b + r}
+                      for l, b, r in (("NVDA", 4, 0), ("MU", 2, 2), ("INTC", 0, 2))],
+        "tone": [week(1, 30, 18, 4), week(0, 40, 26, 5)],
+        "upside": [{"label": "AVGO", "price": 400.0, "target": 505.0, "t_lo": 390.0, "t_hi": 620.0,
+                    "pct": 26.0, "lo": -2.5, "hi": 55.0, "n_targets": 2}],
+        "flips": [{"label": l, "from_score": 1, "to_score": -1, "from_votes": 2, "to_votes": 3}
+                  for l in ("AMD", "SK Hynix")],
+        "map": [{"label": l, "net": n, "directional": d} for l, n, d in
+                (("NVDA", 1, 6), ("MU", 0, 4), ("INTC", -1, 3), ("META", 0.3, 4), ("AMZN", 1, 3), ("SOL", 0, 3))],
+        "spread": [{"label": f"W{i}", "short_label": f"W{i}", "weeks_ago": i, "n": 40, "spread": 30.0 + i,
+                    "partial": False} for i in range(pc.MIN_SPREAD_WEEKS - 1, -1, -1)],
+    }
+
+
 def test_render_charts_writes_pngs(tmp_path):
-    records = [
-        _rec("2026-08-10", "A", [_asset(stance="bullish", price_target=500)], "bullish"),
-        _rec("2026-08-11", "B", [_asset(stance="bullish")], "bullish"),
-        _rec("2026-08-12", "C", [_asset(stance="bearish")], "bearish"),
-        _rec("2026-08-04", "A", [_asset(stance="bearish")], "bearish"),
-        _rec("2026-08-05", "B", [_asset(stance="bearish")], "neutral"),
-        # A third week so the spread line clears MIN_SPREAD_WEEKS.
-        _rec("2026-07-28", "A", [_asset(stance="bullish")], "bullish"),
-    ]
-    window_start = date(2026, 8, 9)
-    today = date(2026, 8, 16)
-    current = _agg([r for r in records if mp._in_window(r, window_start, today)])
-    previous = _agg([r for r in records if mp._in_window(r, window_start.replace(day=2), window_start)])
-    data = pc.build_chart_data(records, current, previous, window_start, today)
-    data["upside"] = pc.upside_rows(current, {"TSLA": 400.0})
-    paths = pc.render_charts(data, str(tmp_path))
-    assert len(paths) == 6  # all six charts had data
+    paths = pc.render_charts(_full_chart_data(), str(tmp_path))
+    assert [p.split("/")[-1] for p in paths] == [
+        "1-consensus.png", "2-tone.png", "3-upside.png", "4-flips.png", "5-map.png", "6-spread.png"]
     for path in paths:
-        assert path.endswith(".png")
         assert (tmp_path / path.split("/")[-1]).stat().st_size > 0
+
+
+def test_thin_sections_are_left_out_of_the_album(tmp_path):
+    data = _full_chart_data()
+    data["consensus"] = data["consensus"][:2]            # < 3 assets with 2+ creators
+    data["flips"][1]["from_votes"] = 1                   # only one well-attended reversal
+    data["map"] = [p for p in data["map"] if p["net"] > 0.2]  # nothing bearish or contested
+    data["spread"] = data["spread"][-3:]                 # 3 weeks repeat the tone chart
+    paths = pc.render_charts(data, str(tmp_path))
+    assert [p.split("/")[-1] for p in paths] == ["2-tone.png", "3-upside.png"]
+
+
+def test_chart_titles_state_the_takeaway():
+    data = _full_chart_data()
+    assert pc.consensus_title(data["consensus"]) == "Bullish on NVDA; bearish on INTC"
+    assert pc.tone_title(data["tone"]) == "65% of this week's videos expect a rise (up from 60%)"
+    assert pc.upside_title(data["upside"]) == "Boldest target: AVGO +26% (2 creators)"
 
 
 def test_render_charts_skips_empty_sections(tmp_path):

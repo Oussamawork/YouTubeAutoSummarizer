@@ -101,7 +101,9 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `canonical_claims.py` — **the one loader every production analytics job
   reads**: active runs only, no legacy rows, no repeats, condition outcomes
   overlaid; `view_claims`, `aggregate_views` (per asset AND horizon bucket,
-  one current view per source), `video_tone`, `portfolio_disclosures`.
+  one current view per source — research analytics), `aggregate_views_by_asset`
+  (per asset, one vote per creator — the pulse), `lean`, `video_tone`,
+  `portfolio_disclosures`.
   `data/signals.jsonl` is a backward-compatible view read by nothing here.
 - `scorecard_pricing.py` — scorecard methodology: exchanges/timezones/
   calendars (NYSE holiday rules), the publication-time **next-close entry
@@ -186,17 +188,33 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   and `ticker_resolver` import each other at the top level instead of lazily.
   `market_pulse` re-exports its names for existing callers.
 - `market_pulse.py` — the weekly pulse (`weekly-pulse.yml`) over **canonical
-  claims** via `canonical_claims` (top assets per horizon bucket, flips,
-  new-on-radar, disclosures, tone from each video's own views). The legacy
-  pulse over `data/signals.jsonl` survives for compatibility and runs only
-  with `PULSE_DATA_SOURCE=legacy`.
-- `pulse_charts.py` — the pulse's companion PNG charts (consensus board, flip
-  slope, weekly tone, bull-bear spread line, agreement-vs-attention map,
-  target-upside ladder), styled for non-technical readers and sent as a Telegram
-  photo album after the text pulse. Data prep is pure/testable; matplotlib
-  imports lazily and every chart is best-effort — chart failures never block the
-  text pulse. A chart with too little history to mean anything is either skipped
-  (`MIN_SPREAD_WEEKS`) or labels itself as early days (`MATURE_SPREAD_WEEKS`).
+  claims**, aggregated **per asset with one vote per creator**
+  (`canonical_claims.aggregate_views_by_asset`: a creator's vote is the
+  `lean` — 2/3 rule — of their latest in-window video's claims; conflicting
+  horizons vote `mixed`, never averaged). Sent as Telegram HTML (plain
+  fallback): a templated takeaway (never an LLM call), where creators agree /
+  disagree, most discussed, attention shifts, consensus changes, new on the
+  radar, mood (videos, asset class, creator lean), disclosures, and a coverage
+  footer. Every ranked section needs `MIN_CREATORS` (2) creators with a view:
+  ~90% of assets rest on one creator. Only a real price level counts as a
+  target (`canonical_claims.price_target_of`), one per creator, shown only
+  against a known price and within 0.2×–5× of it
+  (`pulse_charts.plausible_targets`). Reference phrases and non-instruments
+  ("this business", "cash", "wave two") are not assets
+  (`is_placeholder_asset`); disclosures need an ownership cue, no negation, a
+  resolved ticker and a clean review. The full data-quality header goes to
+  the workflow log, not Telegram. The legacy pulse over `data/signals.jsonl`
+  survives for compatibility and runs only with `PULSE_DATA_SOURCE=legacy`.
+- `pulse_charts.py` — the pulse's companion PNG charts, drawn 6.4in wide so
+  text survives Telegram's ~380px album preview, each titled with its
+  takeaway (`consensus_title`, `tone_title`, `upside_title`). The album is
+  consensus board (assets with 2+ creators), weekly mood, and price-target
+  ladder (single-creator targets faded); the flip slope, agreement map and
+  optimism-gap line join only when `_chart_ready` says they add something
+  (2+ well-attended reversals; 6+ points incl. a bearish/contested one;
+  `MIN_SPREAD_WEEKS` = 9 weeks of history). Data prep is pure/testable;
+  matplotlib imports lazily and every chart is best-effort — chart failures
+  never block the text pulse.
 - `ticker_resolver.py` — learns the real ticker for assets the transcript named
   badly, into `data/ticker_map.json` (filled by `warm_prices.py --resolve`).
   The provider's catalogue is tried first; only when it can't match the spelling

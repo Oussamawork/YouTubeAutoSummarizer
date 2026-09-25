@@ -39,12 +39,15 @@ def test_short_bearish_and_long_bullish_stay_in_separate_buckets_in_the_weekly_c
     views = cc.aggregate_views(claims)
     assert set(views) == {("NVDA", "short"), ("NVDA", "long")}
     assert views[("NVDA", "short")]["bear"] == 1 and views[("NVDA", "long")]["bull"] == 1
-    # The weekly pulse renders both horizon-specific views, and never a
-    # single averaged stance.
+    # The weekly pulse aggregates per asset, one vote per creator: a creator
+    # bearish short-term and bullish long-term votes "mixed" — reported as no
+    # agreement, never averaged into one direction.
+    by_asset = cc.aggregate_views_by_asset(claims)
+    assert by_asset["NVDA"]["votes"] == {"A": "mixed"}
+    assert by_asset["NVDA"]["bull"] == 0 and by_asset["NVDA"]["bear"] == 0
     inputs = mp._canonical_pulse_inputs(7, date(2026, 7, 12), lambda *a: {}, claims=claims)
     text = mp.build_canonical_pulse(inputs, date(2026, 7, 12))
-    assert "NVDA [short] — net bearish" in text and "NVDA [long] — net bullish" in text
-    assert "net mixed" not in text
+    assert "Where creators agree" not in text and "NVDA — " not in text
 
 
 def test_legacy_compatibility_rows_never_reach_canonical_analytics(tmp_path, monkeypatch):
