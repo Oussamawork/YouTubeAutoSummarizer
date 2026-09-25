@@ -768,9 +768,9 @@ CONSENSUS (canonical, one view per source/asset/horizon):
 ('NVDA', 'short') {'bullish': 0, 'bearish': 1, 'neutral': 0, 'sources': 1, 'net_stance': -1.0}
 ('NVDA', 'long')  {'bullish': 1, 'bearish': 0, 'neutral': 0, 'sources': 1, 'net_stance': 1.0}
 
-PULSE VIEWS (canonical_claims.aggregate_views — what the weekly pulse renders):
-('NVDA', 'short') {'label': 'NVDA [short]', 'bull': 0, 'bear': 1, 'neutral': 0, 'mentions': 1}
-('NVDA', 'long')  {'label': 'NVDA [long]',  'bull': 1, 'bear': 0, 'neutral': 0, 'mentions': 1}
+PULSE VIEWS (canonical_claims.aggregate_views_by_asset — what the weekly pulse renders):
+'NVDA' {'label': 'NVDA', 'votes': {'Demo Channel': 'mixed'}, 'bull': 0, 'bear': 0, 'neutral': 1,
+        'horizons': {'short': 1, 'long': 1}, 'mentions': 2}
 
 PORTFOLIO DISCLOSURES (separate report):
 [{"source": "Demo Channel", "asset": "TSLA", "ticker": "TSLA", "position": "owns_unspecified", "date": "2026-09-01", "evidence": "I own Tesla by the way", "claim_id": "clm_02ee7a8f806656ddd46b", "review_required": false}]
@@ -792,9 +792,15 @@ What changed against the previous example:
   with `stance=not_applicable`; there is no `('TSLA', 'unspecified')`
   consensus row any more, no Tesla entry in the compatibility signal, and the
   disclosure appears only in the disclosure report.
-- **Short and long term stay separate** in consensus and in the pulse
-  (`NVDA [short]` bearish, `NVDA [long]` bullish); the legacy row's single
-  `bearish` with `reduced: conflicting_horizons` shapes none of it.
+- **Short and long term are never averaged.** Research consensus keeps one
+  row per bucket (`NVDA short` bearish, `NVDA long` bullish). The weekly
+  pulse, a reader product, aggregates per asset with one vote per creator
+  (`aggregate_views_by_asset`): this creator's conflicting horizons make
+  their vote `mixed`, reported as no agreement, never as one direction. The
+  pulse left per-bucket rows in September 2026: 86% of view claims name no
+  horizon, so the split turned the week's clearest consensus (NVDA, 4 of 4
+  creators bullish) into two weaker rows. The legacy row's single `bearish`
+  with `reduced: conflicting_horizons` shapes none of it.
 - **"The stock" resolves to Nvidia** through local coreference
   (`entity_resolution_method=local_coreference`, 0.7, ticker NVDA), the host's
   "that is their call not mine" is recorded as `host_position=rejected`, and

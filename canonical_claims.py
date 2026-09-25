@@ -26,6 +26,7 @@ The aggregation below groups views per (asset, horizon bucket): a short-term
 bearish claim and a long-term bullish claim from the same source are two
 rows, never one averaged stance.
 """
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 
@@ -44,7 +45,23 @@ HORIZON_LABELS = {"short": "short-term", "medium": "medium-term", "long": "long-
 # a portfolio or cash position is not an instrument. They carry no ticker and
 # would otherwise count as distinct "assets" in consensus and new-on-radar.
 _PLACEHOLDER_FIRST_WORDS = {"THIS", "THAT", "THE", "THESE", "THOSE", "IT", "ITS", "MY", "OUR", "THEIR", "HIS", "HER"}
-_NON_ASSETS = {"CASH", "PORTFOLIO", "MY PORTFOLIO", "WHITE COUNT"}
+_NON_ASSETS = {"CASH", "PORTFOLIO", "MY PORTFOLIO", "WHITE COUNT", "PRICE", "RECESSION",
+               "COMPUTE", "CLARITY ACT", "MARKET", "THE MARKET", "STOCKS", "EVERYTHING"}
+# Chart-reading vocabulary the extractor sometimes keeps as the subject
+# ("wave two or B wave", "the SOL/BTC chart").
+_NON_ASSET_PATTERN = re.compile(r"\bWAVES?\b|\bCHART\b|\bCOUNT\b")
+
+# Spellings of one un-tickered theme folded to one key, so oil talk is not
+# split across OIL, OIL PRICES and WTI (each a single creator on its own).
+MACRO_ALIASES = {
+    "OIL PRICES": "OIL", "OIL PRICE": "OIL", "CRUDE OIL": "OIL", "CRUDE": "OIL", "WTI": "OIL",
+    "BRENT": "OIL", "ÖL": "OIL", "ÖLPREIS": "OIL",
+    "MIDCAPS": "MID CAPS", "MID-CAPS": "MID CAPS",
+    "BITCOIN DOMINANZ": "BITCOIN DOMINANCE", "BTC DOMINANCE": "BITCOIN DOMINANCE",
+    "NASDAC": "NASDAQ", "NASDAQ 100": "NASDAQ", "NASDAQ-100": "NASDAQ",
+    "S&P": "S&P 500", "SP500": "S&P 500", "S&P500": "S&P 500",
+    "GOLD PRICE": "GOLD", "GOLDPREIS": "GOLD",
+}
 
 # Price targets: only a price level the speaker expects the asset to reach.
 # A recommendation's number is an entry level ("Nvidia at 200 or under,
@@ -63,7 +80,7 @@ def is_placeholder_asset(key, ticker=None):
     """True for an unresolved reference phrase or a non-instrument."""
     if ticker or not key:
         return not key
-    if key in _NON_ASSETS or key.endswith(" PORTFOLIO"):
+    if key in _NON_ASSETS or key.endswith(" PORTFOLIO") or _NON_ASSET_PATTERN.search(key):
         return True
     return key.split()[0] in _PLACEHOLDER_FIRST_WORDS
 
@@ -146,7 +163,14 @@ def asset_key(claim):
     if ticker:
         return ticker
     key = " ".join((claim.get("canonical_entity_name") or claim.get("subject_mention") or "").split()).upper() or None
+    key = MACRO_ALIASES.get(key, key)
     return None if is_placeholder_asset(key) else key
+
+
+def resolved_ticker(claim):
+    """The claim's ticker after the curated alias tables, or None."""
+    return canonical_ticker({"ticker": claim.get("ticker"), "name": claim.get("canonical_entity_name")
+                             or claim.get("subject_mention")})
 
 
 UP = {"increase", "recover", "outperform"}
@@ -240,20 +264,111 @@ def aggregate_views(claims, channel_weights=None):
     return entries
 
 
+def lean(bull, bear):
+    """
+    The one rule for turning directional counts into a lean, shared by a
+    video's tone and a creator's vote on an asset: bullish when at least two
+    thirds of the directional claims are bullish (bull >= 2 x bear), bearish
+    when at least two thirds are bearish, mixed in between, neutral with no
+    directional claim at all. Before it, a single dissenting remark made an
+    8-to-3 bullish video "mixed".
+    """
+    total = bull + bear
+    if not total:
+        return "neutral"
+    if 3 * bull >= 2 * total:
+        return "bullish"
+    if 3 * bear >= 2 * total:
+        return "bearish"
+    return "mixed"
+
+
 def video_tone(claims):
     """
-    {video_id: bullish|bearish|neutral|mixed} from each video's view claims:
-    the speaker's balance of directional views, never a model's "overall
-    tone" field. Videos with view claims of neither direction are neutral.
+    {video_id: bullish|bearish|neutral|mixed} from each video's view claims
+    under `lean`: the speaker's balance of directional views, never a model's
+    "overall tone" field.
     """
     per_video = defaultdict(Counter)
     for c in view_claims(claims):
         per_video[c.get("video_id")][direction_of(c) or "neutral"] += 1
-    tone = {}
-    for vid, counts in per_video.items():
-        bull, bear = counts.get("bullish", 0), counts.get("bearish", 0)
-        tone[vid] = "mixed" if bull and bear else "bullish" if bull else "bearish" if bear else "neutral"
-    return tone
+    return {vid: lean(counts.get("bullish", 0), counts.get("bearish", 0))
+            for vid, counts in per_video.items()}
+
+
+def _display_name(key):
+    """Readable label for an un-tickered asset key: "OIL" -> "Oil", keeping
+    short all-caps index names ("S&P 500") as they are."""
+    return key if any(ch.isdigit() or ch == "&" for ch in key) else key.title()
+
+
+def aggregate_views_by_asset(claims, channel_weights=None):
+    """
+    The reader-facing aggregation the weekly pulse uses: one entry per ASSET
+    (not per horizon bucket), each creator casting one vote.
+
+    A creator's vote is the `lean` of the directional view claims in their
+    most recent video on the asset within `claims` (callers pass one window):
+    several claims in one video no longer resolve to whichever sorted last,
+    and a creator bearish short-term but bullish long-term votes "mixed" —
+    reported as split, never averaged into one direction. The horizons they
+    named are kept per entry (`horizons`) so the report can say "mostly
+    long-term". 86% of view claims name no horizon, which is why a per-bucket
+    row split (aggregate_views, kept for research analytics) fragmented the
+    clearest consensus of the week into weaker rows.
+
+    Entries carry the aggregate_views shape the charts consume (label,
+    ticker, type, mentions, channels, bull / bear / neutral, *_w, actions,
+    targets) plus `votes` {creator: lean}, `videos`, and `horizons`.
+    Price targets are one per creator (their latest), so one creator
+    repeating a number does not become a consensus target.
+    """
+    channel_weights = channel_weights or {}
+    per_asset = defaultdict(list)
+    for c in view_claims(claims):
+        if c.get("review_required"):
+            continue
+        key = asset_key(c)
+        if key:
+            per_asset[key].append(c)
+    entries = {}
+    for key, rows in per_asset.items():
+        rows.sort(key=lambda c: (c.get("published_at") or "", c.get("extracted_at") or ""))
+        by_source = defaultdict(list)
+        for c in rows:
+            by_source[source_of(c)].append(c)
+        ticker = next((t for t in (resolved_ticker(c) for c in reversed(rows)) if t), None)
+        entry = {
+            "asset": key, "label": ticker or _display_name(key), "ticker": ticker,
+            "type": LEGACY_TYPE.get(next((c.get("asset_type") for c in reversed(rows) if c.get("asset_type")), None), "other"),
+            "mentions": len(rows), "videos": len({c.get("video_id") for c in rows}),
+            "channels": set(by_source), "votes": {},
+            "bull": 0, "bear": 0, "neutral": 0, "bull_w": 0.0, "bear_w": 0.0, "neutral_w": 0.0,
+            "actions": Counter(), "targets": [], "horizons": Counter(),
+            "claim_ids": [c.get("claim_id") for c in rows],
+        }
+        for source, own in by_source.items():
+            latest_video = own[-1].get("video_id")
+            latest = [c for c in own if c.get("video_id") == latest_video]
+            directions = Counter(direction_of(c) for c in latest)
+            vote = lean(directions.get("bullish", 0), directions.get("bearish", 0))
+            entry["votes"][source] = vote
+            weight = channel_weights.get(source, 1.0)
+            slot = {"bullish": "bull", "bearish": "bear"}.get(vote, "neutral")
+            entry[slot] += 1
+            entry[slot + "_w"] += weight
+            for c in latest:
+                if c.get("horizon_bucket") in HORIZON_LABELS and direction_of(c) in ("bullish", "bearish"):
+                    entry["horizons"][c["horizon_bucket"]] += 1
+            action = next((c["recommendation_action"] for c in reversed(own)
+                           if c.get("recommendation_action") not in (None, "none", "unclear")), None)
+            if action:
+                entry["actions"][action] += 1
+            target = next((t for t in (price_target_of(c) for c in reversed(own)) if t is not None), None)
+            if target is not None:
+                entry["targets"].append(target)
+        entries[key] = entry
+    return entries
 
 
 def video_dates(claims):
@@ -263,6 +378,24 @@ def video_dates(claims):
         if d and (c.get("video_id") not in dates or d < dates[c.get("video_id")]):
             dates[c.get("video_id")] = d
     return dates
+
+
+_NOT_A_POSITION = {"no_position", "not_stated", "unclear"}
+# A disclosure must say the speaker holds or traded something; the extractor
+# once read "I'm not invested in SpaceX", "a company I used to own" and "we
+# know Macy's" as ownership.
+_OWNERSHIP_CUE = re.compile(
+    r"\b(own|owned|holding|holdings|position|bought|buy|buying|invest\w*|shares|stake|portfolio|added|"
+    r"sold|trimmed|long|investiert|gekauft|halten|halte|tranche|eingestiegen|depot|positionen)\b", re.I)
+_NEGATED_OWNERSHIP = re.compile(
+    r"\b(not|n't|never|no longer|used to)\b[^.]{0,30}\b(own|owned|invest\w*|hold\w*|position)\b|"
+    r"\bnicht\b[^.]{0,30}\b(investiert|drin|gekauft)\b|\bkeine?n?\s+position", re.I)
+
+
+def _states_a_position(evidence):
+    if not evidence:
+        return True  # nothing to check against; hand-built rows in tests
+    return bool(_OWNERSHIP_CUE.search(evidence)) and not _NEGATED_OWNERSHIP.search(evidence)
 
 
 def portfolio_disclosures(claims, start=None, end=None):
@@ -277,8 +410,10 @@ def portfolio_disclosures(claims, start=None, end=None):
             continue
         if start is not None and not in_window(c, start, end):
             continue
+        if c.get("portfolio_disclosure") in _NOT_A_POSITION or not _states_a_position(c.get("evidence_text")):
+            continue
         rows.append({
-            "source": source_of(c), "asset": asset_key(c), "ticker": c.get("ticker"),
+            "source": source_of(c), "asset": asset_key(c), "ticker": resolved_ticker(c),
             "position": c.get("portfolio_disclosure"), "date": (claim_date(c).isoformat() if claim_date(c) else None),
             "evidence": c.get("evidence_text"), "claim_id": c.get("claim_id"),
             "review_required": bool(c.get("review_required")),
@@ -298,31 +433,29 @@ def format_portfolio_disclosures(rows):
     owns ADBE, MSFT, TSLA*". Unresolved and non-instrument subjects are left
     out, a repeated (source, asset) disclosure is listed once, and * marks a
     disclosure still awaiting review."""
-    grouped = defaultdict(lambda: defaultdict(dict))
-    for r in rows:
-        if is_placeholder_asset(r["asset"]):
-            continue
-        position = POSITION_LABELS.get(r["position"], str(r["position"] or "mentions").replace("_", " "))
-        # A reviewed-clean disclosure wins over an unverified one of the same asset.
-        seen = grouped[r["source"]][position]
-        seen[r["asset"]] = seen.get(r["asset"], True) and r["review_required"]
+    grouped = disclosure_groups(rows)
     if not grouped:
         return ""
     lines = ["💼 Portfolio disclosures (what creators say they hold; not counted in consensus):"]
-    sources = sorted(grouped, key=lambda s: (-sum(len(a) for a in grouped[s].values()), s))
-    unverified = False
-    for source in sources[:MAX_DISCLOSURE_SOURCES]:
-        parts = []
-        for position, assets in sorted(grouped[source].items()):
-            names = ", ".join(a + ("*" if flag else "") for a, flag in sorted(assets.items()))
-            unverified = unverified or any(assets.values())
-            parts.append(f"{position} {names}")
-        lines.append(f"• {source} — {'; '.join(parts)}")
-    if len(sources) > MAX_DISCLOSURE_SOURCES:
-        lines.append(f"…and {len(sources) - MAX_DISCLOSURE_SOURCES} more creators.")
-    if unverified:
-        lines.append("* flagged for review")
+    for source, parts in grouped[:MAX_DISCLOSURE_SOURCES]:
+        lines.append(f"• {source} — {'; '.join(f'{p} {names}' for p, names in parts)}")
+    if len(grouped) > MAX_DISCLOSURE_SOURCES:
+        lines.append(f"…and {len(grouped) - MAX_DISCLOSURE_SOURCES} more creators.")
     return "\n".join(lines)
+
+
+def disclosure_groups(rows):
+    """[(source, [(position, "A, B")])], most assets first. Only reviewed-clean
+    rows with a resolved ticker reach a reader: an unverified or unresolved
+    disclosure ("UNITED HEALTH AKTIE*") is maintainer material, not news."""
+    grouped = defaultdict(lambda: defaultdict(set))
+    for r in rows:
+        if r.get("review_required") or not r.get("ticker") or is_placeholder_asset(r["asset"]):
+            continue
+        position = POSITION_LABELS.get(r["position"], str(r["position"] or "mentions").replace("_", " "))
+        grouped[r["source"]][position].add(r["ticker"])
+    ordered = sorted(grouped, key=lambda s: (-sum(len(a) for a in grouped[s].values()), s))
+    return [(s, [(p, ", ".join(sorted(a))) for p, a in sorted(grouped[s].items())]) for s in ordered]
 
 
 def priceable_symbol(entry_or_claim):

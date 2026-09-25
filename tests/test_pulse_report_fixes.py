@@ -67,23 +67,69 @@ def test_names_recorded_as_tickers_and_name_suffixes_fold_to_the_ticker():
 
 def test_new_on_radar_is_per_asset_not_per_horizon():
     old = _claim("A", "NVDA", "bullish", "unspecified", published="2026-06-20")
-    new_horizon = _claim("A", "NVDA", "bullish", "long", published="2026-07-10", video="v2")
-    fresh = _claim("B", "PLTR", "bullish", "unspecified", published="2026-07-10", video="v3")
-    inputs = mp._canonical_pulse_inputs(7, date(2026, 7, 12), lambda *a: {}, claims=[old, new_horizon, fresh])
+    new_horizon = [_claim("A", "NVDA", "bullish", "long", published="2026-07-10", video="v2"),
+                   _claim("B", "NVDA", "bearish", "short", published="2026-07-10", video="v3")]
+    fresh = [_claim("C", "PLTR", "bullish", "unspecified", published="2026-07-10", video="v4"),
+             _claim("D", "PLTR", "bearish", "unspecified", published="2026-07-10", video="v5")]
+    inputs = mp._canonical_pulse_inputs(7, date(2026, 7, 12), lambda *a: {}, claims=[old] + new_horizon + fresh)
+    assert "NVDA" in inputs["older_keys"]
     text = mp.build_canonical_pulse(inputs, date(2026, 7, 12))
-    radar = text.split("New on the radar")[1]
+    radar = text.split("New on the radar")[1].split("\n\n")[0]
     assert "PLTR" in radar and "NVDA" not in radar
 
 
 def test_portfolio_disclosures_group_per_source_and_drop_non_assets():
     rows = [
-        {"source": "P", "asset": "MSFT", "position": "owns_unspecified", "review_required": False},
-        {"source": "P", "asset": "ADBE", "position": "owns_unspecified", "review_required": True},
-        {"source": "P", "asset": "MSFT", "position": "owns_unspecified", "review_required": True},
-        {"source": "Q", "asset": None, "position": "owns_unspecified", "review_required": False},
-        {"source": "Q", "asset": "COUCH INVESTING PORTFOLIO", "position": "owns_unspecified", "review_required": False},
+        {"source": "P", "asset": "MSFT", "ticker": "MSFT", "position": "owns_unspecified", "review_required": False},
+        {"source": "P", "asset": "ADBE", "ticker": "ADBE", "position": "owns_unspecified", "review_required": False},
+        {"source": "P", "asset": "TSLA", "ticker": "TSLA", "position": "owns_unspecified", "review_required": True},
+        {"source": "Q", "asset": None, "ticker": None, "position": "owns_unspecified", "review_required": False},
+        {"source": "Q", "asset": "UNITED HEALTH AKTIE", "ticker": None, "position": "owns_unspecified",
+         "review_required": False},
     ]
     text = cc.format_portfolio_disclosures(rows)
-    assert "• P — owns ADBE*, MSFT" in text
-    assert "owns_unspecified" not in text and "Q —" not in text and "PORTFOLIO" not in text.split("\n", 1)[1]
+    assert "• P — owns ADBE, MSFT" in text
+    assert "TSLA" not in text and "owns_unspecified" not in text and "Q —" not in text
     assert cc.format_portfolio_disclosures(rows[3:]) == ""
+
+
+def test_negated_or_ownerless_disclosures_are_dropped():
+    base = {"claim_type": "portfolio_disclosure", "portfolio_disclosure": "owns_unspecified", "channel_name": "C",
+            "published_at": "2026-09-15T00:00:00+00:00", "schema_version": "2", "subject_mention": "SpaceX"}
+    for evidence in ("I'm not invested in SpaceX because it's a so-called hype.",
+                     "It's a name that I do not currently own in my own portfolio.",
+                     "It's a company that I used to own called Booking Holdings.",
+                     "we know Macy's and names like that that are controversial"):
+        assert cc.portfolio_disclosures([dict(base, evidence_text=evidence)]) == []
+    kept = cc.portfolio_disclosures([dict(base, evidence_text="I own Adobe stock.", subject_mention="Adobe")])
+    assert kept[0]["ticker"] == "ADBE"
+    assert cc.portfolio_disclosures([dict(base, portfolio_disclosure="no_position", evidence_text="I own it")]) == []
+
+
+def test_one_vote_per_creator_from_their_latest_video():
+    claims = [_claim("A", "ETH", "bearish", "unspecified", published="2026-07-08", video="v1"),
+              _claim("A", "ETH", "bullish", "unspecified", published="2026-07-10", video="v2", n=1),
+              _claim("A", "ETH", "bullish", "unspecified", published="2026-07-10", video="v2", n=2),
+              _claim("A", "ETH", "bearish", "unspecified", published="2026-07-10", video="v2", n=3)]
+    entry = cc.aggregate_views_by_asset(claims)["ETH"]
+    assert entry["votes"] == {"A": "bullish"} and entry["mentions"] == 4 and entry["videos"] == 2
+
+
+def test_lean_needs_two_thirds_so_one_dissent_does_not_make_a_video_mixed():
+    assert cc.lean(8, 3) == "bullish" and cc.lean(2, 1) == "bullish"
+    assert cc.lean(3, 2) == "mixed" and cc.lean(1, 1) == "mixed"
+    assert cc.lean(0, 2) == "bearish" and cc.lean(0, 0) == "neutral"
+
+
+def test_single_creator_assets_are_not_ranked_and_html_is_escaped():
+    claims = [_claim("A", "NVDA", "bullish", "unspecified", video="v1"),
+              _claim("B & Co", "NVDA", "bullish", "long", video="v2"),
+              _claim("A", "PLTR", "bullish", "unspecified", video="v1", n=1)]
+    inputs = mp._canonical_pulse_inputs(7, date(2026, 7, 12), lambda *a: {}, claims=claims)
+    text = mp.build_canonical_pulse(inputs, date(2026, 7, 12))
+    agree = text.split("Where creators agree")[1].split("\n\n")[0]
+    assert "NVDA — 2 of 2 creators bullish · horizon: long-term" in agree and "PLTR" not in agree
+    html = mp.build_canonical_pulse(inputs, date(2026, 7, 12), html=True)
+    assert "<b>Where creators agree</b>" in html and "<b>NVDA</b>" in html
+    assert mp._Fmt(True).b("B & Co <x>") == "<b>B &amp; Co &lt;x&gt;</b>"
+    assert mp._Fmt(False).b("B & Co") == "B & Co"

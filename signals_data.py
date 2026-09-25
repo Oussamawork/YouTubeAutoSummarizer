@@ -114,12 +114,18 @@ ASSET_ALIASES = {
     "ROYAL CARIBBEAN": "RCL", "INTERNATIONAL PAPER": "IP", "UPWORK": "UPWK",
     "ROCKET LAB": "RKLB", "COREWEAVE": "CRWV", "PFIZER": "PFE",
     "APPLIED MATERIALS": "AMAT", "VERTIV": "VRT", "HIMS & HERS": "HIMS",
+    "NOVO NORDISK": "NVO", "STARBUCKS": "SBUX", "PEPSI": "PEP", "PEPSICO": "PEP",
+    "UNITEDHEALTH": "UNH", "UNITED HEALTH": "UNH", "UNITEDHEALTH GROUP": "UNH",
+    "MACY'S": "M", "MACYS": "M", "PELOTON": "PTON", "PLANET LABS": "PL",
+    "LULULEMON": "LULU", "ELI LILLY": "LLY", "LILLY": "LLY", "CAVA": "CAVA",
+    "CAVA GROUP": "CAVA", "NIBIUS": "NBIS", "MARCADO LIBRE": "MELI", "CARNIVAL": "CCL",
+    "NORWEGIAN": "NCLH", "NORWEGIAN CRUISE LINE": "NCLH", "DIEBOLD": "DBD", "COINBASE": "COIN", "STRATEGY": "MSTR", "MICROSTRATEGY": "MSTR",
 }
 
 # Trailing words speakers attach to a company name ("Amazon stock", "Nvidia
 # shares") that are not part of it: stripped before the alias lookup so the
 # asset folds into its ticker instead of aggregating under a second key.
-_NAME_SUFFIXES = (" STOCK", " STOCKS", " SHARES", " SHARE")
+_NAME_SUFFIXES = (" STOCK", " STOCKS", " SHARES", " SHARE", " AKTIE", " AKTIEN", " INC", " INC.")
 
 # Recorded-ticker variants folded to one canonical symbol: dual share classes
 # and renames that speakers use interchangeably would otherwise still split an

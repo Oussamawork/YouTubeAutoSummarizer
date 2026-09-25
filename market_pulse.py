@@ -1,5 +1,7 @@
 import argparse
+import html as _html
 import os
+from collections import defaultdict
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -11,7 +13,7 @@ import pulse_charts
 import scorecard_pricing as sp
 from helpers import env_flag
 from log import log_info, log_warn, log_error
-from sendToTelegram import send_telegram_text, send_telegram_photo_album
+from sendToTelegram import send_telegram_html, send_telegram_text, send_telegram_photo_album
 # The dataset layer lives in signals_data; the names are re-exported here so
 # `market_pulse.aggregate_assets` etc. keep working for existing callers.
 from signals_data import (  # noqa: F401  (re-exports)
@@ -45,7 +47,7 @@ PULSE_DATA_SOURCE = (os.getenv("PULSE_DATA_SOURCE") or "canonical").strip().lowe
 NEW_ASSET_LOOKBACK_DAYS = 30
 MAX_ASSETS_IN_REPORT = 8
 
-DISCLAIMER = "⚠️ Aggregated creator opinions — research input, not investment advice."
+DISCLAIMER = "⚠️ Creator opinions, not investment advice."
 
 # Accuracy weighting: once a channel has at least this many scorecard-evaluated
 # calls, its stances are weighted by track record (0.5 + hit rate → 0.5..1.5)
@@ -310,7 +312,8 @@ def canonical_tone_weeks(claims, today, num_weeks=pulse_charts.SPREAD_WEEKS):
 
 def _canonical_pulse_inputs(days, today, price_fetcher, claims=None):
     """The production inputs: canonical claims sliced into the current,
-    previous and lookback windows and aggregated per (asset, horizon)."""
+    previous and lookback windows and aggregated per asset
+    (canonical_claims.aggregate_views_by_asset: one vote per creator)."""
     claims = canonical_claims.load_canonical_claims() if claims is None else claims
     window_start = today - timedelta(days=days)
     prev_start = window_start - timedelta(days=days)
@@ -319,17 +322,21 @@ def _canonical_pulse_inputs(days, today, price_fetcher, claims=None):
     previous = [c for c in claims if canonical_claims.in_window(c, prev_start, window_start)]
     older = [c for c in claims if canonical_claims.in_window(c, lookback_start, window_start)]
     weights, details, latest_prices = {}, {}, {}
-    current_views = canonical_claims.aggregate_views(current)
+    current_views = canonical_claims.aggregate_views_by_asset(current)
     if current_views:
         latest_prices = fetch_latest_prices(current_views, price_fetcher=price_fetcher, today=today)
         weights, details = _canonical_weights(claims, today, price_fetcher)
-    view_claims = canonical_claims.view_claims(current)
+        if weights:
+            current_views = canonical_claims.aggregate_views_by_asset(current, weights)
+    view_claims = [c for c in canonical_claims.view_claims(current) if not c.get("review_required")]
     return {
         "source": "canonical", "claims": claims, "window_start": window_start,
         "current": current, "previous": previous, "older": older,
-        "current_views": canonical_claims.aggregate_views(current, weights),
-        "previous_views": canonical_claims.aggregate_views(previous, weights),
-        "older_keys": set(canonical_claims.aggregate_views(older)),
+        "current_views": current_views,
+        "previous_views": canonical_claims.aggregate_views_by_asset(previous, weights),
+        "older_keys": set(canonical_claims.aggregate_views_by_asset(older)),
+        "view_claims": len(view_claims),
+        "horizon_claims": sum(1 for c in view_claims if c.get("horizon_bucket") in canonical_claims.HORIZON_LABELS),
         "videos": len({c.get("video_id") for c in view_claims}),
         "channels": len({canonical_claims.source_of(c) for c in view_claims}),
         "tone": canonical_tone_weeks(claims, today),
@@ -337,70 +344,250 @@ def _canonical_pulse_inputs(days, today, price_fetcher, claims=None):
     }
 
 
-def build_canonical_pulse(inputs, today):
-    """Render the plain-text pulse from canonical inputs. "" when the window
-    holds no view claims."""
+# Reader-facing thresholds. With ~8 creators, an asset one creator talked
+# about is that creator's opinion, not a consensus: 90% of assets in a
+# typical week rest on a single creator, so every ranked section asks for
+# at least two creators with a view.
+MIN_CREATORS = 2
+MIN_DISAGREE_CREATORS = 3
+MAX_AGREEMENT_ROWS = 6
+MAX_DISAGREEMENT_ROWS = 3
+MAX_DISCUSSED = 5
+MAX_MOVERS = 3
+MAX_PULSE_DISCLOSURE_SOURCES = 4
+MOVER_MIN_CLAIMS = 3        # attention shift needs ≥3 more / fewer claims…
+MOVER_MIN_CREATORS = 1      # …and a creator more / fewer, so one talkative video can't move it
+MIN_LEAN_VOTES = 5          # asset-class and creator lean lines need this many votes
+EMOJI = {"bullish": "🟢", "bearish": "🔴", "mixed": "⚖️"}
+
+
+def _voters(entry):
+    """Creators who took a side (a split creator counts: they had a view)."""
+    return sum(1 for v in entry["votes"].values() if v != "neutral")
+
+
+def _consensus(entry):
+    """bullish / bearish / mixed over the creators who took a side, by the
+    same 2/3 rule a creator's own vote uses. A split creator counts in the
+    denominator: one bullish and one split creator is not agreement."""
+    voters = _voters(entry)
+    if voters and 3 * entry["bull"] >= 2 * voters:
+        return "bullish"
+    if voters and 3 * entry["bear"] >= 2 * voters:
+        return "bearish"
+    return "mixed"
+
+
+def _plural(n, word):
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _money(value):
+    return f"${value:,.2f}" if value < 20 else f"${value:,.0f}"
+
+
+def _agreement_line(entry, price, fmt):
+    side = _consensus(entry)
+    count = entry["bull"] if side == "bullish" else entry["bear"]
+    parts = [f"{EMOJI[side]} {fmt.b(entry['label'])} — {count} of {_plural(_voters(entry), 'creator')} {side}"]
+    if entry["horizons"]:
+        named = [canonical_claims.HORIZON_LABELS[b] for b in ("short", "medium", "long") if entry["horizons"].get(b)]
+        parts.append("horizon: " + " & ".join(named))
+    if entry["actions"]:
+        parts.append(", ".join(f"{n} say{'s' if n == 1 else ''} {a}" for a, n in entry["actions"].most_common()))
+    # A target is shown only against a known price: without one there is no
+    # check that the number is a share price at all (a dominance percentage
+    # once read as "target $50").
+    targets = pulse_charts.plausible_targets(entry["targets"], price) if price else []
+    if targets:
+        avg = sum(targets) / len(targets)
+        parts.append(f"target {_money(avg)} ({(avg - price) / price:+.0%} vs {_money(price)}), "
+                     f"{_plural(len(targets), 'creator')}")
+    return " · ".join(parts)
+
+
+def _disagreement_line(entry, fmt):
+    bulls = sorted(s for s, v in entry["votes"].items() if v == "bullish")
+    bears = sorted(s for s, v in entry["votes"].items() if v == "bearish")
+    minority, side = (bulls, "bullish") if len(bulls) < len(bears) else (bears, "bearish")
+    return (f"{EMOJI['mixed']} {fmt.b(entry['label'])} — {len(bulls)} bullish vs {len(bears)} bearish "
+            f"({side}: {fmt.esc(', '.join(minority))})")
+
+
+def _attention_movers(current, previous):
+    up, down = [], []
+    for key in set(current) | set(previous):
+        cur, prev = current.get(key), previous.get(key)
+        claims_now, claims_before = (cur or {}).get("mentions", 0), (prev or {}).get("mentions", 0)
+        creators_now = len((cur or {}).get("channels", ())) 
+        creators_before = len((prev or {}).get("channels", ()))
+        label = (cur or prev)["label"]
+        delta = claims_now - claims_before
+        if delta >= MOVER_MIN_CLAIMS and creators_now - creators_before >= MOVER_MIN_CREATORS:
+            up.append((delta, label, claims_before, claims_now))
+        elif -delta >= MOVER_MIN_CLAIMS and creators_before - creators_now >= MOVER_MIN_CREATORS:
+            down.append((-delta, label, claims_before, claims_now))
+    order = lambda rows: sorted(rows, key=lambda r: (-r[0], r[1]))[:MAX_MOVERS]
+    return order(up), order(down)
+
+
+def _lean_share(entries):
+    """(bullish share, votes) over creator votes in `entries`."""
+    bull = sum(e["bull"] for e in entries)
+    bear = sum(e["bear"] for e in entries)
+    return (bull / (bull + bear) if bull + bear else None), bull + bear
+
+
+class _Fmt:
+    """Telegram HTML or plain text from one set of section builders."""
+
+    def __init__(self, html):
+        self.html = html
+
+    def esc(self, text):
+        return _html.escape(str(text), quote=False) if self.html else str(text)
+
+    def b(self, text):
+        return f"<b>{self.esc(text)}</b>" if self.html else str(text)
+
+    def i(self, text):
+        return f"<i>{self.esc(text)}</i>" if self.html else str(text)
+
+
+def build_canonical_pulse(inputs, today, html=False):
+    """Render the pulse from canonical inputs, as plain text or (html=True)
+    Telegram HTML. "" when the window holds no view claims.
+
+    Layout, most useful first: a one-sentence takeaway built from the
+    numbers below it (a fixed template, never an LLM call), where creators
+    agree, where they disagree, what drew attention, changes vs last week,
+    the mood, what creators say they own, and one footer line on coverage.
+    """
+    fmt = _Fmt(html)
     current, previous = inputs["current_views"], inputs["previous_views"]
     if not inputs["videos"]:
         return ""
-    lines = [
-        f"📈 Weekly Market Pulse — {inputs['window_start'].isoformat()} → {today.isoformat()}",
-        f"Videos with views: {inputs['videos']} · Sources: {inputs['channels']} · "
-        "data: canonical claims (one current view per source, per asset, per horizon)",
-    ]
-    week = [w for w in inputs["tone"] if w["weeks_ago"] == 0]
-    if week:
-        w = week[0]
-        lines.append("Overall tone: " + " · ".join(f"{k} {w[k]}" for k in ("bullish", "bearish", "mixed", "neutral") if w[k]))
-    if current:
-        lines.append("")
-        lines.append("Top assets (per horizon bucket):")
-        ranked = sorted(
-            current.items(),
-            key=lambda kv: (-_directional_mentions(kv[1]), -abs(net_stance(kv[1])),
-                            -kv[1]["mentions"], kv[1]["label"]),
-        )
-        for key, entry in ranked[:MAX_ASSETS_IN_REPORT]:
-            lines.append(_format_asset_line(entry, inputs["latest_prices"].get(key)))
-        if len(ranked) > MAX_ASSETS_IN_REPORT:
-            lines.append(f"…and {len(ranked) - MAX_ASSETS_IN_REPORT} more.")
-    flips = find_flips(current, previous)
-    if flips:
-        lines.append("")
-        lines.append("🔄 Consensus flips vs prior week (same asset and horizon):")
-        for flip in flips:
-            lines.append(f"• {flip['label']}: {flip['from']} → {flip['to']}")
-    # "New" is per asset, not per (asset, horizon): an asset discussed last
-    # month with no horizon is not new because someone now names one.
-    older_assets = {k[0] if isinstance(k, tuple) else k for k in inputs["older_keys"]}
-    new_assets = {}
+    prices = inputs["latest_prices"]
+
+    ranked = sorted(current.items(), key=lambda kv: (-_voters(kv[1]), -abs(net_stance(kv[1])),
+                                                     -kv[1]["mentions"], kv[1]["label"]))
+    eligible = [(k, e) for k, e in ranked if _voters(e) >= MIN_CREATORS]
+    agree = [(k, e) for k, e in eligible if _consensus(e) in ("bullish", "bearish")]
+    disagree = [(k, e) for k, e in eligible
+                if _consensus(e) == "mixed" and e["bull"] and e["bear"] and _voters(e) >= MIN_DISAGREE_CREATORS]
+    shown = {k for k, _ in agree[:MAX_AGREEMENT_ROWS]} | {k for k, _ in disagree[:MAX_DISAGREEMENT_ROWS]}
+
+    week = next((w for w in inputs["tone"] if w["weeks_ago"] == 0), None)
+    lines = [f"📈 {fmt.b('Weekly Market Pulse')} · {fmt.esc(pulse_charts.window_label(inputs['window_start'], today))}"]
+
+    # Takeaway.
+    takeaway = []
+    if week and week["n"]:
+        bull_share = week["bullish"] / week["n"]
+        mood = ("Upbeat week" if bull_share >= 0.6 else
+                "Cautious week" if week["bearish"] >= week["bullish"] else "Mixed week")
+        takeaway.append(f"{mood}: {week['bullish']} of {week['n']} videos leaned bullish.")
+    if agree:
+        top = agree[0][1]
+        side = _consensus(top)
+        takeaway.append(f"Strongest agreement: {top['label']} "
+                        f"({top['bull'] if side == 'bullish' else top['bear']} of {_voters(top)} creators {side}).")
+        bear = next((e for _, e in agree if _consensus(e) == "bearish"), None)
+        if bear is not None and bear is not top:
+            takeaway.append(f"Clearest bear call: {bear['label']}.")
+    if disagree:
+        takeaway.append(f"Split on {disagree[0][1]['label']}.")
+    if takeaway:
+        lines.append(fmt.esc(" ".join(takeaway)))
+
+    if agree:
+        lines += ["", fmt.b("Where creators agree")]
+        lines += [_agreement_line(e, prices.get(k), fmt) for k, e in agree[:MAX_AGREEMENT_ROWS]]
+    if disagree:
+        lines += ["", fmt.b("Where they disagree")]
+        lines += [_disagreement_line(e, fmt) for _, e in disagree[:MAX_DISAGREEMENT_ROWS]]
+
+    discussed = sorted(current.values(), key=lambda e: (-len(e["channels"]), -e["videos"], -e["mentions"], e["label"]))
+    if discussed:
+        lines += ["", fmt.b("Most discussed")]
+        lines.append(" · ".join(
+            f"{fmt.esc(e['label'])} ({_plural(len(e['channels']), 'creator')}, {e['mentions']} claims)"
+            for e in discussed[:MAX_DISCUSSED]))
+
+    up, down = _attention_movers(current, previous)
+    if up or down:
+        lines += ["", fmt.b("Attention vs last week")]
+        if up:
+            lines.append("⬆️ " + " · ".join(f"{fmt.esc(l)} ({a}→{b} claims)" for _, l, a, b in up))
+        if down:
+            lines.append("⬇️ " + " · ".join(f"{fmt.esc(l)} ({a}→{b} claims)" for _, l, a, b in down))
+
+    flips = []
     for key, entry in current.items():
-        asset = key[0] if isinstance(key, tuple) else key
-        if asset in older_assets:
+        prev = previous.get(key)
+        if not prev or _voters(entry) < MIN_CREATORS or _voters(prev) < MIN_CREATORS:
             continue
-        if asset not in new_assets or entry["mentions"] > new_assets[asset]["mentions"]:
-            new_assets[asset] = entry
-    if new_assets:
-        lines.append("")
-        lines.append(f"🆕 New on the radar (not discussed in the prior {NEW_ASSET_LOOKBACK_DAYS} days):")
-        ranked_new = sorted(new_assets.values(), key=lambda e: (-len(e["channels"]), -e["mentions"], e["label"]))
-        for entry in ranked_new[:5]:
-            lines.append(f"• {entry['label']} — {_direction(net_stance(entry))} "
-                         f"({entry['mentions']} mention{'s' if entry['mentions'] != 1 else ''})")
-    disclosures = canonical_claims.format_portfolio_disclosures(
-        canonical_claims.portfolio_disclosures(inputs["current"]))
-    if disclosures:
-        lines.append("")
-        lines.append(disclosures)
+        before, after = _consensus(prev), _consensus(entry)
+        if {before, after} == {"bullish", "bearish"}:
+            flips.append((entry["label"], before, after))
+    if flips:
+        lines += ["", fmt.b("Consensus changed vs last week")]
+        lines += [f"🔄 {fmt.b(label)}: {before} → {after}" for label, before, after in sorted(flips)]
+
+    new = [e for k, e in ranked if k not in inputs["older_keys"] and k not in shown and _voters(e) >= MIN_CREATORS]
+    if new:
+        lines += ["", fmt.b(f"New on the radar (not discussed in the prior {NEW_ASSET_LOOKBACK_DAYS} days)")]
+        lines.append(" · ".join(f"{EMOJI.get(_consensus(e), '')} {fmt.esc(e['label'])} ({_plural(_voters(e), 'creator')})"
+                                for e in new[:5]))
+
+    mood_lines = []
+    if week and week["n"]:
+        parts = [f"{week[k]} {k}" for k in ("bullish", "mixed", "bearish") if week[k]]
+        if week["neutral"]:
+            parts.append(f"{week['neutral']} without a clear view")
+        mood_lines.append(f"Videos: {' · '.join(parts)}")
+    classes = []
+    for name, types in (("stocks", ("stock", "etf")), ("crypto", ("crypto",))):
+        share, votes = _lean_share([e for e in current.values() if e["type"] in types])
+        if share is not None and votes >= MIN_LEAN_VOTES:
+            classes.append(f"{name} {share:.0%} bullish ({votes} creator calls)")
+    if classes:
+        mood_lines.append("By asset class: " + " · ".join(classes))
+    per_creator = defaultdict(lambda: [0, 0])
+    for e in current.values():
+        for source, vote in e["votes"].items():
+            if vote in ("bullish", "bearish"):
+                per_creator[source][vote == "bearish"] += 1
+    leaners = [(b / (b + r), s, b, r) for s, (b, r) in per_creator.items() if b + r >= MIN_LEAN_VOTES]
+    if len(leaners) >= 2:
+        leaners.sort()
+        low, high = leaners[0], leaners[-1]
+        mood_lines.append(f"Most bullish creator: {fmt.esc(high[1])} ({high[2]}↑ {high[3]}↓) · "
+                          f"most cautious: {fmt.esc(low[1])} ({low[2]}↑ {low[3]}↓)")
+    if mood_lines:
+        lines += ["", fmt.b("Mood")] + mood_lines
+
+    groups = canonical_claims.disclosure_groups(canonical_claims.portfolio_disclosures(inputs["current"]))
+    if groups:
+        lines += ["", fmt.b("What creators say they own")]
+        for source, parts in groups[:MAX_PULSE_DISCLOSURE_SOURCES]:
+            lines.append(f"• {fmt.esc(source)} — " + fmt.esc("; ".join(f"{p} {names}" for p, names in parts)))
+        if len(groups) > MAX_PULSE_DISCLOSURE_SOURCES:
+            lines.append(f"+{len(groups) - MAX_PULSE_DISCLOSURE_SOURCES} more creators")
+
     if inputs["weight_details"]:
-        lines.append("")
         weighted = " · ".join(
             f"{channel} {inputs['weights'][channel]:.2f} ({hits}/{total})"
             for channel, (hits, total) in sorted(inputs["weight_details"].items())
         )
-        lines.append(f"⚖️ Consensus weighted by scorecard track record: {weighted}")
-    lines.append("")
-    lines.append(DISCLAIMER)
+        lines += ["", fmt.esc(f"⚖️ Weighted by scorecard track record: {weighted}")]
+
+    horizon_pct = inputs["horizon_claims"] / inputs["view_claims"] if inputs["view_claims"] else 0
+    lines += ["", fmt.i(
+        f"Based on {inputs['view_claims']} opinions in {_plural(inputs['videos'], 'video')} from "
+        f"{_plural(inputs['channels'], 'creator')}; {horizon_pct:.0%} name a time horizon. "
+        f"Assets need {MIN_CREATORS}+ creators with a view to be ranked."),
+        fmt.esc(DISCLAIMER)]
     return "\n".join(lines)
 
 
@@ -442,7 +629,7 @@ def _pulse_inputs(days, today, path, price_fetcher):
 
 
 def generate_pulse(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None,
-                   inputs=None):
+                   inputs=None, html=False):
     """Build the pulse text for the trailing `days` window. Track-record
     weighting and implied-upside annotations are best-effort and switch on
     automatically once enough scorecard history exists. `inputs` accepts a
@@ -451,7 +638,7 @@ def generate_pulse(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None,
     today = today or datetime.now(timezone.utc).date()
     inputs = inputs or _pulse_inputs(days, today, path, price_fetcher)
     if inputs.get("source") == "canonical":
-        return build_canonical_pulse(inputs, today)
+        return build_canonical_pulse(inputs, today, html=html)
     if not inputs["current"]:
         return ""
     return build_pulse(
@@ -562,12 +749,20 @@ def main():
         log_error("TELEGRAM_TOKEN and TELEGRAM_CHANNEL_ID must be set to send the pulse.")
         return 1
 
-    if not send_telegram_text(token, chat_id, pulse):
+    if inputs.get("source") == "canonical":
+        html_pulse = generate_pulse(days=args.days, today=today, inputs=inputs, html=True)
+        sent = send_telegram_html(token, chat_id, html_pulse, pulse, what="Weekly market pulse")
+    else:
+        sent = send_telegram_text(token, chat_id, pulse)
+    if not sent:
         return 1
     log_info("Weekly market pulse sent.")
+    # The full data-quality header is maintainer detail (gate outcomes,
+    # headline-eligible counts): it goes to the workflow log, and the pulse
+    # carries a one-line coverage footer instead.
     quality = research_quality_section(args.days, today)
-    if quality and not send_telegram_text(token, chat_id, quality):
-        log_warn("Research quality section failed to send; the pulse went out without it.")
+    if quality:
+        print(quality)
     # The charts illustrate the pulse; failing to send them shouldn't fail the
     # run once the text is out.
     if chart_paths and not send_telegram_photo_album(
