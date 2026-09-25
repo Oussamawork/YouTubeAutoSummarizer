@@ -34,6 +34,59 @@ import research_state
 from signals_data import CONVICTION_WEIGHTS, UNPRICEABLE_TICKERS, canonical_ticker
 
 BUCKETS = ("short", "medium", "long", "unspecified")
+# How a bucket reads in the report. The unspecified bucket carries no tag: it
+# is most claims (a speaker rarely names a horizon), and "[unspecified]" on
+# every row buried the asset name and was clipped off the charts.
+HORIZON_LABELS = {"short": "short-term", "medium": "medium-term", "long": "long-term"}
+
+# Unresolved subjects that are references, not assets: the extractor keeps the
+# spoken phrase when coreference fails ("this business", "the company's"), and
+# a portfolio or cash position is not an instrument. They carry no ticker and
+# would otherwise count as distinct "assets" in consensus and new-on-radar.
+_PLACEHOLDER_FIRST_WORDS = {"THIS", "THAT", "THE", "THESE", "THOSE", "IT", "ITS", "MY", "OUR", "THEIR", "HIS", "HER"}
+_NON_ASSETS = {"CASH", "PORTFOLIO", "MY PORTFOLIO", "WHITE COUNT"}
+
+# Price targets: only a price level the speaker expects the asset to reach.
+# A recommendation's number is an entry level ("Nvidia at 200 or under,
+# easy"), and a forecast of revenue, market cap, margin or a multiple is not
+# a share price (a $50bn revenue figure once read as a +22,495,163,440% target).
+_TARGET_CLAIM_TYPES = {"price_target", "forecast"}
+_NON_PRICE_UNITS = {"percent", "%", "x", "multiple", "bps", "basis_points"}
+
+
+def display_label(asset, bucket):
+    tag = HORIZON_LABELS.get(bucket)
+    return f"{asset} ({tag})" if tag else asset
+
+
+def is_placeholder_asset(key, ticker=None):
+    """True for an unresolved reference phrase or a non-instrument."""
+    if ticker or not key:
+        return not key
+    if key in _NON_ASSETS or key.endswith(" PORTFOLIO"):
+        return True
+    return key.split()[0] in _PLACEHOLDER_FIRST_WORDS
+
+
+def price_target_of(claim):
+    """The USD price level a claim targets, or None when it isn't one."""
+    if claim.get("claim_type") not in _TARGET_CLAIM_TYPES:
+        return None
+    if claim.get("currency") not in (None, "USD"):
+        return None
+    if claim.get("forecast_metric") not in (None, "price"):
+        return None
+    unit = (claim.get("target_unit") or "").strip().lower()
+    if unit and unit not in ("usd", "$", "dollar", "dollars"):
+        return None
+    if claim.get("target_kind") == "absolute_value" and isinstance(claim.get("target_value"), (int, float)):
+        value = float(claim["target_value"])
+    elif claim.get("target_kind") == "range" and all(
+            isinstance(claim.get(k), (int, float)) for k in ("target_low", "target_high")):
+        value = (claim["target_low"] + claim["target_high"]) / 2.0
+    else:
+        return None
+    return value if value > 0 else None
 LEGACY_TYPE = {"stock": "stock", "crypto": "crypto", "etf": "etf", "index": "index",
                "commodity": "commodity", "macro": "macro"}
 
@@ -92,7 +145,8 @@ def asset_key(claim):
                                or claim.get("subject_mention")})
     if ticker:
         return ticker
-    return " ".join((claim.get("canonical_entity_name") or claim.get("subject_mention") or "").split()).upper() or None
+    key = " ".join((claim.get("canonical_entity_name") or claim.get("subject_mention") or "").split()).upper() or None
+    return None if is_placeholder_asset(key) else key
 
 
 UP = {"increase", "recover", "outperform"}
@@ -151,18 +205,16 @@ def aggregate_views(claims, channel_weights=None):
         claim_ids[(key, bucket)].append(c.get("claim_id"))
         if c.get("recommendation_action") not in (None, "none", "unclear"):
             all_actions[(key, bucket)][c["recommendation_action"]] += 1
-        if c.get("currency") in (None, "USD"):
-            if c.get("target_kind") == "absolute_value" and isinstance(c.get("target_value"), (int, float)):
-                all_targets[(key, bucket)].append(float(c["target_value"]))
-            elif c.get("target_kind") == "range" and all(isinstance(c.get(k), (int, float)) for k in ("target_low", "target_high")):
-                all_targets[(key, bucket)].append((c["target_low"] + c["target_high"]) / 2.0)
+        target = price_target_of(c)
+        if target is not None:
+            all_targets[(key, bucket)].append(target)
     for (key, bucket), per_source in latest_views(claims).items():
         sample = next(iter(per_source.values()))
         ticker = canonical_ticker({"ticker": sample.get("ticker"), "name": sample.get("canonical_entity_name")
                                    or sample.get("subject_mention")})
         entry = {
             "asset": key, "horizon_bucket": bucket,
-            "label": f"{ticker or key} [{bucket}]",
+            "label": display_label(ticker or key, bucket),
             "ticker": ticker,
             "type": LEGACY_TYPE.get(sample.get("asset_type"), "other"),
             "mentions": mentions[(key, bucket)], "channels": set(per_source),
@@ -234,15 +286,42 @@ def portfolio_disclosures(claims, start=None, end=None):
     return sorted(rows, key=lambda r: (r["date"] or "", r["source"], r["asset"] or ""))
 
 
+POSITION_LABELS = {
+    "owns_unspecified": "owns", "long": "long", "short": "short", "bought": "bought",
+    "sold": "sold", "added": "added to", "trimmed": "trimmed", "exited": "exited",
+}
+MAX_DISCLOSURE_SOURCES = 10
+
+
 def format_portfolio_disclosures(rows):
-    if not rows:
+    """One line per source, grouped by what they said they did: "• Source —
+    owns ADBE, MSFT, TSLA*". Unresolved and non-instrument subjects are left
+    out, a repeated (source, asset) disclosure is listed once, and * marks a
+    disclosure still awaiting review."""
+    grouped = defaultdict(lambda: defaultdict(dict))
+    for r in rows:
+        if is_placeholder_asset(r["asset"]):
+            continue
+        position = POSITION_LABELS.get(r["position"], str(r["position"] or "mentions").replace("_", " "))
+        # A reviewed-clean disclosure wins over an unverified one of the same asset.
+        seen = grouped[r["source"]][position]
+        seen[r["asset"]] = seen.get(r["asset"], True) and r["review_required"]
+    if not grouped:
         return ""
-    lines = ["💼 Portfolio disclosures (ownership statements; not views, not counted in consensus):"]
-    for r in rows[:20]:
-        flag = " (unverified)" if r["review_required"] else ""
-        lines.append(f"• {r['source']} — {r['asset'] or 'unresolved'}: {r['position']}{flag}")
-    if len(rows) > 20:
-        lines.append(f"…and {len(rows) - 20} more.")
+    lines = ["💼 Portfolio disclosures (what creators say they hold; not counted in consensus):"]
+    sources = sorted(grouped, key=lambda s: (-sum(len(a) for a in grouped[s].values()), s))
+    unverified = False
+    for source in sources[:MAX_DISCLOSURE_SOURCES]:
+        parts = []
+        for position, assets in sorted(grouped[source].items()):
+            names = ", ".join(a + ("*" if flag else "") for a, flag in sorted(assets.items()))
+            unverified = unverified or any(assets.values())
+            parts.append(f"{position} {names}")
+        lines.append(f"• {source} — {'; '.join(parts)}")
+    if len(sources) > MAX_DISCLOSURE_SOURCES:
+        lines.append(f"…and {len(sources) - MAX_DISCLOSURE_SOURCES} more creators.")
+    if unverified:
+        lines.append("* flagged for review")
     return "\n".join(lines)
 
 

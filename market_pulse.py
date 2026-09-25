@@ -124,8 +124,9 @@ def _format_asset_line(entry, latest_price=None):
     if entry["actions"]:
         actions = " ".join(f"{a}×{n}" for a, n in entry["actions"].most_common())
         parts.append(actions)
-    if entry["targets"]:
-        avg = sum(entry["targets"]) / len(entry["targets"])
+    targets = pulse_charts.plausible_targets(entry["targets"], latest_price)
+    if targets:
+        avg = sum(targets) / len(targets)
         target_part = f"avg target {avg:,.0f}"
         if latest_price:
             implied = (avg - latest_price) / latest_price
@@ -369,12 +370,23 @@ def build_canonical_pulse(inputs, today):
         lines.append("🔄 Consensus flips vs prior week (same asset and horizon):")
         for flip in flips:
             lines.append(f"• {flip['label']}: {flip['from']} → {flip['to']}")
-    new_assets = {k: e for k, e in current.items() if k not in inputs["older_keys"]}
+    # "New" is per asset, not per (asset, horizon): an asset discussed last
+    # month with no horizon is not new because someone now names one.
+    older_assets = {k[0] if isinstance(k, tuple) else k for k in inputs["older_keys"]}
+    new_assets = {}
+    for key, entry in current.items():
+        asset = key[0] if isinstance(key, tuple) else key
+        if asset in older_assets:
+            continue
+        if asset not in new_assets or entry["mentions"] > new_assets[asset]["mentions"]:
+            new_assets[asset] = entry
     if new_assets:
         lines.append("")
-        lines.append(f"🆕 New on the radar (past {NEW_ASSET_LOOKBACK_DAYS} days):")
-        for entry in sorted(new_assets.values(), key=lambda e: -e["mentions"])[:5]:
-            lines.append(f"• {entry['label']} — {_direction(net_stance(entry))}")
+        lines.append(f"🆕 New on the radar (not discussed in the prior {NEW_ASSET_LOOKBACK_DAYS} days):")
+        ranked_new = sorted(new_assets.values(), key=lambda e: (-len(e["channels"]), -e["mentions"], e["label"]))
+        for entry in ranked_new[:5]:
+            lines.append(f"• {entry['label']} — {_direction(net_stance(entry))} "
+                         f"({entry['mentions']} mention{'s' if entry['mentions'] != 1 else ''})")
     disclosures = canonical_claims.format_portfolio_disclosures(
         canonical_claims.portfolio_disclosures(inputs["current"]))
     if disclosures:

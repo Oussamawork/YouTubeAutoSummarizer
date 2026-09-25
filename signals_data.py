@@ -80,7 +80,8 @@ def _in_window(record, start, end):
 # no ticker, and aggregating them by name is the correct behavior.
 ASSET_ALIASES = {
     # crypto
-    "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL",
+    "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL", "CHAINLINK": "LINK",
+    "RIPPLE": "XRP", "CARDANO": "ADA", "DOGECOIN": "DOGE",
     # megacaps and frequently discussed stocks
     "NVIDIA": "NVDA", "MICROSOFT": "MSFT", "APPLE": "AAPL", "AMAZON": "AMZN",
     "META": "META", "META PLATFORMS": "META", "ALPHABET": "GOOGL",
@@ -108,7 +109,17 @@ ASSET_ALIASES = {
     "UNITED RENTALS": "URI", "BAE SYSTEMS": "BAESY", "SOFTBANK": "SFTBY",
     "ADYEN": "ADYEY",
     "TAIWAN SEMICONDUCTOR MANUFACTURING COMPANY": "TSM",
+    "DUTCH BROS": "BROS", "BOOKING HOLDINGS": "BKNG", "BOOKING": "BKNG",
+    "DOORDASH": "DASH", "NIKE": "NKE", "MASTERCARD": "MA", "VISA": "V",
+    "ROYAL CARIBBEAN": "RCL", "INTERNATIONAL PAPER": "IP", "UPWORK": "UPWK",
+    "ROCKET LAB": "RKLB", "COREWEAVE": "CRWV", "PFIZER": "PFE",
+    "APPLIED MATERIALS": "AMAT", "VERTIV": "VRT", "HIMS & HERS": "HIMS",
 }
+
+# Trailing words speakers attach to a company name ("Amazon stock", "Nvidia
+# shares") that are not part of it: stripped before the alias lookup so the
+# asset folds into its ticker instead of aggregating under a second key.
+_NAME_SUFFIXES = (" STOCK", " STOCKS", " SHARES", " SHARE")
 
 # Recorded-ticker variants folded to one canonical symbol: dual share classes
 # and renames that speakers use interchangeably would otherwise still split an
@@ -148,6 +159,16 @@ UNPRICEABLE_TICKERS = {
 
 def _normalized_name(asset):
     return " ".join((asset.get("name") or "").split()).upper()
+
+
+def _alias_for_name(name):
+    """Curated ticker for a spoken name, tolerating "<name> stock"."""
+    if name in ASSET_ALIASES:
+        return ASSET_ALIASES[name]
+    for suffix in _NAME_SUFFIXES:
+        if name.endswith(suffix) and name[: -len(suffix)] in ASSET_ALIASES:
+            return ASSET_ALIASES[name[: -len(suffix)]]
+    return None
 
 
 LEARNED_TICKERS_FILE = "data/ticker_map.json"
@@ -223,7 +244,13 @@ def canonical_ticker(asset):
     ticker = (asset.get("ticker") or "").strip().upper()
     name = _normalized_name(asset)
     if not ticker:
-        ticker = ASSET_ALIASES.get(name)
+        ticker = _alias_for_name(name)
+    elif ticker not in TICKER_ALIASES and ticker in ASSET_ALIASES:
+        # A company name recorded in the ticker field ("SOLANA"): no listing
+        # prices it (Twelve Data 404s SOLANA/USD) and it splits the asset from
+        # its real ticker. Every alias whose key is already a ticker maps to
+        # itself, so real tickers pass through unchanged.
+        ticker = ASSET_ALIASES[ticker]
     if ticker and ticker in TICKER_ALIASES:
         return TICKER_ALIASES[ticker]
     learned = learned_tickers()

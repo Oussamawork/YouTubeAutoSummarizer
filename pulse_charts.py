@@ -206,6 +206,22 @@ def conviction_points(current, limit=MAX_MAP_POINTS, min_directional=MIN_MAP_DIR
     return kept + extra
 
 
+# A stated target this far from today's price is almost never a share-price
+# target: it is a revenue or market-cap figure, a percentage, or a price in
+# another unit that slipped past extraction. One such number once put a
+# +22,495,163,440% "implied move" in the pulse and flattened the whole chart.
+PLAUSIBLE_TARGET_RATIO = (0.2, 5.0)
+
+
+def plausible_targets(targets, price):
+    """The targets within PLAUSIBLE_TARGET_RATIO of the latest price; every
+    target when no price is known (nothing to check against)."""
+    if not price:
+        return list(targets)
+    lo, hi = PLAUSIBLE_TARGET_RATIO
+    return [t for t in targets if lo * price <= t <= hi * price]
+
+
 def upside_rows(current, latest_prices, limit=MAX_UPSIDE_ROWS):
     """Implied move from the latest close to the creator price targets, for
     assets that have both. Alongside the average, the low and high targets are
@@ -216,10 +232,11 @@ def upside_rows(current, latest_prices, limit=MAX_UPSIDE_ROWS):
     rows = []
     for key, entry in current.items():
         price = latest_prices.get(key)
-        if not price or not entry["targets"]:
+        targets = plausible_targets(entry["targets"], price)
+        if not price or not targets:
             continue
-        target = sum(entry["targets"]) / len(entry["targets"])
-        t_lo, t_hi = min(entry["targets"]), max(entry["targets"])
+        target = sum(targets) / len(targets)
+        t_lo, t_hi = min(targets), max(targets)
         pct = lambda t: (t - price) / price * 100.0
         rows.append({
             "label": entry["label"],
@@ -230,7 +247,7 @@ def upside_rows(current, latest_prices, limit=MAX_UPSIDE_ROWS):
             "pct": pct(target),
             "lo": pct(t_lo),
             "hi": pct(t_hi),
-            "n_targets": len(entry["targets"]),
+            "n_targets": len(targets),
         })
     rows.sort(key=lambda r: (-r["pct"], r["label"]))
     return rows[:limit]
@@ -286,6 +303,14 @@ META_WRAP = 118
 HOWTO_WRAP = 112
 
 
+def _label_margin(labels, minimum):
+    """Left margin (figure fraction) wide enough for the bold 11.5pt row
+    labels of the 10in figure: a fixed margin clipped long names off the
+    left edge, leaving only their tail visible."""
+    widest = max((len(str(l)) for l in labels), default=0)
+    return min(0.36, max(minimum, 0.03 + 0.0112 * widest))
+
+
 def _finish(fig, path, title, meta, howto):
     """Shared header (headline + context + how-to-read) and footer, then save.
     The header lives on the figure, not the axes, so every chart carries the
@@ -304,7 +329,8 @@ def _render_consensus(plt, data, path):
     height = 0.42 * len(rows) + 2.4
     fig = _new_figure(plt, height)
     top = 1 - 1.55 / height
-    ax = fig.add_axes([0.13, 1.15 / height, 0.62, top - 1.15 / height])
+    left = _label_margin([r["label"] for r in rows], 0.13)
+    ax = fig.add_axes([left, 1.15 / height, 0.75 - left, top - 1.15 / height])
     _chrome(ax)
 
     ys = range(len(rows) - 1, -1, -1)
@@ -619,7 +645,8 @@ def _render_upside(plt, data, path):
     height = 0.55 * len(rows) + 2.5
     fig = _new_figure(plt, height)
     top = 1 - 1.55 / height
-    ax = fig.add_axes([0.12, 0.95 / height, 0.6, top - 0.95 / height])
+    left = _label_margin([r["label"] for r in rows], 0.12)
+    ax = fig.add_axes([left, 0.95 / height, 0.72 - left, top - 0.95 / height])
     _chrome(ax)
 
     ys = range(len(rows) - 1, -1, -1)
@@ -635,7 +662,7 @@ def _render_upside(plt, data, path):
         ax.text(row["pct"], y + 0.34, f"{row['pct']:+.0f}%", ha="center",
                 va="bottom", fontsize=10.5, fontweight="bold", color=INK)
         # \$ keeps matplotlib from reading the pair of $s as inline mathtext.
-        if row["n_targets"] > 1:
+        if row["n_targets"] > 1 and round(row["t_lo"]) != round(row["t_hi"]):
             note = (f"\\${row['price']:,.0f} now · {row['n_targets']} targets "
                     f"\\${row['t_lo']:,.0f}–\\${row['t_hi']:,.0f}")
         else:

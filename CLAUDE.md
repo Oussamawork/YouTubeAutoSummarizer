@@ -187,7 +187,12 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   `market_pulse` re-exports its names for existing callers.
 - `market_pulse.py` — the weekly pulse (`weekly-pulse.yml`) over **canonical
   claims** via `canonical_claims` (top assets per horizon bucket, flips,
-  new-on-radar, disclosures, tone from each video's own views). The legacy
+  new-on-radar, disclosures, tone from each video's own views). Only a real
+  price level counts as a target (`canonical_claims.price_target_of`: no
+  revenue / market-cap / percent / multiple figures, no recommendation entry
+  levels), and a target outside 0.2×–5× the latest close is dropped
+  (`pulse_charts.plausible_targets`). Unresolved reference phrases ("this
+  business", "cash") are not assets (`is_placeholder_asset`). The legacy
   pulse over `data/signals.jsonl` survives for compatibility and runs only
   with `PULSE_DATA_SOURCE=legacy`.
 - `pulse_charts.py` — the pulse's companion PNG charts (consensus board, flip

@@ -43,7 +43,7 @@ def test_short_bearish_and_long_bullish_stay_in_separate_buckets_in_the_weekly_c
     # single averaged stance.
     inputs = mp._canonical_pulse_inputs(7, date(2026, 7, 12), lambda *a: {}, claims=claims)
     text = mp.build_canonical_pulse(inputs, date(2026, 7, 12))
-    assert "NVDA [short] — net bearish" in text and "NVDA [long] — net bullish" in text
+    assert "NVDA (short-term) — net bearish" in text and "NVDA (long-term) — net bullish" in text
     assert "net mixed" not in text
 
 
