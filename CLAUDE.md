@@ -287,6 +287,9 @@ once the digest itself has been accepted. Runs stop starting new videos after
 workflow timeout.
 
 ## Design docs
+- `docs/architecture.md` — the end-to-end pipeline: discovery and gating, the
+  transcript source cascade and its budget gates, how the summarizer is instructed,
+  what each outcome does to the video, and the fan-out after a summary. Start here.
 - `docs/tdd-transcript-budget.md` — measured findings on transcript-credit
   efficiency (≈2.9 credits per delivered summary), the budget/pacing design and
   its critique, options considered, and the sequenced next steps. Read before
