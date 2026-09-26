@@ -1,7 +1,7 @@
 {
   "models": {
     "gemini-3.6-flash": {
-      "capability_checked_at": "2026-09-19T15:43:47+00:00",
+      "capability_checked_at": "2026-09-26T16:10:41+00:00",
       "context_window_limit": null,
       "input_token_limit": 1048576,
       "output_token_limit": 65536,
@@ -11,7 +11,7 @@
       "tokens_per_minute_limit": null
     },
     "gemini-3.7-flash": {
-      "capability_checked_at": "2026-09-19T15:43:33+00:00",
+      "capability_checked_at": "2026-09-26T16:10:28+00:00",
       "context_window_limit": null,
       "input_token_limit": 1048576,
       "output_token_limit": 65536,
