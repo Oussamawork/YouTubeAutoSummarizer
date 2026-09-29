@@ -3,13 +3,13 @@
   "models": {},
   "spent": {
     "gemini-3.6-flash": {
-      "at": "2026-09-29T17:58:00+00:00",
-      "confirmations": 2,
+      "at": "2026-09-29T22:10:05+00:00",
+      "confirmations": 3,
       "used": 0
     },
     "gemini-3.7-flash": {
-      "at": "2026-09-29T17:57:40+00:00",
-      "confirmations": 2,
+      "at": "2026-09-29T22:09:55+00:00",
+      "confirmations": 3,
       "used": 0
     }
   }
