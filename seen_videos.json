@@ -1,8 +1,8 @@
 {
   "channels": {
     "UC3AdN1bEmEonuSwXNS8LixQ": {
-      "last_published": "2026-09-29T16:00:25+00:00",
-      "last_video_id": "XR2humwYWPA"
+      "last_published": "2026-09-30T17:00:18+00:00",
+      "last_video_id": "mA5OBd3spEE"
     },
     "UCTPm4y283GIygUCq4a_T96Q": {
       "last_published": "2026-09-22T11:55:24+00:00",
@@ -25,16 +25,16 @@
       "last_video_id": "NEcbhM7vfW4"
     },
     "UCrGLm-Drgv0vbbemwwHeXJw": {
-      "last_published": "2026-09-29T19:41:27+00:00",
-      "last_video_id": "-kJ3c3kbXr4"
+      "last_published": "2026-09-30T23:32:14+00:00",
+      "last_video_id": "cIOHXqXkuLc"
     },
     "UCvLnTGJQthqju38QPtaD64Q": {
-      "last_published": "2026-09-24T15:05:52+00:00",
-      "last_video_id": "QaAv0Rb_oGM"
+      "last_published": "2026-09-29T14:53:03+00:00",
+      "last_video_id": "MMCLO0_2q2M"
     },
     "UCwKB_00dPL3x5XmHF9IJCrg": {
-      "last_published": "2026-09-30T11:45:26+00:00",
-      "last_video_id": "FNScYFbF-p8"
+      "last_published": "2026-09-30T16:30:17+00:00",
+      "last_video_id": "FupOpO06BWE"
     }
   },
   "pending": {
@@ -54,21 +54,9 @@
       "attempts": 0,
       "channel_id": "UCp6aBHRM6ZS_kLeC57HV4kg"
     },
-    "FupOpO06BWE": {
-      "attempts": 0,
-      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
-    },
     "GivZnw1iFNI": {
       "attempts": 0,
       "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
-    },
-    "MMCLO0_2q2M": {
-      "attempts": 0,
-      "channel_id": "UCvLnTGJQthqju38QPtaD64Q"
-    },
-    "MyCcSNprYhE": {
-      "attempts": 0,
-      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     },
     "PImU7RstPsk": {
       "attempts": 0,
@@ -93,10 +81,6 @@
     "Ww0xYsYoqlg": {
       "attempts": 0,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
-    },
-    "XSaK_QtIk_w": {
-      "attempts": 0,
-      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     },
     "ZIpQF_gnEMA": {
       "attempts": 0,
@@ -134,10 +118,6 @@
       "attempts": 0,
       "channel_id": "UCp6aBHRM6ZS_kLeC57HV4kg"
     },
-    "mA5OBd3spEE": {
-      "attempts": 0,
-      "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ"
-    },
     "oezGWTTmZ80": {
       "attempts": 0,
       "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
@@ -150,9 +130,9 @@
       "attempts": 0,
       "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
     },
-    "tmkspkwDr4Q": {
+    "tJE6v1w8z3k": {
       "attempts": 0,
-      "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
+      "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
     },
     "vRRCyY9RjMQ": {
       "attempts": 0,
