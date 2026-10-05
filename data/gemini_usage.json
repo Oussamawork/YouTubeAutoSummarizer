@@ -6,13 +6,13 @@
   },
   "spent": {
     "gemini-3.6-flash": {
-      "at": "2026-10-04T21:09:07+00:00",
-      "confirmations": 1,
+      "at": "2026-10-05T00:38:56+00:00",
+      "confirmations": 2,
       "used": 7
     },
     "gemini-3.7-flash": {
-      "at": "2026-10-04T21:08:55+00:00",
-      "confirmations": 3,
+      "at": "2026-10-05T00:38:31+00:00",
+      "confirmations": 4,
       "used": 5
     }
   }
