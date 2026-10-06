@@ -202,7 +202,14 @@ def test_unsupported_ticker_is_dropped_and_curated_mapping_used():
     c = claims[0]
     assert c["ticker_spoken"] == "CVX"
     assert c["ticker"] == "CVX" and c["ticker_source"] == "curated_mapping"   # via the table, not the model
-    assert "ticker_not_in_evidence" in c["review_reasons"]
+    # The name identifies the asset on its own, so the unspoken ticker costs
+    # the claim nothing: it is discarded, not sent to review.
+    assert "ticker_not_in_evidence" not in c["review_reasons"] and not c["review_required"]
+    # An unresolved name with an unspoken ticker is a real doubt about the asset.
+    claims, _ = _validate("Iron looks strong to me here.", [_claim(
+        subject_mention="Iron", ticker_spoken="IREN", stance="bullish", forecast_direction="increase",
+        evidence_text="Iron looks strong to me here")])
+    assert claims[0]["ticker"] is None and "ticker_not_in_evidence" in claims[0]["review_reasons"]
 
 
 def test_spoken_ticker_and_title_ticker_are_confirmed():

@@ -353,6 +353,11 @@ flowchart LR
   from validated claims — as a backward-compatible view; the legacy paths
   (`PULSE_DATA_SOURCE=legacy`, `channel_scorecard.py --legacy`) are the only
   readers.
+- **The Monday pulse counts creators**, never videos or claims, with a
+  creator family (`group=` in `channel_ids.txt`) as one voice; agreement is
+  ranked on each creator's latest view from the past four weeks, and the
+  report states how much of the week was analyzed and which channels are
+  still queued (`docs/tdd-weekly-pulse.md`).
 - **State** — `seen_videos.json` is written atomically after every video, so a
   mid-run crash never re-sends what was already delivered.
 

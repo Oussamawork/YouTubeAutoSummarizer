@@ -83,12 +83,16 @@ def read_channels(file_path):
                or auto-dubbed caption track is rejected and the next source
                tried. Without it, any language in TRANSCRIPT_LANGUAGES
                (default: every language the claims guard covers) passes.
+      group=name — channels of one creator house (e.g. a German channel and
+               its English edition) share this name. The weekly pulse counts
+               a group as ONE creator, so a house view repeated on three
+               channels is not three agreeing creators. Delivery ignores it.
 
     Unknown or malformed options are logged and ignored, so a typo can't make
     the whole channel list unreadable.
 
     Returns a list of {"channel_id", "digest", "max_per_run", "only",
-    "language"} dicts.
+    "language", "group"} dicts.
     """
     try:
         with open(file_path, "r", encoding="utf-8") as file:
@@ -101,7 +105,7 @@ def read_channels(file_path):
                     continue
                 tokens = line.split()
                 entry = {"channel_id": tokens[0], "digest": False, "max_per_run": None,
-                         "only": [], "language": None}
+                         "only": [], "language": None, "group": None}
                 for token in tokens[1:]:
                     option = token.lower()
                     if option == "digest":
@@ -123,6 +127,12 @@ def read_channels(file_path):
                             entry["language"] = code
                         else:
                             log_error(f"Ignoring malformed channel option '{token}' for {tokens[0]}")
+                    elif option.startswith("group="):
+                        name = token.split("=", 1)[1].strip()
+                        if name:
+                            entry["group"] = name
+                        else:
+                            log_error(f"Ignoring empty channel option '{token}' for {tokens[0]}")
                     else:
                         log_error(f"Ignoring unknown channel option '{token}' for {tokens[0]}")
                 channels.append(entry)

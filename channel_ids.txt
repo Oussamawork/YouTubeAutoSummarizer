@@ -14,6 +14,9 @@
 #            any of them (Sept 2026: Arabic for English videos, English for
 #            German ones). Without it any language in TRANSCRIPT_LANGUAGES
 #            (default en,de) passes, so set it wherever the language is known.
+#   group=name — channels of one creator house share a name; the weekly
+#            pulse counts the group as ONE creator, so a house view repeated
+#            on three channels is not three agreeing creators.
 #
 # No per-run caps are set: every video a channel publishes is processed in the
 # run that finds it, rather than trickling out over later runs. Channel order
@@ -27,9 +30,9 @@ UCwKB_00dPL3x5XmHF9IJCrg lang=en        # @ParkevTatevosian, CFA (~4-5/day)
 # --- Steady, ~1 video/day each --------------------------------------------
 UCrGLm-Drgv0vbbemwwHeXJw lang=en        # Couch Investor
 UCfCT7SSFEWyG4th9ZmaGYqQ lang=en        # Joseph Carlson After Hours
-UC3AdN1bEmEonuSwXNS8LixQ digest lang=de # @hkcm (German; has English auto-dubs)
-UCvLnTGJQthqju38QPtaD64Q digest lang=en # @HKCM_GLOBAL (English)
-UC_niVs5ITmD-qgnxph8CohA lang=de        # @phantombyhkcm (German)
+UC3AdN1bEmEonuSwXNS8LixQ digest lang=de group=HKCM # @hkcm (German; has English auto-dubs)
+UCvLnTGJQthqju38QPtaD64Q digest lang=en group=HKCM # @HKCM_GLOBAL (English)
+UC_niVs5ITmD-qgnxph8CohA lang=de group=HKCM # @phantombyhkcm (German)
 
 # --- Highest volume --------------------------------------------------------
 # More Crypto Online posts a per-coin analysis for many altcoins; only the

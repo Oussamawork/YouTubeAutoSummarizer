@@ -8,7 +8,9 @@ know the rules. They live here instead:
   load_canonical_claims  active run per video only (superseded runs out),
                          no legacy-imported rows (schema_version="legacy"),
                          no cross-chunk repeats (repeat_of_claim_id), with
-                         the latest observed condition outcome overlaid
+                         review flags the current validator no longer raises
+                         cleared (claims.revalidate_review) and the latest
+                         observed condition outcome overlaid
   headline_claims        + claims.is_headline_claim (reviewed-clean, fully
                          covered, evidence-located, the source's own view)
   view_claims            + claims.carries_view (a view-bearing claim type
@@ -30,7 +32,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime
 
-from claims import carries_view, is_headline_claim
+from claims import carries_view, is_headline_claim, revalidate_review
 import research_state
 from signals_data import CONVICTION_WEIGHTS, UNPRICEABLE_TICKERS, canonical_ticker
 
@@ -46,10 +48,10 @@ HORIZON_LABELS = {"short": "short-term", "medium": "medium-term", "long": "long-
 # would otherwise count as distinct "assets" in consensus and new-on-radar.
 _PLACEHOLDER_FIRST_WORDS = {"THIS", "THAT", "THE", "THESE", "THOSE", "IT", "ITS", "MY", "OUR", "THEIR", "HIS", "HER"}
 _NON_ASSETS = {"CASH", "PORTFOLIO", "MY PORTFOLIO", "WHITE COUNT", "PRICE", "RECESSION",
-               "COMPUTE", "CLARITY ACT", "MARKET", "THE MARKET", "STOCKS", "EVERYTHING"}
+               "COMPUTE", "CLARITY ACT", "MARKET", "THE MARKET", "STOCKS", "EVERYTHING", "STOCK", "NEW"}
 # Chart-reading vocabulary the extractor sometimes keeps as the subject
 # ("wave two or B wave", "the SOL/BTC chart").
-_NON_ASSET_PATTERN = re.compile(r"\bWAVES?\b|\bCHART\b|\bCOUNT\b")
+_NON_ASSET_PATTERN = re.compile(r"\bWAVES?\b|\bCHART\b|\bCOUNT\b|\bSUPPORT ZONE\b|\bRESISTANCE\b")
 
 # Spellings of one un-tickered theme folded to one key, so oil talk is not
 # split across OIL, OIL PRICES and WTI (each a single creator on its own).
@@ -61,6 +63,9 @@ MACRO_ALIASES = {
     "NASDAC": "NASDAQ", "NASDAQ 100": "NASDAQ", "NASDAQ-100": "NASDAQ",
     "S&P": "S&P 500", "SP500": "S&P 500", "S&P500": "S&P 500",
     "GOLD PRICE": "GOLD", "GOLDPREIS": "GOLD",
+    "NASDACK": "NASDAQ", "NIKKEI 225": "NIKKEI", "NICKEY": "NIKKEI", "NICK 225": "NIKKEI",
+    "DOW": "DOW JONES", "DOW JONES INDUSTRIAL AVERAGE": "DOW JONES",
+    "ETHEREUM BITCOIN": "ETH/BTC", "ETH BTC": "ETH/BTC", "ETHEREUM/BITCOIN": "ETH/BTC",
 }
 
 # Price targets: only a price level the speaker expects the asset to reach.
@@ -109,7 +114,8 @@ LEGACY_TYPE = {"stock": "stock", "crypto": "crypto", "etf": "etf", "index": "ind
 
 
 def load_canonical_claims(state=None, path=None, conditions=None):
-    """Active, non-legacy, non-repeated claims with condition outcomes applied."""
+    """Active, non-legacy, non-repeated claims, revalidated under the current
+    review rules, with condition outcomes applied."""
     state = state or research_state.load_state()
     rows = research_state.load_active_claims(state, path=path, include_legacy=False)
     evaluations = conditions if conditions is not None else research_state.load_condition_evaluations()
@@ -117,6 +123,7 @@ def load_canonical_claims(state=None, path=None, conditions=None):
     for row in rows:
         if row.get("repeat_of_claim_id"):
             continue
+        row = revalidate_review(row)
         ev = evaluations.get(row.get("claim_id"))
         if ev:
             row = dict(row)
@@ -304,7 +311,7 @@ def _display_name(key):
     return " ".join(w if len(w) <= 2 else w.title() for w in key.split())
 
 
-def aggregate_views_by_asset(claims, channel_weights=None):
+def aggregate_views_by_asset(claims, channel_weights=None, voter_of=None):
     """
     The reader-facing aggregation the weekly pulse uses: one entry per ASSET
     (not per horizon bucket), each creator casting one vote.
@@ -321,11 +328,17 @@ def aggregate_views_by_asset(claims, channel_weights=None):
 
     Entries carry the aggregate_views shape the charts consume (label,
     ticker, type, mentions, channels, bull / bear / neutral, *_w, actions,
-    targets) plus `votes` {creator: lean}, `videos`, and `horizons`.
+    targets) plus `votes` {creator: lean}, `vote_dates` {creator: date of
+    the video the vote comes from}, `videos`, and `horizons`.
     Price targets are one per creator (their latest), so one creator
     repeating a number does not become a consensus target.
+
+    `voter_of` maps a claim to the voice it belongs to (default: its
+    channel). With creator families (voter_resolver) the channels of one
+    house share one vote: their latest video on the asset casts it.
     """
     channel_weights = channel_weights or {}
+    voter_of = voter_of or source_of
     per_asset = defaultdict(list)
     for c in view_claims(claims):
         if c.get("review_required"):
@@ -338,13 +351,13 @@ def aggregate_views_by_asset(claims, channel_weights=None):
         rows.sort(key=lambda c: (c.get("published_at") or "", c.get("extracted_at") or ""))
         by_source = defaultdict(list)
         for c in rows:
-            by_source[source_of(c)].append(c)
+            by_source[voter_of(c)].append(c)
         ticker = next((t for t in (resolved_ticker(c) for c in reversed(rows)) if t), None)
         entry = {
             "asset": key, "label": ticker or _display_name(key), "ticker": ticker,
             "type": LEGACY_TYPE.get(next((c.get("asset_type") for c in reversed(rows) if c.get("asset_type")), None), "other"),
             "mentions": len(rows), "videos": len({c.get("video_id") for c in rows}),
-            "channels": set(by_source), "votes": {},
+            "channels": set(by_source), "votes": {}, "vote_dates": {},
             "bull": 0, "bear": 0, "neutral": 0, "bull_w": 0.0, "bear_w": 0.0, "neutral_w": 0.0,
             "actions": Counter(), "targets": [], "horizons": Counter(),
             "claim_ids": [c.get("claim_id") for c in rows],
@@ -355,6 +368,7 @@ def aggregate_views_by_asset(claims, channel_weights=None):
             directions = Counter(direction_of(c) for c in latest)
             vote = lean(directions.get("bullish", 0), directions.get("bearish", 0))
             entry["votes"][source] = vote
+            entry["vote_dates"][source] = claim_date(latest[0])
             weight = channel_weights.get(source, 1.0)
             slot = {"bullish": "bull", "bearish": "bear"}.get(vote, "neutral")
             entry[slot] += 1
@@ -371,6 +385,99 @@ def aggregate_views_by_asset(claims, channel_weights=None):
                 entry["targets"].append(target)
         entries[key] = entry
     return entries
+
+
+def voter_resolver(groups, claims=()):
+    """
+    A claim -> voter function for creator families: channels configured with
+    the same `group=` (helpers.read_channels) speak with one voice, so the
+    HKCM house's German, English and Phantom channels cast one vote instead
+    of three agreeing ones. `groups` maps channel id -> group name; claims
+    that carry no channel id are matched by the channel name other claims
+    pair with that id. Channels outside every group vote as themselves.
+    """
+    groups = {k: v for k, v in (groups or {}).items() if k and v}
+    by_name = {}
+    for c in claims:
+        if c.get("channel_id") in groups and c.get("channel_name"):
+            by_name[c["channel_name"]] = groups[c["channel_id"]]
+
+    def voter_of(claim):
+        group = groups.get(claim.get("channel_id")) or by_name.get(claim.get("channel_name"))
+        return group or source_of(claim)
+    return voter_of
+
+
+def creator_moods(claims, voter_of=None):
+    """
+    {creator: bullish|bearish|mixed|neutral} — each creator's balance of
+    views across the assets they discussed in `claims`: their per-asset
+    votes (aggregate_views_by_asset) under `lean`, each asset counting once
+    however many videos or claims it got. Only split votes make a split
+    creator; no directional vote at all is neutral.
+
+    The pulse's mood leads with this, not with a video count: one creator
+    posting five videos a day made 69% of a week's videos and set the
+    "share of videos bullish" on their own. And it is per asset rather than
+    per video tone, so a creator bearish on six assets and bullish on four
+    is not "bullish" because more of their videos happened to lean up.
+    """
+    tally = defaultdict(Counter)
+    for entry in aggregate_views_by_asset(claims, voter_of=voter_of).values():
+        for voter, vote in entry["votes"].items():
+            tally[voter][vote] += 1
+    moods = {}
+    for voter, n in tally.items():
+        side = lean(n["bullish"], n["bearish"])
+        moods[voter] = "mixed" if side == "neutral" and n["mixed"] else side
+    return moods
+
+
+def view_changes(claims, since, voter_of=None):
+    """
+    Creators who changed their own mind: the same creator's latest directional
+    video lean on an asset after `since` is the opposite of their latest one
+    on or before it (bullish <-> bearish; "mixed" is neither). One creator
+    against their own earlier self needs no second creator to be news, and is
+    immune to who else happened to post that week.
+
+    Videos whose directional claims name different horizons (short-term
+    bearish after long-term bullish) are not a change of mind and are
+    skipped; unspecified horizons are compared as they are.
+    Returns [{voter, asset, label, before, after, before_date, after_date}].
+    """
+    voter_of = voter_of or source_of
+    per = defaultdict(lambda: defaultdict(list))
+    for c in view_claims(claims):
+        if c.get("review_required"):
+            continue
+        key = asset_key(c)
+        if key:
+            per[(voter_of(c), key)][c.get("video_id")].append(c)
+    changes = []
+    for (voter, key), videos in per.items():
+        leans = []
+        for rows in videos.values():
+            dates = [d for d in (claim_date(c) for c in rows) if d]
+            directional = [c for c in rows if direction_of(c) in ("bullish", "bearish")]
+            n = Counter(direction_of(c) for c in directional)
+            side = lean(n["bullish"], n["bearish"])
+            if dates and side in ("bullish", "bearish"):
+                horizons = {c.get("horizon_bucket") for c in directional
+                            if c.get("horizon_bucket") in HORIZON_LABELS}
+                leans.append((min(dates), side, horizons, rows))
+        leans.sort(key=lambda r: r[0])
+        after = [r for r in leans if r[0] > since]
+        before = [r for r in leans if r[0] <= since]
+        if not after or not before:
+            continue
+        (d1, s1, h1, _), (d2, s2, h2, rows) = before[-1], after[-1]
+        if s1 == s2 or (h1 and h2 and not h1 & h2):
+            continue
+        ticker = next((t for t in (resolved_ticker(c) for c in rows) if t), None)
+        changes.append({"voter": voter, "asset": key, "label": ticker or _display_name(key),
+                        "before": s1, "after": s2, "before_date": d1, "after_date": d2})
+    return sorted(changes, key=lambda r: (r["voter"], r["label"]))
 
 
 def video_dates(claims):

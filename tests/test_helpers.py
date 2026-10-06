@@ -84,10 +84,10 @@ def test_read_channels_plain_and_options(tmp_path):
         "UCboth digest max=2\n"
     )
     assert helpers.read_channels(str(p)) == [
-        {"channel_id": "UCplain", "digest": False, "max_per_run": None, "only": [], "language": None},
-        {"channel_id": "UCdigest", "digest": True, "max_per_run": None, "only": [], "language": None},
-        {"channel_id": "UCcapped", "digest": False, "max_per_run": 5, "only": [], "language": None},
-        {"channel_id": "UCboth", "digest": True, "max_per_run": 2, "only": [], "language": None},
+        {"channel_id": "UCplain", "digest": False, "max_per_run": None, "only": [], "language": None, "group": None},
+        {"channel_id": "UCdigest", "digest": True, "max_per_run": None, "only": [], "language": None, "group": None},
+        {"channel_id": "UCcapped", "digest": False, "max_per_run": 5, "only": [], "language": None, "group": None},
+        {"channel_id": "UCboth", "digest": True, "max_per_run": 2, "only": [], "language": None, "group": None},
     ]
 
 
@@ -96,7 +96,7 @@ def test_read_channels_ignores_bad_options(tmp_path):
     p = tmp_path / "channels.txt"
     p.write_text("UCx digset max=oops\n")
     assert helpers.read_channels(str(p)) == [
-        {"channel_id": "UCx", "digest": False, "max_per_run": None, "only": [], "language": None}
+        {"channel_id": "UCx", "digest": False, "max_per_run": None, "only": [], "language": None, "group": None}
     ]
 
 

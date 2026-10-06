@@ -1,7 +1,7 @@
 import argparse
 import html as _html
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -10,8 +10,9 @@ from dotenv import load_dotenv
 import canonical_claims
 import channel_scorecard as cs
 import pulse_charts
+import research_state
 import scorecard_pricing as sp
-from helpers import env_flag
+from helpers import env_flag, read_channels
 from log import log_info, log_warn, log_error
 from sendToTelegram import send_telegram_html, send_telegram_text, send_telegram_photo_album
 # The dataset layer lives in signals_data; the names are re-exported here so
@@ -24,15 +25,18 @@ from signals_data import (  # noqa: F401  (re-exports)
     aggregate_assets, _directional_mentions, net_stance, _direction, _overall_tone,
 )
 
-# Weekly market pulse (Mondays, weekly-pulse.yml): one Telegram report — top
-# assets with net stance PER HORIZON BUCKET, consensus flips vs the prior
-# window, assets newly on the radar — plus the companion charts.
+# Weekly market pulse (Mondays, weekly-pulse.yml): one Telegram report — where
+# creators agree and disagree, who changed their mind, attention shifts,
+# assets newly on the radar, the mood and a coverage footer — plus the
+# companion charts.
 #
 # PRODUCTION DATA SOURCE: canonical claims, read through
 # canonical_claims.load_canonical_claims (active runs only, no legacy rows,
-# no repeats) and aggregated per (asset, horizon bucket) by
-# canonical_claims.aggregate_views. A short-term bearish and a long-term
-# bullish view on the same asset are two rows, never one averaged stance.
+# no repeats, review flags revalidated) and aggregated per asset with ONE
+# VOTE PER CREATOR by canonical_claims.aggregate_views_by_asset — a creator
+# family (`group=` in channel_ids.txt) counting once. Agreement is ranked on
+# each creator's latest view from the past CONSENSUS_LOOKBACK_DAYS; mood,
+# attention and the tone chart count creators, never videos or claims.
 # data/signals.jsonl is a backward-compatible view: the legacy pulse over it
 # (build_pulse / aggregate_assets) is kept for existing callers and runs
 # only when PULSE_DATA_SOURCE=legacy is set explicitly.
@@ -46,6 +50,9 @@ PULSE_DATA_SOURCE = (os.getenv("PULSE_DATA_SOURCE") or "canonical").strip().lowe
 # none of the records this many days before the window started.
 NEW_ASSET_LOOKBACK_DAYS = 30
 MAX_ASSETS_IN_REPORT = 8
+# The consensus board keeps each creator's latest view this long, for assets
+# someone discussed this week (see _canonical_pulse_inputs).
+CONSENSUS_LOOKBACK_DAYS = 28
 
 DISCLAIMER = "⚠️ Creator opinions, not investment advice."
 
@@ -284,11 +291,14 @@ def _canonical_weights(claims, today, price_fetcher):
         return {}, {}
 
 
-def canonical_tone_weeks(claims, today, num_weeks=pulse_charts.SPREAD_WEEKS):
-    """Weekly tone rows (pulse_charts.tone_weeks shape) from each video's own
-    view claims — canonical_claims.video_tone — never from a model's overall
-    sentiment field."""
-    tone = canonical_claims.video_tone(claims)
+def canonical_tone_weeks(claims, today, num_weeks=pulse_charts.SPREAD_WEEKS, voter_of=None):
+    """Weekly tone rows (pulse_charts.tone_weeks shape) counted in CREATORS:
+    each creator's week is the balance of their own per-asset views
+    (canonical_claims.creator_moods), never a model's overall-sentiment
+    field and never a video count. A video count let the most prolific
+    channel (69% of one week's videos) set the "share bullish" alone; one
+    creator, one voice is what the rest of the pulse already counts.
+    `video_n` keeps how many videos stood behind each week."""
     dates = canonical_claims.video_dates(claims)
     if not dates:
         return []
@@ -296,13 +306,15 @@ def canonical_tone_weeks(claims, today, num_weeks=pulse_charts.SPREAD_WEEKS):
     weeks, end = [], today
     for weeks_ago in range(num_weeks):
         start = end - timedelta(days=7)
-        bucket = [vid for vid, d in dates.items() if start < d <= end and vid in tone]
-        if bucket:
-            counts = {k: sum(1 for vid in bucket if tone[vid] == k) for k in ("bullish", "bearish", "neutral", "mixed")}
+        bucket = [c for c in claims if canonical_claims.in_window(c, start, end)]
+        moods = canonical_claims.creator_moods(bucket, voter_of)
+        if moods:
+            counts = {k: sum(1 for m in moods.values() if m == k) for k in ("bullish", "bearish", "neutral", "mixed")}
             first = start + timedelta(days=1)
             weeks.append({
                 "label": f"{first.strftime('%b %-d')} - {end.strftime('%b %-d')}",
-                "short_label": end.strftime("%b %-d"), "weeks_ago": weeks_ago, "n": len(bucket),
+                "short_label": end.strftime("%b %-d"), "weeks_ago": weeks_ago, "n": len(moods),
+                "unit": "creators", "video_n": len(canonical_claims.video_tone(bucket)),
                 **counts, "partial": earliest > start + timedelta(days=1),
             })
         end = start
@@ -310,36 +322,109 @@ def canonical_tone_weeks(claims, today, num_weeks=pulse_charts.SPREAD_WEEKS):
     return weeks
 
 
-def _canonical_pulse_inputs(days, today, price_fetcher, claims=None):
+CHANNELS_FILE = "channel_ids.txt"
+# Gate outcomes that mean "not a video the pulse should read" (the channel's
+# title and duration filters), as opposed to one still waiting for a model.
+_NOT_IN_SCOPE = {"title_filtered", "duration_filtered", "already_decided"}
+_RESEARCH_DONE = {"complete", "no_claims_found", "needs_review"}
+
+
+def _channel_groups(path=CHANNELS_FILE):
+    """channel id -> creator family (`group=` in channel_ids.txt)."""
+    try:
+        return {e["channel_id"]: e["group"] for e in read_channels(path) if e.get("group")}
+    except Exception as e:
+        log_warn(f"Creator groups unavailable this week: {e}")
+        return {}
+
+
+def pulse_coverage(current, window_start, today, gates, state):
+    """
+    How much of the week the pulse actually read: the window's videos the
+    channels' filters let through (latest gate outcome per video), how many
+    have been analyzed, and which channels still have videos waiting —
+    usually on the model's free-tier quota, which since late September has
+    left a third to a half of a week's videos unprocessed at send time. Without this the
+    report read the same whether it saw every creator or half of them.
+    """
+    seen = {}
+    for g in gates or []:
+        d = canonical_claims.claim_date({"published_at": g.get("published_at")})
+        if g.get("video_id") and d and window_start < d <= today:
+            seen[g["video_id"]] = g
+    in_scope = {v: g for v, g in seen.items() if g.get("outcome") not in _NOT_IN_SCOPE}
+    videos = (state or {}).get("videos", {})
+    analyzed = {c.get("video_id") for c in current} | {
+        v for v in in_scope if (videos.get(v) or {}).get("research_status") in _RESEARCH_DONE}
+    waiting = Counter(g.get("channel_name") or g.get("channel_id") or "unknown"
+                      for v, g in in_scope.items() if v not in analyzed)
+    return {"in_scope": len(set(in_scope) | analyzed), "analyzed": len(analyzed),
+            "waiting": sorted(waiting.items(), key=lambda kv: (-kv[1], kv[0]))}
+
+
+def _canonical_pulse_inputs(days, today, price_fetcher, claims=None, gates=None, state=None, groups=None):
     """The production inputs: canonical claims sliced into the current,
-    previous and lookback windows and aggregated per asset
-    (canonical_claims.aggregate_views_by_asset: one vote per creator)."""
-    claims = canonical_claims.load_canonical_claims() if claims is None else claims
+    previous and lookback windows and aggregated per asset, one vote per
+    creator (a creator family counting once).
+
+    `board` is the consensus the report ranks: each creator's latest view
+    from the past CONSENSUS_LOOKBACK_DAYS, for the assets someone spoke
+    about this week. A single week rarely puts two creators on one asset
+    (47 of 52 assets in the Sep 29 - Oct 5 window rested on one creator),
+    while creators restate their views every few weeks — the board keeps
+    a view that still stands and says how many are fresh. Coverage is read
+    from the research ledger when the claims come from it."""
+    if claims is None:
+        state = research_state.load_state() if state is None else state
+        claims = canonical_claims.load_canonical_claims(state)
+        gates = research_state.load_gate_outcomes() if gates is None else gates
+    groups = _channel_groups() if groups is None else groups
+    voter_of = canonical_claims.voter_resolver(groups, claims)
     window_start = today - timedelta(days=days)
     prev_start = window_start - timedelta(days=days)
     lookback_start = window_start - timedelta(days=NEW_ASSET_LOOKBACK_DAYS)
-    current = [c for c in claims if canonical_claims.in_window(c, window_start, today)]
-    previous = [c for c in claims if canonical_claims.in_window(c, prev_start, window_start)]
-    older = [c for c in claims if canonical_claims.in_window(c, lookback_start, window_start)]
+    in_window = canonical_claims.in_window
+    current = [c for c in claims if in_window(c, window_start, today)]
+    previous = [c for c in claims if in_window(c, prev_start, window_start)]
+    older = [c for c in claims if in_window(c, lookback_start, window_start)]
+    rolling = [c for c in claims if in_window(c, today - timedelta(days=CONSENSUS_LOOKBACK_DAYS), today)]
+    prev_rolling = [c for c in claims
+                    if in_window(c, window_start - timedelta(days=CONSENSUS_LOOKBACK_DAYS), window_start)]
+
+    def aggregate(rows, weights=None):
+        return canonical_claims.aggregate_views_by_asset(rows, weights, voter_of=voter_of)
+
+    def fresh_board(weights=None):
+        return {k: e for k, e in aggregate(rolling, weights).items() if k in current_views}
+
     weights, details, latest_prices = {}, {}, {}
-    current_views = canonical_claims.aggregate_views_by_asset(current)
-    if current_views:
-        latest_prices = fetch_latest_prices(current_views, price_fetcher=price_fetcher, today=today)
+    current_views = aggregate(current)
+    board = fresh_board()
+    if board:
+        latest_prices = fetch_latest_prices(board, price_fetcher=price_fetcher, today=today)
         weights, details = _canonical_weights(claims, today, price_fetcher)
         if weights:
-            current_views = canonical_claims.aggregate_views_by_asset(current, weights)
+            current_views, board = aggregate(current, weights), fresh_board(weights)
     view_claims = [c for c in canonical_claims.view_claims(current) if not c.get("review_required")]
+    previous_voters = {voter_of(c) for c in canonical_claims.view_claims(previous)}
+    voters = {voter_of(c) for c in view_claims}
     return {
         "source": "canonical", "claims": claims, "window_start": window_start,
         "current": current, "previous": previous, "older": older,
-        "current_views": current_views,
-        "previous_views": canonical_claims.aggregate_views_by_asset(previous, weights),
-        "older_keys": set(canonical_claims.aggregate_views_by_asset(older)),
+        "current_views": current_views, "board": board,
+        "previous_views": aggregate(previous, weights),
+        "previous_board": aggregate(prev_rolling, weights),
+        "older_keys": set(aggregate(older)),
         "view_claims": len(view_claims),
         "horizon_claims": sum(1 for c in view_claims if c.get("horizon_bucket") in canonical_claims.HORIZON_LABELS),
         "videos": len({c.get("video_id") for c in view_claims}),
-        "channels": len({canonical_claims.source_of(c) for c in view_claims}),
-        "tone": canonical_tone_weeks(claims, today),
+        "channels": len(voters),
+        "active_both_weeks": voters & previous_voters,
+        "families": sorted(voters & set(groups.values())),
+        "creator_moods": canonical_claims.creator_moods(current, voter_of),
+        "view_changes": canonical_claims.view_changes(rolling, window_start, voter_of),
+        "coverage": pulse_coverage(current, window_start, today, gates, state) if gates is not None else None,
+        "tone": canonical_tone_weeks(claims, today, voter_of=voter_of),
         "weights": weights, "weight_details": details, "latest_prices": latest_prices,
     }
 
@@ -354,10 +439,13 @@ MAX_AGREEMENT_ROWS = 6
 MAX_DISAGREEMENT_ROWS = 3
 MAX_DISCUSSED = 5
 MAX_MOVERS = 3
+MAX_CHANGE_CREATORS = 5      # "changed their mind": creators listed…
+MAX_CHANGES_PER_CREATOR = 4  # …and assets per creator
 MAX_PULSE_DISCLOSURE_SOURCES = 4
-MOVER_MIN_CLAIMS = 3        # attention shift needs ≥3 more / fewer claims…
-MOVER_MIN_CREATORS = 1      # …and a creator more / fewer, so one talkative video can't move it
-MIN_LEAN_VOTES = 5          # asset-class and creator lean lines need this many votes
+MOVER_MIN_CREATOR_DELTA = 1  # attention shift: a creator more / fewer, with 2+ on the busier side
+MIN_LEAN_VOTES = 5           # the most bullish / most cautious creator needs this many asset votes
+PARTIAL_COVERAGE = 0.75      # below this share of the week's videos analyzed, the report says so up top
+MAX_WAITING_CHANNELS = 4
 EMOJI = {"bullish": "🟢", "bearish": "🔴", "mixed": "⚖️"}
 
 
@@ -386,10 +474,22 @@ def _money(value):
     return f"${value:,.2f}" if value < 20 else f"${value:,.0f}"
 
 
-def _agreement_line(entry, price, fmt):
+def _fresh(entry, since):
+    """Creators with a side whose view on the asset is from this week."""
+    return sum(1 for v, d in entry.get("vote_dates", {}).items()
+               if entry["votes"].get(v) != "neutral" and d and d > since)
+
+
+def _agreement_line(entry, price, fmt, since=None):
     side = _consensus(entry)
     count = entry["bull"] if side == "bullish" else entry["bear"]
-    parts = [f"{EMOJI[side]} {fmt.b(entry['label'])} — {count} of {_plural(_voters(entry), 'creator')} {side}"]
+    head = f"{count} of {_plural(_voters(entry), 'creator')} {side}"
+    fresh = _fresh(entry, since) if since else _voters(entry)
+    if fresh < _voters(entry):
+        # The board keeps standing views up to four weeks old; say how many
+        # were restated this week so a stale consensus can't pass as news.
+        head += f" ({fresh} this week)"
+    parts = [f"{EMOJI[side]} {fmt.b(entry['label'])} — {head}"]
     if entry["horizons"]:
         named = [canonical_claims.HORIZON_LABELS[b] for b in ("short", "medium", "long") if entry["horizons"].get(b)]
         parts.append("horizon: " + " & ".join(named))
@@ -414,28 +514,43 @@ def _disagreement_line(entry, fmt):
             f"({side}: {fmt.esc('; '.join(minority))})")
 
 
-def _attention_movers(current, previous):
+def _attention_movers(current, previous, active=None):
+    """
+    Assets more / fewer creators discussed than last week, in creators: a
+    claim count let one creator's six-claim deep dive read as an attention
+    shift ("Fortinet 0→6") and a creator whose videos were still waiting for
+    a model read as everyone losing interest. With `active`, only creators
+    with views in BOTH weeks are counted.
+    """
+    def creators(entry):
+        names = (entry or {}).get("channels", set())
+        return len(names if active is None else names & active)
+
     up, down = [], []
     for key in set(current) | set(previous):
         cur, prev = current.get(key), previous.get(key)
-        claims_now, claims_before = (cur or {}).get("mentions", 0), (prev or {}).get("mentions", 0)
-        creators_now = len((cur or {}).get("channels", ())) 
-        creators_before = len((prev or {}).get("channels", ()))
+        now, before = creators(cur), creators(prev)
         label = (cur or prev)["label"]
-        delta = claims_now - claims_before
-        if delta >= MOVER_MIN_CLAIMS and creators_now - creators_before >= MOVER_MIN_CREATORS:
-            up.append((delta, label, claims_before, claims_now))
-        elif -delta >= MOVER_MIN_CLAIMS and creators_before - creators_now >= MOVER_MIN_CREATORS:
-            down.append((-delta, label, claims_before, claims_now))
+        if now - before >= MOVER_MIN_CREATOR_DELTA and now >= MIN_CREATORS:
+            up.append((now - before, label, before, now))
+        elif before - now >= MOVER_MIN_CREATOR_DELTA and before >= MIN_CREATORS:
+            down.append((before - now, label, before, now))
     order = lambda rows: sorted(rows, key=lambda r: (-r[0], r[1]))[:MAX_MOVERS]
     return order(up), order(down)
 
 
-def _lean_share(entries):
-    """(bullish share, votes) over creator votes in `entries`."""
-    bull = sum(e["bull"] for e in entries)
-    bear = sum(e["bear"] for e in entries)
-    return (bull / (bull + bear) if bull + bear else None), bull + bear
+def _class_lean(entries, types):
+    """Creators leaning bullish / bearish / mixed on one asset class: each
+    creator's votes on the class under the same 2/3 lean, so a creator who
+    covers thirty stocks still counts once."""
+    per_creator = defaultdict(lambda: [0, 0])
+    for e in entries.values():
+        if e["type"] not in types:
+            continue
+        for creator, vote in e["votes"].items():
+            if vote in ("bullish", "bearish"):
+                per_creator[creator][vote == "bearish"] += 1
+    return Counter(canonical_claims.lean(b, r) for b, r in per_creator.values())
 
 
 class _Fmt:
@@ -454,23 +569,43 @@ class _Fmt:
         return f"<i>{self.esc(text)}</i>" if self.html else str(text)
 
 
+def _mood_word(moods):
+    """Upbeat / Cautious / Mixed from creator moods (creators with a lean)."""
+    leaning = [m for m in moods.values() if m in ("bullish", "bearish", "mixed")]
+    bulls = sum(1 for m in leaning if m == "bullish")
+    bears = sum(1 for m in leaning if m == "bearish")
+    if leaning and bulls / len(leaning) >= 0.6:
+        return "Upbeat week"
+    if bears and bears >= bulls:
+        return "Cautious week"
+    return "Mixed week"
+
+
 def build_canonical_pulse(inputs, today, html=False):
     """Render the pulse from canonical inputs, as plain text or (html=True)
     Telegram HTML. "" when the window holds no view claims.
 
     Layout, most useful first: a one-sentence takeaway built from the
     numbers below it (a fixed template, never an LLM call), where creators
-    agree, where they disagree, what drew attention, changes vs last week,
-    the mood, what creators say they own, and one footer line on coverage.
+    agree and disagree (each creator's latest view from the past four weeks,
+    for assets discussed this week), who changed their mind, what drew
+    attention, changes vs last week, the mood, what creators say they own,
+    and a footer on coverage. Every count is in creators — a creator family
+    counting once — because video and claim counts measured how much the
+    busiest channel posted, not what creators think.
     """
     fmt = _Fmt(html)
-    current, previous = inputs["current_views"], inputs["previous_views"]
     if not inputs["videos"]:
         return ""
+    current, previous = inputs["current_views"], inputs["previous_views"]
+    board = inputs.get("board", current)
+    prev_board = inputs.get("previous_board", previous)
     prices = inputs["latest_prices"]
+    since = inputs["window_start"]
+    moods = inputs.get("creator_moods") or {}
 
-    ranked = sorted(current.items(), key=lambda kv: (-_voters(kv[1]), -abs(net_stance(kv[1])),
-                                                     -kv[1]["mentions"], kv[1]["label"]))
+    ranked = sorted(board.items(), key=lambda kv: (-_voters(kv[1]), -abs(net_stance(kv[1])),
+                                                   -kv[1]["mentions"], kv[1]["label"]))
     eligible = [(k, e) for k, e in ranked if _voters(e) >= MIN_CREATORS]
     agree = [(k, e) for k, e in eligible if _consensus(e) in ("bullish", "bearish")]
     disagree = [(k, e) for k, e in eligible
@@ -478,15 +613,16 @@ def build_canonical_pulse(inputs, today, html=False):
     shown = {k for k, _ in agree[:MAX_AGREEMENT_ROWS]} | {k for k, _ in disagree[:MAX_DISAGREEMENT_ROWS]}
 
     week = next((w for w in inputs["tone"] if w["weeks_ago"] == 0), None)
-    lines = [f"📈 {fmt.b('Weekly Market Pulse')} · {fmt.esc(pulse_charts.window_label(inputs['window_start'], today))}"]
+    lines = [f"📈 {fmt.b('Weekly Market Pulse')} · {fmt.esc(pulse_charts.window_label(since, today))}"]
 
     # Takeaway.
     takeaway = []
-    if week and week["n"]:
-        bull_share = week["bullish"] / week["n"]
-        mood = ("Upbeat week" if bull_share >= 0.6 else
-                "Cautious week" if week["bearish"] >= week["bullish"] else "Mixed week")
-        takeaway.append(f"{mood}: {week['bullish']} of {week['n']} videos leaned bullish.")
+    if moods:
+        bulls = sum(1 for m in moods.values() if m == "bullish")
+        sentence = f"{_mood_word(moods)}: {bulls} of {_plural(len(moods), 'creator')} leaned bullish"
+        if week and week.get("video_n"):
+            sentence += f" ({week['video_n']} videos)"
+        takeaway.append(sentence + ".")
     if agree:
         top = agree[0][1]
         side = _consensus(top)
@@ -499,32 +635,50 @@ def build_canonical_pulse(inputs, today, html=False):
         takeaway.append(f"Split on {disagree[0][1]['label']}.")
     if takeaway:
         lines.append(fmt.esc(" ".join(takeaway)))
+    coverage = inputs.get("coverage")
+    if coverage and coverage["in_scope"] and coverage["analyzed"] < PARTIAL_COVERAGE * coverage["in_scope"]:
+        # Said up front, not only in the footer: a half-read week can make
+        # the missing creators' assets look abandoned and the rest unanimous.
+        lines.append(fmt.i(f"⚠️ Partial week: {coverage['analyzed']} of {coverage['in_scope']} videos "
+                           "analyzed so far (see the footer)."))
 
     if agree:
         lines += ["", fmt.b("Where creators agree")]
-        lines += [_agreement_line(e, prices.get(k), fmt) for k, e in agree[:MAX_AGREEMENT_ROWS]]
+        lines += [_agreement_line(e, prices.get(k), fmt, since) for k, e in agree[:MAX_AGREEMENT_ROWS]]
     if disagree:
         lines += ["", fmt.b("Where they disagree")]
         lines += [_disagreement_line(e, fmt) for _, e in disagree[:MAX_DISAGREEMENT_ROWS]]
+
+    changes = defaultdict(list)
+    for ch in inputs.get("view_changes") or []:
+        changes[ch["voter"]].append(ch)
+    if changes:
+        lines += ["", fmt.b("Changed their mind")]
+        for voter in sorted(changes, key=lambda v: (-len(changes[v]), v))[:MAX_CHANGE_CREATORS]:
+            rows = changes[voter]
+            text = " · ".join(f"{r['label']} {r['before']} → {r['after']}" for r in rows[:MAX_CHANGES_PER_CREATOR])
+            if len(rows) > MAX_CHANGES_PER_CREATOR:
+                text += f" · +{len(rows) - MAX_CHANGES_PER_CREATOR} more"
+            lines.append(f"🔄 {fmt.b(voter)}: {fmt.esc(text)}")
 
     discussed = sorted(current.values(), key=lambda e: (-len(e["channels"]), -e["videos"], -e["mentions"], e["label"]))
     if discussed:
         lines += ["", fmt.b("Most discussed")]
         lines.append(" · ".join(
-            f"{fmt.esc(e['label'])} ({_plural(len(e['channels']), 'creator')}, {e['mentions']} claims)"
+            f"{fmt.esc(e['label'])} ({_plural(len(e['channels']), 'creator')}, {_plural(e['videos'], 'video')})"
             for e in discussed[:MAX_DISCUSSED]))
 
-    up, down = _attention_movers(current, previous)
+    up, down = _attention_movers(current, previous, inputs.get("active_both_weeks"))
     if up or down:
         lines += ["", fmt.b("Attention vs last week")]
         if up:
-            lines.append("⬆️ " + " · ".join(f"{fmt.esc(l)} ({a}→{b} claims)" for _, l, a, b in up))
+            lines.append("⬆️ " + " · ".join(f"{fmt.esc(l)} ({a}→{b} creators)" for _, l, a, b in up))
         if down:
-            lines.append("⬇️ " + " · ".join(f"{fmt.esc(l)} ({a}→{b} claims)" for _, l, a, b in down))
+            lines.append("⬇️ " + " · ".join(f"{fmt.esc(l)} ({a}→{b} creators)" for _, l, a, b in down))
 
     flips = []
-    for key, entry in current.items():
-        prev = previous.get(key)
+    for key, entry in board.items():
+        prev = prev_board.get(key)
         if not prev or _voters(entry) < MIN_CREATORS or _voters(prev) < MIN_CREATORS:
             continue
         before, after = _consensus(prev), _consensus(entry)
@@ -534,23 +688,30 @@ def build_canonical_pulse(inputs, today, html=False):
         lines += ["", fmt.b("Consensus changed vs last week")]
         lines += [f"🔄 {fmt.b(label)}: {before} → {after}" for label, before, after in sorted(flips)]
 
-    new = [e for k, e in ranked if k not in inputs["older_keys"] and k not in shown and _voters(e) >= MIN_CREATORS]
+    new = [e for k, e in sorted(current.items(), key=lambda kv: (-_voters(kv[1]), kv[1]["label"]))
+           if k not in inputs["older_keys"] and k not in shown and _voters(e) >= MIN_CREATORS]
     if new:
         lines += ["", fmt.b(f"New on the radar (not discussed in the prior {NEW_ASSET_LOOKBACK_DAYS} days)")]
         lines.append(" · ".join(f"{EMOJI.get(_consensus(e), '')} {fmt.esc(e['label'])} ({_plural(_voters(e), 'creator')})"
                                 for e in new[:5]))
 
     mood_lines = []
-    if week and week["n"]:
-        parts = [f"{week[k]} {k}" for k in ("bullish", "mixed", "bearish") if week[k]]
-        if week["neutral"]:
-            parts.append(f"{week['neutral']} without a clear view")
-        mood_lines.append(f"Videos: {' · '.join(parts)}")
+    if moods:
+        parts = [f"{sum(1 for m in moods.values() if m == 'bullish')} bullish"]
+        for side in ("mixed", "bearish"):
+            names = sorted(v for v, m in moods.items() if m == side)
+            if names:
+                parts.append(f"{len(names)} {side} ({', '.join(names)})")
+        quiet = sum(1 for m in moods.values() if m == "neutral")
+        if quiet:
+            parts.append(f"{quiet} without a clear view")
+        mood_lines.append(fmt.esc("Creators: " + " · ".join(parts)))
     classes = []
     for name, types in (("stocks", ("stock", "etf")), ("crypto", ("crypto",))):
-        share, votes = _lean_share([e for e in current.values() if e["type"] in types])
-        if share is not None and votes >= MIN_LEAN_VOTES:
-            classes.append(f"{name} {share:.0%} bullish ({votes} creator calls)")
+        leans = _class_lean(current, types)
+        n = sum(leans.values())
+        if n >= MIN_CREATORS:
+            classes.append(f"{name} {leans['bullish']} of {n} creators bullish")
     if classes:
         mood_lines.append("By asset class: " + " · ".join(classes))
     per_creator = defaultdict(lambda: [0, 0])
@@ -582,13 +743,32 @@ def build_canonical_pulse(inputs, today, html=False):
         )
         lines += ["", fmt.esc(f"⚖️ Weighted by scorecard track record: {weighted}")]
 
-    horizon_pct = inputs["horizon_claims"] / inputs["view_claims"] if inputs["view_claims"] else 0
-    lines += ["", fmt.i(
-        f"Based on {inputs['view_claims']} opinions in {_plural(inputs['videos'], 'video')} from "
-        f"{_plural(inputs['channels'], 'creator')}; {horizon_pct:.0%} name a time horizon. "
-        f"Assets need {MIN_CREATORS}+ creators with a view to be ranked."),
-        fmt.esc(DISCLAIMER)]
+    lines += [""] + [fmt.i(line) for line in _coverage_footer(inputs)] + [fmt.esc(DISCLAIMER)]
     return "\n".join(lines)
+
+
+def _coverage_footer(inputs):
+    """What the numbers above rest on, and what they are missing."""
+    horizon_pct = inputs["horizon_claims"] / inputs["view_claims"] if inputs["view_claims"] else 0
+    based = (f"Based on {inputs['view_claims']} opinions in {_plural(inputs['videos'], 'video')} from "
+             f"{_plural(inputs['channels'], 'creator')} this week")
+    coverage = inputs.get("coverage")
+    if coverage and coverage["in_scope"]:
+        based += f" ({coverage['analyzed']} of {coverage['in_scope']} videos analyzed)"
+    lines = [f"{based}; {horizon_pct:.0%} name a time horizon."]
+    if coverage and coverage["waiting"]:
+        shown = coverage["waiting"][:MAX_WAITING_CHANNELS]
+        waiting = ", ".join(f"{name} {n}" for name, n in shown)
+        rest = coverage["waiting"][MAX_WAITING_CHANNELS:]
+        if rest:
+            waiting += f", +{_plural(len(rest), 'channel')} ({sum(n for _, n in rest)})"
+        lines.append(f"Not analyzed yet: {waiting} — still queued, so their views are missing above.")
+    rule = (f"Agreement uses each creator's latest view from the past {CONSENSUS_LOOKBACK_DAYS // 7} weeks; "
+            f"assets need {MIN_CREATORS}+ creators with a view.")
+    if inputs.get("families"):
+        rule += f" {', '.join(inputs['families'])}: one creator across its channels."
+    lines.append(rule)
+    return lines
 
 
 def _pulse_inputs(days, today, path, price_fetcher):
@@ -661,11 +841,12 @@ def generate_charts(days=7, today=None, path=SIGNALS_FILE, price_fetcher=None,
         if inputs.get("source") == "canonical":
             if not inputs["videos"]:
                 return []
-            current, previous = inputs["current_views"], inputs["previous_views"]
+            current, previous = inputs["board"], inputs["previous_board"]
             data = pulse_charts.build_chart_data(
                 [], current, previous, inputs["window_start"], today,
                 tone=inputs["tone"], videos=inputs["videos"], channels=inputs["channels"],
                 min_creators=MIN_CREATORS,
+                consensus_scope=f"2+ creators, each one's latest view ({CONSENSUS_LOOKBACK_DAYS // 7} weeks)",
             )
         else:
             if not inputs["current"]:

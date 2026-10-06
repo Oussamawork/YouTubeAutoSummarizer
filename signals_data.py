@@ -120,12 +120,26 @@ ASSET_ALIASES = {
     "LULULEMON": "LULU", "ELI LILLY": "LLY", "LILLY": "LLY", "CAVA": "CAVA",
     "CAVA GROUP": "CAVA", "NIBIUS": "NBIS", "MARCADO LIBRE": "MELI", "CARNIVAL": "CCL",
     "NORWEGIAN": "NCLH", "NORWEGIAN CRUISE LINE": "NCLH", "DIEBOLD": "DBD", "COINBASE": "COIN", "STRATEGY": "MSTR", "MICROSTRATEGY": "MSTR",
+    # Unresolved in the canonical claims as of the Oct 2026 pulse audit (each
+    # split its creator votes from the ticker and went unpriced). US primary
+    # listings only; "Merck" and "Novo" stay out (Merck KGaA vs Merck & Co.
+    # on the German channels; "Novo" alone is not a company name).
+    "FORTINET": "FTNT", "MCDONALD'S": "MCD", "MCDONALDS": "MCD", "SHOPIFY": "SHOP",
+    "RUBRIK": "RBRK", "WASTE MANAGEMENT": "WM", "UPSTART": "UPST", "DISNEY": "DIS",
+    "WALT DISNEY": "DIS", "GOOGLE ALPHABET": "GOOGL", "MARA HOLDINGS": "MARA", "OCUGEN": "OCGN",
+    "IONQ": "IONQ", "QUALCOMM": "QCOM", "FORD": "F", "JOBY AVIATION": "JOBY", "SERVICE NOW": "NOW",
+    "PINTEREST": "PINS", "PROCTER & GAMBLE": "PG", "PROCTER AND GAMBLE": "PG", "DELL": "DELL",
+    "ROBINHOOD": "HOOD", "FERGUSON ENTERPRISES": "FERG", "SMUCKER": "SJM", "J.M. SMUCKER": "SJM",
+    "RIOT PLATFORMS": "RIOT", "XPENG": "XPEV", "FICO": "FICO", "FAIR ISAAC": "FICO",
+    "HERSHEY": "HSY", "INTUITIVE SURGICAL": "ISRG", "GENERAL MILLS": "GIS", "COSTCO": "COST",
+    "BLOOM ENERGY": "BE", "AVALANCHE": "AVAX",
 }
 
 # Trailing words speakers attach to a company name ("Amazon stock", "Nvidia
 # shares") that are not part of it: stripped before the alias lookup so the
 # asset folds into its ticker instead of aggregating under a second key.
-_NAME_SUFFIXES = (" STOCK", " STOCKS", " SHARES", " SHARE", " AKTIE", " AKTIEN", " INC", " INC.")
+_NAME_SUFFIXES = (" STOCK", " STOCKS", " SHARES", " SHARE", " AKTIE", " AKTIEN", " INC", " INC.",
+                  " INCORPORATED", " CORPORATION", " CORP", " CORP.")
 
 # Recorded-ticker variants folded to one canonical symbol: dual share classes
 # and renames that speakers use interchangeably would otherwise still split an
@@ -167,7 +181,7 @@ def _normalized_name(asset):
     return " ".join((asset.get("name") or "").split()).upper()
 
 
-def _alias_for_name(name):
+def alias_for_name(name):
     """Curated ticker for a spoken name, tolerating "<name> stock"."""
     if name in ASSET_ALIASES:
         return ASSET_ALIASES[name]
@@ -250,7 +264,7 @@ def canonical_ticker(asset):
     ticker = (asset.get("ticker") or "").strip().upper()
     name = _normalized_name(asset)
     if not ticker:
-        ticker = _alias_for_name(name)
+        ticker = alias_for_name(name)
     elif ticker not in TICKER_ALIASES and ticker in ASSET_ALIASES:
         # A company name recorded in the ticker field ("SOLANA"): no listing
         # prices it (Twelve Data 404s SOLANA/USD) and it splits the asset from

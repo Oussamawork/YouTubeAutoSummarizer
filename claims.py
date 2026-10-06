@@ -22,7 +22,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 
 from log import log_info, log_warn
-from signals_data import ASSET_ALIASES, TICKER_ALIASES, learned_tickers
+from signals_data import ASSET_ALIASES, TICKER_ALIASES, alias_for_name, learned_tickers
 
 SCHEMA_VERSION = "2"
 EXTRACTION_PROMPT_VERSION = "2"
@@ -308,12 +308,23 @@ def _fold(text):
     return "".join(out), idx
 
 
+# An excerpt the model shortened with "..." is located piece by piece: every
+# piece verbatim, in order, each within this many (folded) characters of the
+# one before. Measured on the stored transcripts (Oct 2026): 71% of
+# evidence_not_found flags were such joins of verbatim sentences, with a
+# median gap of ~160 characters and 90% under ~1,300.
+_ELLIPSIS = re.compile(r"\.{3,}|…")
+MAX_ELLIPSIS_GAP_CHARS = 1500
+
+
 def locate_evidence(evidence, text):
     """
     (start, end) offsets of `evidence` inside `text` under a controlled,
     normalization-aware match (case, quotes, dashes, whitespace and
     punctuation differences are tolerated; words are not). None when the
-    excerpt is not there — a paraphrase never passes.
+    excerpt is not there — a paraphrase never passes. An excerpt elided with
+    "..." matches when each piece is verbatim, in order and close together;
+    the span then runs from the first piece to the last.
     """
     if not evidence or not text:
         return None
@@ -322,9 +333,23 @@ def locate_evidence(evidence, text):
         return None
     tx_f, idx = _fold(text)
     pos = tx_f.find(ev_f)
-    if pos == -1:
+    if pos != -1:
+        return idx[pos], idx[pos + len(ev_f) - 1] + 1
+    pieces = [p for p in (_fold(part)[0] for part in _ELLIPSIS.split(evidence)) if p]
+    if len(pieces) < 2 or max(len(p) for p in pieces) < MIN_EVIDENCE_CHARS:
         return None
-    return idx[pos], idx[pos + len(ev_f) - 1] + 1
+    start = tx_f.find(pieces[0])
+    while start != -1:
+        end = start + len(pieces[0])
+        for piece in pieces[1:]:
+            nxt = tx_f.find(piece, end)
+            if nxt == -1 or nxt - end > MAX_ELLIPSIS_GAP_CHARS:
+                break
+            end = nxt + len(piece)
+        else:
+            return idx[start], idx[end - 1] + 1
+        start = tx_f.find(pieces[0], start + 1)
+    return None
 
 
 _NUMBER_RE = re.compile(
@@ -361,7 +386,19 @@ def numbers_in(text):
             nxt_suffix = (nxt.group(3) or "").lower()
             if nxt_suffix in _MULT and _RANGE_JOIN.match(text[m.end():nxt.start()] or ""):
                 found.add(value * _MULT[nxt_suffix])
+    # German-style numerals, read beside the English ones: "5,84" (decimal
+    # comma) and "18.000" (thousands dot). The German channels state their
+    # targets this way, and without it 21 correctly extracted targets were
+    # flagged number_not_in_evidence (Oct 2026 audit).
+    for m in _DECIMAL_COMMA_RE.finditer(text):
+        found.add(float(f"{m.group(1).replace('.', '')}.{m.group(2)}"))
+    for m in _THOUSANDS_DOT_RE.finditer(text):
+        found.add(float(m.group(1).replace(".", "")))
     return found
+
+
+_DECIMAL_COMMA_RE = re.compile(r"(?<![\w.,])(\d{1,3}(?:\.\d{3})+|\d+),(\d{1,2})(?![\d,])")
+_THOUSANDS_DOT_RE = re.compile(r"(?<![\w.,])(\d{1,3}(?:\.\d{3})+)(?![\d.,]\d)")
 
 
 def number_supported(value, evidence):
@@ -379,9 +416,12 @@ _QUESTION_START = re.compile(
 _RETRO_RE = re.compile(
     r"\b(last (year|month|week|time)|back in|i (said|told|predicted|called|warned)|"
     r"as i (said|predicted)|i was (right|wrong)|in 20[0-2]\d i)\b", re.IGNORECASE)
+# "According to my estimates / this metric" is the speaker's own model, not a
+# third party's: those phrases flagged Parkev's own DCF valuations for review.
 _THIRD_PARTY_RE = re.compile(
     r"\b(analysts?|wall street|consensus|goldman|morgan stanley|jp ?morgan|bank of america|"
-    r"citi|ubs|barclays|according to|reports? (say|said)|the street expects?)\b", re.IGNORECASE)
+    r"citi|ubs|barclays|according to(?! (my|our|this|these|that)\b)|reports? (say|said)|the street expects?)\b",
+    re.IGNORECASE)
 _ADOPT_RE = re.compile(
     r"\b(i agree|i think so too|i share|my target|i also (think|expect|see)|"
     r"that'?s my (target|view|call|number)( too| as well)?|i'?m with (them|him|her)|"
@@ -592,6 +632,13 @@ def resolve_entity(subject_mention, ticker_spoken, evidence, title, asset_type=N
     the title. Missing tickers come from the curated alias tables (and the
     catalogue-verified learned map); a name in AMBIGUOUS_MENTIONS is never
     resolved. Nothing is resolved on phonetic similarity.
+
+    A ticker the model wrote but nobody said is discarded either way. It
+    asks for review only when the name does not identify the asset on its
+    own: "Chevron" + an unspoken "CVX" is Chevron by the curated table, so
+    the claim stands; "Iron" + "IREN" is a doubt about which asset it is.
+    (Flagging both kept 255 views out of the pulse in Sept 2026, 174 of them
+    already resolved by the table.)
     """
     mention = _s(subject_mention)
     name_key = _norm_name(mention)
@@ -616,8 +663,7 @@ def resolve_entity(subject_mention, ticker_spoken, evidence, title, asset_type=N
             out.update(ticker=TICKER_ALIASES.get(spoken, spoken), ticker_source="title",
                        entity_resolution_status="confirmed")
             return out
-        out["review_reason"] = "ticker_not_in_evidence"
-    curated = ASSET_ALIASES.get(name_key) or TICKER_ALIASES.get(name_key)
+    curated = alias_for_name(name_key) or TICKER_ALIASES.get(name_key)
     if curated:
         out.update(ticker=TICKER_ALIASES.get(curated, curated), ticker_source="curated_mapping",
                    entity_resolution_status="confirmed", canonical_entity_name=mention)
@@ -633,6 +679,8 @@ def resolve_entity(subject_mention, ticker_spoken, evidence, title, asset_type=N
         out["ticker_source"] = "unresolved"
         return out
     out["ticker_source"] = "unresolved"
+    if spoken:
+        out["review_reason"] = "ticker_not_in_evidence"
     return out
 
 
@@ -1428,6 +1476,47 @@ def is_headline_claim(claim):
         and not claim.get("superseded")
         and claim.get("schema_version") != "legacy"
     )
+
+
+_NON_SECURITY_TYPES = ("macro", "sector", "index", "commodity", "currency", "bond")
+
+
+def revalidate_review(claim):
+    """
+    A stored claim with the review reasons the CURRENT validator would not
+    raise cleared, for the reasons decidable from the record alone: an
+    unspoken model ticker on a name the curated tables identify, a number
+    the evidence states in German notation, and "according to my / this"
+    read as a third party. It only ever clears — a flag today's rules would
+    still raise stays, nothing is added — and the cleared reasons are kept
+    in `review_cleared`. Claims whose evidence was not found at extraction
+    stay flagged (relocating them needs the transcript). Testability is left
+    as recorded, so a cleared claim may count as a view without becoming a
+    scored forecast.
+    """
+    reasons = list(claim.get("review_reasons") or [])
+    if not claim.get("review_required") or not reasons:
+        return claim
+    evidence = claim.get("evidence_text") or ""
+    name_key = _norm_name(claim.get("canonical_entity_name") or claim.get("subject_mention"))
+    curated = alias_for_name(name_key) or TICKER_ALIASES.get(name_key) or learned_tickers().get(name_key)
+    keep = []
+    for reason in reasons:
+        if reason == "ticker_not_in_evidence" and (curated or claim.get("asset_type") in _NON_SECURITY_TYPES):
+            continue
+        value = _num(claim.get(reason.split(":", 1)[1])) if reason.startswith("number_not_in_evidence:") else None
+        if value is not None and number_supported(value, evidence):
+            continue
+        if reason == "possible_third_party_view" and not _THIRD_PARTY_RE.search(evidence):
+            continue
+        keep.append(reason)
+    if len(keep) == len(reasons):
+        return claim
+    out = dict(claim, review_reasons=keep, review_required=bool(keep),
+               review_cleared=[r for r in reasons if r not in keep])
+    if curated and not out.get("ticker"):
+        out.update(ticker=TICKER_ALIASES.get(curated, curated), ticker_source="curated_mapping")
+    return out
 
 
 def carries_view(claim):

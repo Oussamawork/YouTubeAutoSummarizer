@@ -183,6 +183,7 @@ def spread_from_weeks(weeks):
             "n": week["n"],
             "spread": (week["bullish"] - week["bearish"]) / week["n"] * 100.0,
             "partial": week["partial"],
+            "unit": week.get("unit", "videos"),
         }
         for week in weeks
     ]
@@ -271,7 +272,7 @@ def upside_rows(current, latest_prices, limit=MAX_UPSIDE_ROWS):
 
 
 def build_chart_data(records, current, previous, window_start, today, tone=None, videos=None,
-                     channels=None, min_creators=1):
+                     channels=None, min_creators=1, consensus_scope=None):
     """Everything the renderer needs, as plain dicts/lists. `current` and
     `previous` are per-asset entries (canonical_claims.aggregate_views for
     the production pulse, aggregate_assets for the legacy view) for the two
@@ -289,6 +290,7 @@ def build_chart_data(records, current, previous, window_start, today, tone=None,
         "videos": videos or 0,
         "channels": channels or 0,
         "consensus": consensus_rows(current, min_creators=min_creators),
+        "consensus_scope": consensus_scope or "assets with 2+ creators taking a side",
         "flips": flip_rows(current, previous, min_votes=min_creators),
         "tone": tone[-TONE_WEEKS:] if tone else [],
         "spread": spread_from_weeks(tone),
@@ -408,7 +410,7 @@ def _render_consensus(plt, data, path):
     _finish(
         fig, path,
         consensus_title(rows),
-        f"{data['window']} · assets with 2+ creators taking a side",
+        f"{data['window']} · {data.get('consensus_scope') or 'assets with 2+ creators taking a side'}",
         "Each number is one creator's view: blue = going up, red = going down.",
     )
     plt.close(fig)
@@ -474,9 +476,15 @@ def _render_flips(plt, data, path):
 
 def tone_title(weeks):
     """Takeaway headline for the mood chart: this week's bullish share and
-    its move against last week."""
+    its move against last week. Creator weeks (the canonical pulse) are a
+    handful of people, so they read as counts ("4 of 6 creators")."""
     now = weeks[-1]
     share = now["bullish"] / now["n"] if now["n"] else 0
+    if now.get("unit") == "creators":
+        title = f"{now['bullish']} of {now['n']} creators lean bullish this week"
+        if len(weeks) > 1 and weeks[-2]["n"] and weeks[-2]["weeks_ago"] == now["weeks_ago"] + 1:
+            title += f" ({weeks[-2]['bullish']} of {weeks[-2]['n']} before)"
+        return title
     title = f"{share:.0%} of this week's videos expect a rise"
     if len(weeks) > 1 and weeks[-2]["n"] and weeks[-2]["weeks_ago"] == now["weeks_ago"] + 1:
         before = weeks[-2]["bullish"] / weeks[-2]["n"]
@@ -488,6 +496,7 @@ def tone_title(weeks):
 
 def _render_tone(plt, data, path):
     weeks = data["tone"]
+    unit = weeks[-1].get("unit", "videos")
     height = HEADER_IN + 0.62 * len(weeks) + 1.0
     fig = _new_figure(plt, height)
     ax = fig.add_axes(_plot_box(height, 0.78, 0.30, right=0.86))
@@ -519,14 +528,16 @@ def _render_tone(plt, data, path):
         any_partial = any_partial or week["partial"]
         ax.text(-0.14, i + 0.1, label, transform=ax.get_yaxis_transform(), ha="right",
                 va="center", fontsize=10, fontweight="bold", color=INK)
-        ax.text(-0.14, i - 0.24, f"{n} videos", transform=ax.get_yaxis_transform(),
+        ax.text(-0.14, i - 0.24, f"{n} {unit}", transform=ax.get_yaxis_transform(),
                 ha="right", va="center", fontsize=8.5, color=MUTED)
     ax.set_xlim(0, 1)
     ax.set_ylim(-0.6, len(weeks) - 0.4)
     ax.set_xticks([])
     ax.set_yticks([])
     handles = [plt.Rectangle((0, 0), 1, 1, color=c) for c in (BEAR, MIXED, BULL)]
-    ax.legend(handles, ["Expect a fall", "Mixed / no lean", "Expect a rise"],
+    labels = (["Lean bearish", "Mixed / no lean", "Lean bullish"] if unit == "creators"
+              else ["Expect a fall", "Mixed / no lean", "Expect a rise"])
+    ax.legend(handles, labels,
               loc="upper center", bbox_to_anchor=(0.45, -0.03), ncol=3, frameon=False,
               fontsize=9, labelcolor=INK2, handlelength=1.1, handleheight=1.1)
     if any_partial:
@@ -535,8 +546,10 @@ def _render_tone(plt, data, path):
     _finish(
         fig, path,
         tone_title(weeks),
+        f"Share of {unit} leaning bullish (blue) or bearish (red)" if unit == "creators" else
         "Share of analyzed videos expecting a rise (blue) or a fall (red)",
-        "Each bar is one week of videos, oldest at the bottom.",
+        "Each creator counts once, from their own videos; oldest week at the bottom."
+        if unit == "creators" else "Each bar is one week of videos, oldest at the bottom.",
     )
     plt.close(fig)
 
@@ -613,7 +626,8 @@ def _render_spread(plt, data, path):
     _finish(
         fig, path,
         f"Optimism gap: {rows[-1]['spread']:+.0f} points",
-        "% of videos expecting a rise minus % expecting a fall",
+        "% of creators leaning bullish minus % leaning bearish" if rows[-1].get("unit") == "creators"
+        else "% of videos expecting a rise minus % expecting a fall",
         "Above the middle line: more optimists than pessimists.",
     )
     plt.close(fig)

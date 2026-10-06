@@ -65,8 +65,11 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   `data/research/transcript_records.jsonl`; hash-idempotent.
 - `claims.py` — the canonical research unit: atomic, evidence-backed claims
   (schema v2), the extraction prompt with few-shots, deterministic validation
-  (evidence located in the transcript, numbers present in evidence, spoken
-  tickers only, curated entity resolution plus **local coreference** for
+  (evidence located in the transcript — an excerpt elided with "..." matches
+  piece by piece, in order, within `MAX_ELLIPSIS_GAP_CHARS` — numbers present
+  in evidence (German "5,84" / "18.000" read too), spoken tickers only (an
+  unspoken model ticker is discarded, and sent to review only when the name
+  doesn't resolve on its own), curated entity resolution plus **local coreference** for
   "the stock"/"it" with `entity_resolution_method`/`_confidence`, documented
   horizon rules, attribution rules for questions / third-party views with
   `host_position` / retrospectives / praise, **portfolio disclosures are never
@@ -99,11 +102,13 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   sector is recorded as `speaker_sector` and never chooses either; an
   unresolved instrument is excluded, never guessed.
 - `canonical_claims.py` — **the one loader every production analytics job
-  reads**: active runs only, no legacy rows, no repeats, condition outcomes
-  overlaid; `view_claims`, `aggregate_views` (per asset AND horizon bucket,
-  one current view per source — research analytics), `aggregate_views_by_asset`
-  (per asset, one vote per creator — the pulse), `lean`, `video_tone`,
-  `portfolio_disclosures`.
+  reads**: active runs only, no legacy rows, no repeats, review flags the
+  current validator no longer raises cleared (`claims.revalidate_review`),
+  condition outcomes overlaid; `view_claims`, `aggregate_views` (per asset
+  AND horizon bucket, one current view per source — research analytics),
+  `aggregate_views_by_asset` (per asset, one vote per creator — the pulse;
+  `voter_of` for creator families), `lean`, `video_tone`, `creator_moods`,
+  `view_changes`, `voter_resolver`, `portfolio_disclosures`.
   `data/signals.jsonl` is a backward-compatible view read by nothing here.
 - `scorecard_pricing.py` — scorecard methodology: exchanges/timezones/
   calendars (NYSE holiday rules), the publication-time **next-close entry
@@ -190,13 +195,23 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `market_pulse.py` — the weekly pulse (`weekly-pulse.yml`) over **canonical
   claims**, aggregated **per asset with one vote per creator**
   (`canonical_claims.aggregate_views_by_asset`: a creator's vote is the
-  `lean` — 2/3 rule — of their latest in-window video's claims; conflicting
-  horizons vote `mixed`, never averaged). Sent as Telegram HTML (plain
-  fallback): a templated takeaway (never an LLM call), where creators agree /
-  disagree, most discussed, attention shifts, consensus changes, new on the
-  radar, mood (videos, asset class, creator lean), disclosures, and a coverage
-  footer. Every ranked section needs `MIN_CREATORS` (2) creators with a view:
-  ~90% of assets rest on one creator. Only a real price level counts as a
+  `lean` — 2/3 rule — of their latest video's claims; conflicting horizons
+  vote `mixed`, never averaged). **Everything counts creators, never videos
+  or claims** (one channel made 57–69% of a week's views and videos): a
+  creator family (`group=` in `channel_ids.txt`, e.g. HKCM's three channels)
+  is one voice (`canonical_claims.voter_resolver`). Agree / disagree rank a
+  **board** — each creator's latest view from the past
+  `CONSENSUS_LOOKBACK_DAYS` (28) for assets discussed this week, rows saying
+  how many views are fresh. Sent as Telegram HTML (plain fallback): a
+  templated takeaway (never an LLM call) with a "⚠️ Partial week" line under
+  75% coverage, where creators agree / disagree, **changed their mind**
+  (`canonical_claims.view_changes`: the same creator reversing their own
+  call), most discussed, attention shifts (in creators present both weeks),
+  consensus changes, new on the radar, mood (`creator_moods`: each creator's
+  balance of per-asset votes; asset class; creator lean), disclosures, and a
+  coverage footer naming the channels still queued (`pulse_coverage`, from
+  gate outcomes + research state). Every ranked section needs `MIN_CREATORS`
+  (2) creators with a view. See `docs/tdd-weekly-pulse.md`. Only a real price level counts as a
   target (`canonical_claims.price_target_of`), one per creator, shown only
   against a known price and within 0.2×–5× of it
   (`pulse_charts.plausible_targets`). Reference phrases and non-instruments
@@ -208,8 +223,9 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
 - `pulse_charts.py` — the pulse's companion PNG charts, drawn 6.4in wide so
   text survives Telegram's ~380px album preview, each titled with its
   takeaway (`consensus_title`, `tone_title`, `upside_title`). The album is
-  consensus board (assets with 2+ creators), weekly mood, and price-target
-  ladder (single-creator targets faded); the flip slope, agreement map and
+  consensus board (the pulse's 4-week board, assets with 2+ creators), weekly
+  mood (in creators for the canonical pulse: week rows carry `unit`), and
+  price-target ladder (single-creator targets faded); the flip slope, agreement map and
   optimism-gap line join only when `_chart_ready` says they add something
   (2+ well-attended reversals; 6+ points incl. a bearish/contested one;
   `MIN_SPREAD_WEEKS` = 9 weeks of history). Data prep is pure/testable;
@@ -260,7 +276,8 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   `scraper._Outbox` is the one place that decides single message vs digest and
   premium vs free, and reports what Telegram accepted.
 - `helpers.py` — channel file parsing (`<id|@handle> [digest] [max=N] [only=a,b]
-  [lang=xx]` per line; handles resolved at run time by
+  [lang=xx] [group=name]` per line; `group=` makes channels of one creator
+  house one voice in the pulse; handles resolved at run time by
   `scraper.resolve_channel_handle`; `only=` is a whole-word title filter applied
   before any transcript fetch; `lang=` the language its transcripts must be in), dedup
   state (v2 schema + v1 migration), `write_json_atomic` (used by every committed
@@ -298,6 +315,11 @@ workflow timeout.
   per-model free-tier limits (20 requests/day, not 1,500), measured cost of a
   Gemini video transcript, and why the transcript and summary model pools must
   stay disjoint. Read before changing either model list.
+- `docs/tdd-weekly-pulse.md` — the Oct 2026 audit of what the Monday pulse
+  reads (coverage lost to model quota, 42% of opinions dropped by validator
+  false positives, unresolved names) and why it counts creators, ranks a
+  4-week board and reports coverage. Read before changing `market_pulse.py`
+  or the review rules in `claims.py`.
 - `docs/tdd-full-transcript-claims.md` — why the 120k-char head/tail cut was
   removed, the token-budget algorithm, capability discovery, the chunked
   paths, the claim schema and prompt, the research-state design, the
