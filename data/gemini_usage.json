@@ -1,19 +1,19 @@
 {
-  "day": "2026-10-06",
+  "day": "2026-10-07",
   "models": {
-    "gemini-3.6-flash": 1,
-    "gemini-3.7-flash": 1
+    "gemini-3.6-flash": 7,
+    "gemini-3.7-flash": 4
   },
   "spent": {
     "gemini-3.6-flash": {
-      "at": "2026-10-06T23:42:03+00:00",
+      "at": "2026-10-07T08:26:39+00:00",
       "confirmations": 1,
-      "used": 1
+      "used": 7
     },
     "gemini-3.7-flash": {
-      "at": "2026-10-06T23:41:50+00:00",
-      "confirmations": 3,
-      "used": 1
+      "at": "2026-10-07T08:24:23+00:00",
+      "confirmations": 1,
+      "used": 4
     }
   }
 }
