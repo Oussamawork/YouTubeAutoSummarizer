@@ -5486,7 +5486,7 @@
       "extraction_model": null,
       "extraction_prompt_version": "2",
       "failed_chunk_ids": [],
-      "failure_reason": "llm_quota",
+      "failure_reason": "summary_reserve_protected",
       "last_attempt_at": null,
       "next_eligible_at": null,
       "normalization_version": "1",
@@ -5508,7 +5508,7 @@
       "transcript_language": "en",
       "transcript_source": "supadata",
       "transcript_stored": true,
-      "updated_at": "2026-10-12T21:15:29+00:00",
+      "updated_at": "2026-10-13T02:56:28+00:00",
       "video_id": "OfLA9KqnUuA",
       "video_title": "My Take on What to Expect From Micron on Sep. 30"
     },
