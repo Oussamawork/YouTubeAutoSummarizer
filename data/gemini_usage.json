@@ -2,25 +2,26 @@
   "day": "2026-10-15",
   "models": {
     "gemini-2.5-flash": 1,
-    "gemini-3-flash-preview": 2,
+    "gemini-3-flash-preview": 5,
+    "gemini-3.5-flash": 1,
     "gemini-3.6-flash": 1,
-    "gemini-3.7-flash": 15
+    "gemini-3.7-flash": 16
   },
   "spent": {
     "gemini-3.5-flash": {
-      "at": "2026-10-15T16:50:31+00:00",
-      "confirmations": 1,
-      "used": 0
-    },
-    "gemini-3.6-flash": {
-      "at": "2026-10-15T16:48:57+00:00",
+      "at": "2026-10-15T21:13:43+00:00",
       "confirmations": 1,
       "used": 1
     },
-    "gemini-3.7-flash": {
-      "at": "2026-10-15T16:47:56+00:00",
+    "gemini-3.6-flash": {
+      "at": "2026-10-15T21:12:11+00:00",
       "confirmations": 2,
-      "used": 15
+      "used": 1
+    },
+    "gemini-3.7-flash": {
+      "at": "2026-10-15T21:12:06+00:00",
+      "confirmations": 1,
+      "used": 16
     }
   }
 }
