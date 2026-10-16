@@ -20,7 +20,7 @@
       "extraction_model": null,
       "extraction_prompt_version": "2",
       "failed_chunk_ids": [],
-      "failure_reason": "llm_quota",
+      "failure_reason": "summary_reserve_protected",
       "last_attempt_at": null,
       "next_eligible_at": null,
       "normalization_version": "1",
@@ -42,7 +42,7 @@
       "transcript_language": "en",
       "transcript_source": "supadata",
       "transcript_stored": true,
-      "updated_at": "2026-10-16T12:20:46+00:00",
+      "updated_at": "2026-10-16T16:30:14+00:00",
       "video_id": "-6wR6p9pmlg",
       "video_title": "AI Stocks Are Crashing. Here\u2019s What I\u2019m Actually Doing"
     },
