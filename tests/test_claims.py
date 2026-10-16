@@ -202,7 +202,9 @@ def test_unsupported_ticker_is_dropped_and_curated_mapping_used():
     c = claims[0]
     assert c["ticker_spoken"] == "CVX"
     assert c["ticker"] == "CVX" and c["ticker_source"] == "curated_mapping"   # via the table, not the model
-    assert "ticker_not_in_evidence" in c["review_reasons"]
+    # The curated name decided and the model's ticker agrees with it: an
+    # unspoken but correct ticker is no reason to send the claim to review.
+    assert "ticker_not_in_evidence" not in c["review_reasons"] and c["review_required"] is False
 
 
 def test_spoken_ticker_and_title_ticker_are_confirmed():

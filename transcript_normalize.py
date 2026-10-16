@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass, field, asdict
 
 from helpers import env_int
-from signals_data import ASSET_ALIASES
+from signals_data import ASSET_ALIASES, COMMON_WORD_NAMES
 
 NORMALIZATION_VERSION = "1"
 # Version of the chunk-boundary algorithm below. Part of every partial-cache
@@ -64,6 +64,23 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 _TICKER_LIKE = re.compile(r"(?<![\w$])\$?[A-Z]{2,5}(?![\w])")
 _ALIAS_NAMES = sorted(ASSET_ALIASES, key=len, reverse=True)
 _ALIAS_RE = re.compile(r"\b(" + "|".join(re.escape(n) for n in _ALIAS_NAMES) + r")\b", re.IGNORECASE)
+_STOCK_WORD_AFTER = re.compile(r"\s+(stock|stocks|shares|aktie|aktien)\b", re.IGNORECASE)
+
+
+def alias_mentions(text):
+    """The curated asset names `text` mentions (matches of _ALIAS_RE), except
+    a name that is also an ordinary word (signals_data.COMMON_WORD_NAMES:
+    "outrun the avalanche", "more upstart type companies", "da pendel ich"),
+    which counts only in capitals or before "stock" / "Aktie"."""
+    text = text or ""
+    out = []
+    for m in _ALIAS_RE.finditer(text):
+        name = m.group(1)
+        if " ".join(name.split()).upper() in COMMON_WORD_NAMES and not (
+                (len(name) > 1 and name.isupper()) or _STOCK_WORD_AFTER.match(text, m.end())):
+            continue
+        out.append(m)
+    return out
 # Uppercase words that are not tickers.
 _COMMON_UPPER = {"I", "A", "AI", "US", "USA", "UK", "EU", "CEO", "CFO", "IPO", "ETF", "GDP",
                  "FED", "OK", "TV", "PE", "EPS", "YOY", "QOQ", "TLDR", "AM", "PM", "THE"}
@@ -408,7 +425,7 @@ def _last_speaker(cue_spans):
 
 
 def _assets_in(text):
-    found = {m.group(1).upper() for m in _ALIAS_RE.finditer(text)}
+    found = {m.group(1).upper() for m in alias_mentions(text)}
     for m in _TICKER_LIKE.finditer(text):
         tok = m.group(0).lstrip("$")
         if tok not in _COMMON_UPPER and (m.group(0).startswith("$") or len(tok) >= 3):

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:      # Allows manual triggering from GitHub UI
 
 permissions:
-  contents: read  # read-only over data/signals.jsonl; nothing is committed
+  contents: read  # reads the research claims and data/prices.json; nothing is committed
 
 jobs:
   send-pulse:
@@ -33,6 +33,9 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          # The canonical pulse reads every price from data/prices.json (the
+          # Sunday warm-prices run fills it); the key is used only by the
+          # legacy pulse and by track-record weights under SCORECARD_RANKINGS.
           TWELVEDATA_API: ${{ secrets.TWELVEDATA_API }}
 
       - name: Alert on failure

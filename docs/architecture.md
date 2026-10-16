@@ -332,9 +332,14 @@ flowchart LR
     OB --> F["Telegram — free channel<br/>first line as teaser + invite link,<br/>real summaries only"]
     P -->|"accepted"| W["watermark advances"]
     CL["claims (combined call,<br/>or queued extraction)"] --> RS[("data/research/<br/>claims.jsonl · extraction_runs.jsonl<br/>review_queue · segments · video_records")]
-    RS --> CC["canonical_claims<br/>(active runs, no repeats)"]
-    CC --> W1["weekly pulse + charts"]
-    CC --> W2["channel scorecard"]
+    RS --> CC["canonical_claims<br/>(active runs, no repeats,<br/>re-resolved at load)"]
+    CC --> CT["creator_tracker<br/>calls marked to market<br/>(cache only)"]
+    PC[("data/prices.json<br/>warm-prices: Sun + Fri 06:00 UTC")] --> CT
+    CT --> W1["Monday pulse + charts"]
+    CT --> W2["Friday report:<br/>tracker text, tracker album,<br/>strict scorecard"]
+    CC --> W1
+    CC --> W2
+    CT --> W3["research report<br/>(manual)"]
     RS -.->|"compatibility view"| SJ[("data/signals.jsonl<br/>read by nothing in production")]
 ```
 
@@ -349,10 +354,32 @@ flowchart LR
   otherwise it waits for `research_backfill.py --retry`.
 - **The weekly jobs read canonical claims**, not `signals.jsonl`:
   `market_pulse` (and the charts it drives) and `channel_scorecard` both load
-  through `canonical_claims`. `data/signals.jsonl` is still appended — derived
-  from validated claims — as a backward-compatible view; the legacy paths
-  (`PULSE_DATA_SOURCE=legacy`, `channel_scorecard.py --legacy`) are the only
-  readers.
+  through `canonical_claims`, which re-resolves every stored claim's ticker
+  under the current tables at load. `data/signals.jsonl` is still appended —
+  derived from validated claims — as a backward-compatible view; the legacy
+  paths (`PULSE_DATA_SOURCE=legacy`, `channel_scorecard.py --legacy`) are the
+  only readers.
+- **Creators vs the market** (`creator_tracker`) is the reporting core: every
+  creator's call (one per creator × asset × change of view) marked to market
+  at one as-of — the last completed NYSE session the cache holds — against
+  the S&P 500 (Bitcoin for other coins) over identical dates, labelled
+  "mark-to-market, not a verdict", never ranked. It reads `data/prices.json`
+  only. `warm-prices.yml` fills that cache on Sundays (for the Monday pulse)
+  and Fridays (for the Friday report) with exactly
+  `creator_tracker.needed_price_ranges`, capped at the last completed
+  session, in priority order and under a 75-minute deadline; it then runs
+  `ticker_audit.py` as an informational step.
+- **Friday report** (`weekly-scorecard.yml`, 16:00 UTC): the tracker text
+  (market, per-creator lines, where creators agreed and disagreed, open
+  targets, coverage), then its two charts as one album, then the strict
+  scorecard of matured dated forecasts — the verdict layer, compact while
+  under its sample minimum, and the only part that may fetch prices live.
+- **Monday pulse** (`weekly-pulse.yml`, 08:00 UTC): the takeaway, what the
+  market did, where creators agree with the move since their first call
+  (`asset_outcome`), one pooled creators-vs-market line, where they disagree,
+  last week's picks one week on, then changes, the radar, the mood and
+  disclosures; the companion album as before. Two channels of one house count
+  once wherever two creators must agree.
 - **State** — `seen_videos.json` is written atomically after every video, so a
   mid-run crash never re-sends what was already delivered.
 
@@ -382,6 +409,13 @@ flowchart LR
   locally counted 20/day is final.
 - **Failures never raise.** Every network path returns `""`/`None` and logs; one
   channel's exception is caught so the rest of the batch still runs.
+- **Reports compare, never rank.** Creators are ordered by number of calls,
+  every rate carries its denominator, mark-to-market results say "not a
+  verdict", and `SCORECARD_RANKINGS` stays off. Reports make no LLM call and
+  no live price request (the strict scorecard's matured forecasts excepted).
+- **A ticker is never guessed.** A spoken name never becomes a ticker; only
+  certain corrections enter the tables, the rest wait in
+  `ticker_audit.NEEDS_VERIFICATION`.
 
 ## 8. Open questions for this review
 

@@ -6,9 +6,24 @@ on:
   workflow_dispatch:       # Allows manual triggering from GitHub UI
 
 permissions:
-  contents: read  # read-only over data/signals.jsonl; nothing is committed
+  contents: read  # read-only over the research claims and data/prices.json; nothing is committed
 
 jobs:
+  # The Friday report (channel_scorecard.py), in the order it is sent:
+  #   1. Creators vs the market: every creator's calls since they were made,
+  #      marked to Thursday's close (the last completed session) against the
+  #      S&P 500 (crypto: Bitcoin) over the same days. Mark-to-market, not a
+  #      verdict; creators are ordered by number of calls and never ranked.
+  #      Read from data/prices.json only — the Friday 06:00 UTC warm-prices
+  #      run fills it — so this part spends no price requests.
+  #   2. Its two charts as one photo album (best-effort: a failed album is
+  #      logged, never fails the run).
+  #   3. The strict scorecard: matured, dated forecasts only (EXPERIMENTAL,
+  #      unranked), compact below its sample minimum (one plain line per
+  #      scored forecast, when the next ones mature), with a one-line count of
+  #      the last 30 days' conditional calls.
+  #      Its matured forecasts are the job's only live price requests (cache
+  #      first, live for gaps), capped by TWELVEDATA_MAX_REQUESTS (120).
   send-scorecard:
     runs-on: ubuntu-latest
     timeout-minutes: 25
