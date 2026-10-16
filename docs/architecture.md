@@ -47,8 +47,11 @@ videos after `RUN_DEADLINE_MINUTES` (35); the rest defer as `deadline_deferred`.
 After `python scraper.py`, the job runs `research_backfill.py
 --reject-foreign-transcripts --refetch` (retire stored captures in the wrong
 language and re-capture up to `RESEARCH_REFETCH_MAX_VIDEOS`, 3), then
-`research_backfill.py --retry` (pending/failed research from stored
-transcripts), and finally commits the state files (`if: always()`).
+`research_backfill.py --adopt-stored --retry` (stored transcripts whose
+summary never went out get a research record; then pending/failed research
+from stored transcripts), and finally commits the state files (`if: always()`).
+A video's claims are priced from its publication date, so calls extracted
+late still enter the creators-vs-market track record on the day they were made.
 
 ---
 

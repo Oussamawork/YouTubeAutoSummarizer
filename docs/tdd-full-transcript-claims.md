@@ -342,7 +342,7 @@ forecasts and is the only reader that may fetch live (cache first).
 | `weekly-scorecard.yml` (Fri) | `channel_scorecard.main` → `generate_weekly_report` | the tracker's report (`format_report`) and its two charts, read from the cache only; then `generate_canonical_scorecard`: canonical claims scored by `research_analytics.scorecard` under `scorecard_pricing`, matured by the last completed session, experimental / unranked by default, compact below the sample minimum, with the conditional calls of the last `CONDITIONAL_WINDOW_DAYS` (30) counted (not the all-time list of 445 rows) |
 | research report (`research_analytics.main`) | `build_report` | canonical claims; quality header, consensus, the tracker's summary block, view changes (≥ `RESEARCH_FLIP_MIN_GAP_DAYS` apart), disclosures, the compact conditional block, scorecard |
 | `warm-prices.yml` (Sun + Fri 06:00 UTC) | `warm_prices.needed_ranges` | canonical forecast + benchmark ranges (`canonical_ranges`), the tracker's exact requests (`creator_tracker.needed_price_ranges`) **plus** the legacy ranges, each capped at the last completed session; then `ticker_audit.py` (informational) |
-| `daily-summary.yml` | `scraper.py`, `research_backfill.py --retry` | writes claims, state and the compatibility row; reads neither. Separate claim extractions are queued until every eligible video has been delivered and run only above the summary reserve (§ 13.8) |
+| `daily-summary.yml` | `scraper.py`, `research_backfill.py --adopt-stored --retry` | writes claims, state and the compatibility row; reads neither. Separate claim extractions are queued until every eligible video has been delivered and run only above the summary reserve (§ 13.8) |
 
 **Legacy consumers that remain** (compatibility only, never the headline
 result): `market_pulse.build_pulse` / `aggregate_assets` (run only with
@@ -365,8 +365,13 @@ transcripts only (a missing transcript stays `failed_retryable:
 transcript_not_stored`; re-fetching remains the daily job's budgeted
 decision), at most `RESEARCH_BACKFILL_MAX_VIDEOS` per run, stopping on quota.
 `--reprocess` re-extracts videos whose active run predates the current
-versions and supersedes the old run. The daily workflow runs `--retry` after
-the scraper and commits `data/research/` and `data/transcripts/`.
+versions and supersedes the old run. `--adopt-stored` gives a `pending`
+record to stored transcripts that never got research because their summary
+never went out (quota-deferred until the video left the feed, or failed into
+manual review; 40 on 2026-10-16) — skipping videos still pending a summary,
+rejected captures and wrong-language text — so `--retry` extracts them. The
+daily workflow runs `--adopt-stored --retry` after the scraper and commits
+`data/research/` and `data/transcripts/`.
 
 ## 13. Analytics
 

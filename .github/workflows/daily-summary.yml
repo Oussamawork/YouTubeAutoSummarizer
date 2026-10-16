@@ -163,10 +163,14 @@ jobs:
       - name: Retry pending research extractions
         # Videos whose summary went out but whose claims failed, were
         # quota-deferred or only partially covered are retried here from
-        # their stored transcripts (no transcript credit). Bounded per run
-        # and quota-aware; never touches delivery state.
+        # their stored transcripts (no transcript credit). --adopt-stored
+        # first gives a research record to every stored transcript that never
+        # got one (its summary was quota-deferred until the video left the
+        # feed, or failed), so those creators' calls reach the claims and the
+        # creators-vs-market tracker too. Bounded per run and quota-aware;
+        # never touches delivery state.
         if: ${{ !inputs.video_url }}
-        run: python research_backfill.py --retry
+        run: python research_backfill.py --adopt-stored --retry
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}

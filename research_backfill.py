@@ -23,6 +23,12 @@ Research retry / backfill job: resumable, idempotent, quota-aware.
                                                 transcripts in the channel's
                                                 language, under the normal
                                                 transcript budget, then extract
+  python research_backfill.py --adopt-stored    give a pending research record
+                                                to every stored transcript that
+                                                never got one (its summary was
+                                                quota-deferred until the video
+                                                left the feed, or failed), so
+                                                --retry extracts its claims
 
 Every mode is safe to stop and restart: state is saved per video, an
 extraction run is keyed by its complete identity (transcript hash,
@@ -45,7 +51,7 @@ import language_detect
 import research_budget
 import research_state
 import transcript_store
-from helpers import env_int, read_channels
+from helpers import env_int, load_state as load_seen_state, read_channels
 from log import log_info, log_warn
 import signals
 from signals import extract_research
@@ -61,6 +67,8 @@ RETRY_BACKOFF_HOURS = 6
 # --refetch spends transcript credits; keep one run small.
 MAX_REFETCH_PER_RUN = env_int("RESEARCH_REFETCH_MAX_VIDEOS", 3)
 CHANNELS_FILE = "channel_ids.txt"
+# The daily job's dedup state: its `pending` videos still wait for a summary.
+SEEN_VIDEOS_FILE = "seen_videos.json"
 
 
 def current_run_key(nt):
@@ -326,6 +334,71 @@ def run_refetch(max_videos=None, fetcher=None, extractor=extract_research, state
     return tally
 
 
+def run_adopt_stored(state=None, pending=None, channel_languages=None):
+    """
+    Start research for stored transcripts that never got any. Research used
+    to start only beside a delivered summary, so a video whose summary was
+    quota-deferred until it left the feed, or failed into manual review,
+    kept its saved transcript but never reached the claims, the
+    creators-vs-market tracker or the reports (49 of 443 stored transcripts
+    on 2026-10-16). Each gets a research record in status "pending", built
+    from the stored payload's metadata, and --retry extracts it from the
+    stored text under the usual summary-reserve guard: no transcript is
+    fetched and nothing is sent. A claim is priced from its video's
+    publication date, so a call extracted late still enters the track record
+    on the day it was made.
+
+    Skipped: videos that already have a research record; videos still
+    pending a summary in seen_videos.json (the daily run's combined
+    summary+claims call extracts them at no extra request); rejected or
+    missing captures; and text that is not in the channel's language (the
+    --reject-foreign-transcripts check). Offline and idempotent. Returns
+    {"adopted", "pending_summary", "foreign", "missing", "videos"}.
+    """
+    state = state if state is not None else research_state.load_state()
+    if pending is None:
+        pending = load_seen_state(SEEN_VIDEOS_FILE).get("pending") or {}
+    channel_languages = _channel_languages() if channel_languages is None else channel_languages
+    tally = {"adopted": 0, "pending_summary": 0, "foreign": 0, "missing": 0, "videos": []}
+    seen = set()
+    for row in transcript_store.load_index():
+        video_id = row["video_id"]
+        if video_id in seen or research_state.get(state, video_id):
+            continue
+        seen.add(video_id)
+        if video_id in pending:
+            tally["pending_summary"] += 1
+            continue
+        stored = transcript_store.load_transcript(video_id)
+        if not stored or not stored.get("raw_transcript"):
+            tally["missing"] += 1
+            continue
+        meta = {k: stored.get(k) or row.get(k) for k in ("channel_id", "channel_name", "video_title",
+                                                          "published_at", "video_url", "duration_seconds")}
+        meta["channel_id"] = _channel_id_of(meta, stored)
+        verdict = language_detect.verify_language(stored["raw_transcript"],
+                                                  languages_for(meta, stored, channel_languages))
+        if not verdict["ok"]:
+            tally["foreign"] += 1
+            log_warn(f"{video_id}: stored transcript is {verdict['language']} ({verdict['reason']}); not adopted.")
+            continue
+        research_state.update(
+            state, video_id, research_status="pending", delivery_status="not_sent",
+            adopted_from="stored_transcript", channel_id=meta["channel_id"],
+            channel_name=meta["channel_name"], video_title=meta["video_title"],
+            published_at=meta["published_at"], transcript_source=stored.get("transcript_source"),
+            transcript_language=verdict["language"] or stored.get("transcript_language"),
+            transcript_hash=stored.get("transcript_hash"), transcript_stored=True, failure_reason=None,
+        )
+        tally["adopted"] += 1
+        tally["videos"].append(video_id)
+    research_state.save_state(state)
+    log_info(f"Stored transcripts without research: {tally['adopted']} adopted for --retry, "
+             f"{tally['pending_summary']} still pending a summary, {tally['foreign']} not in the "
+             f"channel's language, {tally['missing']} missing.")
+    return tally
+
+
 def run_retry(max_videos=None, extractor=extract_research, state=None):
     state = state if state is not None else research_state.load_state()
     max_videos = MAX_VIDEOS_PER_RUN if max_videos is None else max_videos
@@ -398,10 +471,11 @@ def main():
     parser.add_argument("--import-legacy", action="store_true")
     parser.add_argument("--reject-foreign-transcripts", action="store_true")
     parser.add_argument("--refetch", action="store_true")
+    parser.add_argument("--adopt-stored", action="store_true")
     parser.add_argument("--max-videos", type=int, default=None)
     args = parser.parse_args()
     if not (args.retry or args.reprocess or args.import_legacy or args.reject_foreign_transcripts
-            or args.refetch):
+            or args.refetch or args.adopt_stored):
         parser.print_help()
         return 1
     if args.import_legacy:
@@ -410,6 +484,8 @@ def main():
         run_reject_foreign()
     if args.refetch:
         run_refetch(args.max_videos)
+    if args.adopt_stored:
+        run_adopt_stored()
     if args.retry:
         run_retry(args.max_videos)
     if args.reprocess:

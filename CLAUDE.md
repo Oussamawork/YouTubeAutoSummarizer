@@ -186,7 +186,16 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   `transcript_rejected`) and `--refetch` (re-capture those videos in the
   channel's language through the daily job's source chain and budget, then
   extract; `RESEARCH_REFETCH_MAX_VIDEOS`, default 3). The daily job runs the
-  last two after the scraper. Bounded, quota-aware, resumable.
+  last two after the scraper. `--adopt-stored` (offline, idempotent) gives a
+  `pending` research record (`delivery_status="not_sent"`,
+  `adopted_from="stored_transcript"`) to every stored transcript that never
+  got one — research used to start only beside a delivered summary, so a
+  video whose summary was quota-deferred until it left the feed or failed
+  into manual review kept its transcript but never reached the claims or the
+  tracker (40 such on 2026-10-16). Videos still pending a summary in
+  `seen_videos.json`, rejected captures and wrong-language text are skipped;
+  the daily job runs `--adopt-stored --retry`, so `--retry` extracts them
+  under the summary reserve. Bounded, quota-aware, resumable.
 - `research_analytics.py` — analytics over canonical claims: data-quality
   header with denominators, descriptive counts, consensus of one current
   **view** per source/asset/horizon bucket, the portfolio-disclosure and
