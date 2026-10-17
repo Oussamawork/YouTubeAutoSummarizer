@@ -101,6 +101,13 @@ def _offline_model_metadata(tmp_path, monkeypatch):
                         str(tmp_path / "research" / "transcript_records.jsonl"))
     monkeypatch.setattr(summarizer, "PARTIALS_DIR", str(tmp_path / "partials"))
     monkeypatch.setattr(scraper, "SIGNALS_FILE", str(tmp_path / "signals.jsonl"))
+    # The backfill appends compatibility rows too (a research run finished
+    # after delivery, an import): left pointing at data/signals.jsonl, a
+    # test's fixture rows land in the committed dataset.
+    import research_backfill
+    monkeypatch.setattr(research_backfill, "SIGNALS_FILE", str(tmp_path / "signals.jsonl"))
+    monkeypatch.setattr(research_backfill, "SEEN_VIDEOS_FILE", str(tmp_path / "seen_videos.json"))
+    monkeypatch.setattr(research_backfill, "CANDIDATES_DIR", str(tmp_path / "candidates"))
     monkeypatch.setattr(signals, "EXHAUSTIVE_RESEARCH_MODE", False)
     yield
     model_capabilities.reset_cache()
