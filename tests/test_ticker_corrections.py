@@ -45,6 +45,12 @@ def test_every_name_alias_resolves_to_its_own_value():
     ("XRP", "XRP"), ("Space X", "SPCX"), ("SpaceX", "SPCX"), ("Canopy Growth-Aktie", "CGC"),
     ("Waste Management", "WM"), ("Eli Liy", "LLY"), ("The TradeDesk", "TTD"), ("Adlesian", "TEAM"),
     ("Sony Group", "SONY"), ("Barrick Mining Corporation", "B"), ("Fresnillo PLC", "FRESNILLO"),
+    # the 2026-10-17 backlog extraction
+    ("Duolingo", "DUOL"), ("Zeta Global", "ZETA"), ("Domino's", "DPZ"), ("Datadog", "DDOG"),
+    ("Johnson and Johnson", "JNJ"), ("Intuit", "INTU"), ("Lam research", "LRCX"), ("Teladoc Health", "TDOC"),
+    ("Duke Energy", "DUK"), ("Core Weave", "CRWV"), ("Robin Hood", "HOOD"), ("On Holding", "ONON"),
+    ("Nokia", "NOK"), ("United Health Group", "UNH"), ("Palenteer", "PLTR"), ("Lamentum", "LITE"),
+    ("Sandix", "SNDK"), ("Vertive", "VRT"), ("Moody's", "MCO"),
 ])
 def test_name_corrections_resolve(name, ticker):
     assert canonical_ticker({"name": name}) == ticker
@@ -105,6 +111,9 @@ def test_banks_resolve_as_subjects_but_are_not_free_text_mentions():
                          ("Bank of America", "BAC"), ("Citigroup", "C"), ("Citi", "C")):
         assert canonical_ticker({"name": name}) == ticker, name
     assert not tn._ALIAS_RE.search("Goldman expects the stock to reach $200, says JP Morgan")
+    # A ratings agency is quoted the same way.
+    assert canonical_ticker({"name": "Moody's"}) == "MCO"
+    assert not tn._ALIAS_RE.search("Moody's downgraded the US last week")
 
 
 def test_curated_name_outranks_the_learned_map():

@@ -35,7 +35,7 @@ EXTRACTION_PROMPT_VERSION = "2"
 # stored claims follow the current rules without a re-extraction. It is
 # deliberately NOT part of the run key (research_state.run_key): a resolution
 # change must never mark stored runs stale.
-RESOLUTION_VERSION = "2"
+RESOLUTION_VERSION = "3"
 
 # --- Enumerations -----------------------------------------------------------
 
@@ -643,7 +643,7 @@ _MARKET_SPELLINGS = {
                         "THE STOCK MARKET", "THE U.S. STOCK MARKET", "U.S. EQUITIES", "US EQUITIES",
                         "EQUITY MARKETS", "AMERICAN STOCKS"),
     "NASDAQ": ("NASDAQ", "NASDAQ 100", "NASDAQ-100", "NASDAC", "NASDACK", "NAST 100", "NASDAQ COMPOSITE", "NDX",
-               "THE NASDAQ"),
+               "THE NASDAQ", "NASTECH", "NESTECK", "NESTDECK"),   # the last three: HKCM's live streams
     "DOW": ("DOW", "DOW JONES", "THE DOW", "DJIA"),
     "RUSSELL 2000": ("RUSSELL 2000", "RUSSELL", "THE RUSSELL 2000"),
     "SMALL CAPS": ("SMALL CAPS", "SMALL-CAPS", "SMALLCAPS", "SMALL CAP STOCKS"),
@@ -726,6 +726,10 @@ CHANNEL_ALIASES = {
                        "COROREE": "CRWV"},
     "HKCM": {"XP": "XPEV", "JOO PENG": "XPEV"},
     "TheStreet": {"MERCK": "MRK", "MERCK & CO": "MRK"},
+    # VeChain's gas token in "Diese 2 Altcoins haben ihren BODEN gefunden!" and
+    # the 13-coin portfolio walkthrough (2026-09/10), transcribed VTHO, WTHO,
+    # BTHO, VHO and Wthoo within the same passages ("WHO" is left alone).
+    "Phantom by HKCM": {"WTHO": "VTHO", "BTHO": "VTHO", "VHO": "VTHO", "WTHOO": "VTHO"},
 }
 
 # COMMON_WORD_NAMES (signals_data): curated names that are also ordinary

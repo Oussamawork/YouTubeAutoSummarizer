@@ -180,6 +180,11 @@ _CURATED = [
     _us("PL", "XNYS", None, name="Planet Labs"), _us("MARA", "XNAS", None), _us("FVRR", "XNYS", None),
     _us("RIOT", "XNAS", None), _us("ASTS", "XNAS", None), _us("SERV", "XNAS", None), _us("WULF", "XNAS", None),
     _us("CLSK", "XNAS", None), _us("IREN", "XNAS", None),
+    # named in the 2026-10-17 backlog extraction
+    _us("DDOG", "XNAS", IT), _us("INTU", "XNAS", IT), _us("LRCX", "XNAS", IT), _us("NOK", "XNYS", IT),
+    _us("JNJ", "XNYS", HC), _us("TDOC", "XNYS", HC), _us("DUK", "XNYS", UTIL), _us("MCO", "XNYS", FIN),
+    _us("DLO", "XNAS", FIN, name="dLocal"), _us("ONON", "XNYS", CD, name="On Holding"),
+    _us("DUOL", "XNAS", None, name="Duolingo"),
     # broad and sector ETFs (a claim about SPY scores raw: SPY vs SPY is no benchmark)
     _etf("SPY", "ARCX"), _etf("VOO", "ARCX"), _etf("QQQ", "XNAS"), _etf("IWM", "ARCX"), _etf("DIA", "ARCX"),
     _etf("XLK", "ARCX", IT), _etf("XLF", "ARCX", FIN), _etf("XLE", "ARCX", ENE), _etf("XLV", "ARCX", HC),

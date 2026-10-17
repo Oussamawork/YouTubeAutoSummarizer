@@ -279,7 +279,7 @@ def test_reresolve_keeps_a_stored_or_newly_ambiguous_verdict():
 
 
 def test_resolution_version_stays_out_of_the_run_key_and_extraction_versions():
-    assert cm.SCHEMA_VERSION == "2" and cm.EXTRACTION_PROMPT_VERSION == "2" and cm.RESOLUTION_VERSION == "2"
+    assert cm.SCHEMA_VERSION == "2" and cm.EXTRACTION_PROMPT_VERSION == "2" and cm.RESOLUTION_VERSION == "3"
     assert "RESOLUTION_VERSION" not in inspect.getsource(research_state)
     ev = "I like Chevron a lot here"
     c = _validate(ev + ".", [_raw(subject_mention="Chevron", evidence_text=ev)])
@@ -456,3 +456,13 @@ def test_listed_tickers_and_coin_collisions_follow_the_explicit_type():
     for ticker in ("MOGU", "RCI"):                       # known-wrong symbols are never built
         assert cs.symbol_for({"ticker": ticker, "name": ticker, "type": "stock"}) is None, ticker
     assert canonical_ticker({"name": "Novo Nordless"}) == "NVO" and canonical_ticker({"name": "nCino"}) == "NCNO"
+
+
+def test_backlog_channel_spellings_and_market_spellings():
+    # Phantom by HKCM's transcripts spell VeChain's gas token several ways in
+    # the same passages; only that channel's reading is folded.
+    assert cc.resolved_ticker(_named("WTHO", channel_name="Phantom by HKCM")) == "VTHO"
+    assert cc.resolved_ticker(_named("BTHO", channel_name="Phantom by HKCM")) == "VTHO"
+    assert cc.resolved_ticker(_named("WTHO", channel_name="TheStreet")) is None
+    # HKCM's live streams say "Nastech": the Nasdaq market key, never a ticker.
+    assert cm.market_key("Nastech") == "NASDAQ" and cm.market_key("Nesteck") == "NASDAQ"

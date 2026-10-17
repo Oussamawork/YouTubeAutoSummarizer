@@ -198,6 +198,16 @@ ASSET_ALIASES = {
     "MARLL": "MRVL",                          # "a connectivity company ... custom silicon"
     "FREQUENT MAC MORAN": "FCX",              # "predominantly copper ... gold"
     "TEROWOLF": "WULF", "TUDOR PERINI": "TPC", "CROWD STRIKE": "CRWD", "WESTERN DIG": "WDC",
+    # read from the 2026-10-17 backlog extraction (data/research/candidates/)
+    "PALENTEER": "PLTR", "CORE WEAVE": "CRWV", "VERTIVE": "VRT", "VERDIVE": "VRT",
+    "LAMENTUM": "LITE", "LUMENUM": "LITE",    # "companies like Lumenum ... this architectural upgrade"
+    "SANDIX": "SNDK", "SANDIS": "SNDK",       # beside Micron and Western Digital in memory talk
+    # companies named in full that had no entry (each the only listing of that name)
+    "DUOLINGO": "DUOL", "ZETA GLOBAL": "ZETA", "DOMINO'S": "DPZ", "DOMINOS": "DPZ",
+    "DOMINO'S PIZZA": "DPZ", "DATADOG": "DDOG", "JOHNSON AND JOHNSON": "JNJ", "JOHNSON & JOHNSON": "JNJ",
+    "INTUIT": "INTU", "LAM RESEARCH": "LRCX", "TELADOC": "TDOC", "TELADOC HEALTH": "TDOC",
+    "DUKE ENERGY": "DUK", "ROBIN HOOD": "HOOD", "ON HOLDING": "ONON", "ON HOLDINGS": "ONON",
+    "NOKIA": "NOK", "UNITED HEALTH GROUP": "UNH", "DLOCAL": "DLO",
     # crypto: the bare symbols are names too ("XRP", "ETH"), and Polygon's
     # token migrated from MATIC to POL in 2024
     "XRP": "XRP", "ETH": "ETH", "BTC": "BTC", "SOL": "SOL", "POLYGON": "POL", "VTHO": "VTHO",
@@ -237,6 +247,9 @@ TICKER_ALIASES = {
     # speaker named before. Name-shaped keys here are read as names too.
     "GOLDMAN": "GS", "GOLDMAN SACHS": "GS", "JP MORGAN": "JPM", "JPMORGAN": "JPM",
     "BANK OF AMERICA": "BAC", "CITIGROUP": "C",
+    # A ratings agency is quoted as a source the same way ("Moody's
+    # downgraded ..."), but as a claim's subject it is the stock.
+    "MOODY'S": "MCO", "MOODYS": "MCO",
     # Tickers the transcript got wrong outright.
     # SpaceX has traded as SPCX since its June 2026 IPO. "spcx.us returns
     # closes" only proved that a series exists; the data says it is SpaceX:
