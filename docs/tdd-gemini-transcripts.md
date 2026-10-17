@@ -267,3 +267,90 @@ requests-per-day, tokens-per-day, or a stale count from before the reset.
   against a chain that had 17 requests sitting idle. Not the binding constraint.
 - **Widening the summary chain.** The model list is a quality decision
   (§ `summarizer.py`), and the budget it already has was not being spent.
+
+## 10. 503s are billed: the storm that emptied the summary chain (2026-09-16 → 10-16)
+
+From 2026-09-16 the gate log's `model_quota_deferred` outcomes went from 0–5 a
+day to 40–114 a day while included videos stayed at 7–15, and by 2026-10-17
+**63 stored transcripts had no claims**: 43 never got a research record and 20
+waited on research quota. None of them reached the creators-vs-market tracker.
+
+**What the API was doing.** Two first-runs-of-the-Pacific-day, where nothing
+could have been spent before:
+
+```
+2026-10-08 08:36 UTC (01:36 PT)  sent=5, quota_deferred=20
+  Gemini daily budget: gemini-3.6-flash=18/20 left (capped by API),
+                       gemini-3.7-flash=17/20 left (capped by API)
+2026-10-16 12:10 UTC (05:10 PT)
+  gemini-3.7-flash rate-limited (429, day quota,
+    GenerateRequestsPerDayPerProjectPerModel-FreeTier; limit=20)
+  → marked spent "after 10 recorded request(s)"
+  gemini-3.6-flash ... day quota ... → marked spent "after 2 recorded request(s)"
+  (gemini-3-flash-preview=19/20 left, gemini-3.5-flash=19/20 left)
+```
+
+In the 10-16 run about seventeen requests to gemini-3.6-flash are visible, most
+answered `503 UNAVAILABLE "This model is currently experiencing high demand"`
+and retried up to three times per call, video after video; two were served. The
+day quota was gone within that one run. The free tier **counts attempts it
+answers with 503** against the 20 requests a day, while `gemini_quota.record`
+counted only HTTP 200s — which is also the explanation § 9 could not give for a
+model "written off after 0, 3 and 8 requests". On a calm day (2026-10-17 11:29
+UTC) every request was served at the first attempt, 17 on 3.7-flash, and
+nothing deferred for quota: capacity is fine until a 503 storm burns it.
+
+**How a burnt quota became lost transcripts.**
+- A call that saw only 503s returned `""`, so the summary path treated it as a
+  failed summary: `manual_review`, a final outcome. 13 of the orphaned
+  transcripts ended in `manual_review` (the outcome a failed, truncated or
+  insufficient summary shares; the log does not say which), stored and never
+  researched.
+- A deferred video retries only while it is in its channel's ~15-entry RSS
+  window; once it scrolls out, `_evict_orphaned_pending` drops it (FinVid posts
+  several a day, so that takes days, not weeks). Research only ever started
+  beside a delivered summary, so those transcripts were orphaned too.
+- Research retries run only above a 4-request summary reserve, which a burnt
+  quota never leaves.
+- Only two models may write summaries (SUMMARY_MODELS), no Groq/LLM provider is
+  configured, and GitHub ran the eight daily crons only 3–5 times a day.
+
+### Design
+
+- **Overload breaker** (`summarizer._call_provider`). A 5xx is retried at most
+  `LLM_OVERLOAD_RETRIES` (2) times within a call, a model gets at most
+  `LLM_OVERLOAD_MAX_FAILED_PER_RUN` (3) failed attempts per run, and then it
+  is skipped for the rest of the run. Retry count does not change the cost per
+  served request in a storm (≈ 1/(1−p) attempts either way); repeating the
+  storm for every video of the run is what emptied the day, and that is capped.
+- **An outage defers, never fails.** A call that ends on 5xx returns the quota
+  sentinel, so the video waits for another model or the next run instead of
+  `manual_review`.
+- **Failed attempts are counted** (`gemini_quota.record_failed`, `failed` in
+  `data/gemini_usage.json`). They spend the remaining figure in the budget line
+  ("3/20 left (2 served + 15 failed 5xx attempt(s))") but not the served count,
+  and never decide `is_exhausted`: the API's own verdict stays the authority.
+- **No stored transcript is left behind.** `research_backfill --adopt-stored`
+  gives every stored transcript without a research record a pending one;
+  `--import-candidates` stores committed offline extractions
+  (`data/research/candidates/`, validated exactly like a model response, run
+  identity `offline:<source>`). The 63-transcript backlog of 2026-10-17 was
+  cleared that way. The daily job runs `--adopt-stored --import-candidates
+  --retry`.
+
+### What would remove the constraint (owner decisions)
+
+1. **Billing on the AI Studio project** (paid tier). It lifts the 20-request
+   free-tier cap and the free tier's 503 deprioritisation. At the 2026-10
+   volume (≈20–30 requests a day of 5–20k input and 3–4k output tokens, so
+   roughly 7–8M input and 3M output tokens a month) a Flash model costs in the
+   order of $5–15 a month; check Google's current price list. Set
+   `GEMINI_REQUESTS_PER_DAY` to the new tier's limit afterwards.
+2. **A third summary model** within the free tier: e.g. repo variables
+   `GEMINI_FALLBACK_MODELS=gemini-3.6-flash,gemini-3-flash-preview` and the
+   same roster in `SUMMARY_MODELS`, with gemini-3-flash-preview removed from
+   `GEMINI_TRANSCRIPT_MODELS` so the pools stay disjoint (+20 requests a day;
+   it idled at 19/20 on 2026-10-16). A quality trade-off — § `summarizer.py`.
+3. **A second provider** (`GROQ_API_KEY`, or `LLM_API_KEY` + `LLM_BASE_URL` +
+   `LLM_MODEL`) allowed in `SUMMARY_MODELS`. Its own limits (tokens per minute
+   on free tiers) make it a fallback for short videos only.

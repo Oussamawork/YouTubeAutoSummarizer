@@ -141,6 +141,8 @@ def load_usage(now=None):
         data = {"day": day, "models": {}}
     models = data.get("models")
     data["models"] = models if isinstance(models, dict) else {}
+    failed = data.get("failed")
+    data["failed"] = {m: n for m, n in failed.items() if isinstance(n, int)} if isinstance(failed, dict) else {}
     data["spent"] = _normalize_spent(data.get("spent"))
     return data
 
@@ -268,6 +270,29 @@ def record(model, usage=None):
     return usage
 
 
+def failed_attempts(model, usage=None):
+    """Attempts on `model` today that the API answered with a server error."""
+    usage = usage if usage is not None else load_usage()
+    count = (usage.get("failed") or {}).get(model)
+    return count if isinstance(count, int) else 0
+
+
+def record_failed(model, usage=None):
+    """
+    Count one attempt the API answered with a 5xx ("503 UNAVAILABLE: high
+    demand"). Kept apart from `record`'s served count: the free tier bills
+    these too — on 2026-10-16 gemini-3.6-flash was written off by the API in
+    the first run of the Pacific day with 2 served requests on file and about
+    seventeen 503 retries behind them — but they are not service, so they
+    never clear a spent flag and never decide `is_exhausted` (the API's own
+    verdict stays the authority there). They make the budget line honest.
+    """
+    usage = usage if usage is not None else load_usage()
+    usage["failed"][model] = failed_attempts(model, usage) + 1
+    save_usage(usage)
+    return usage
+
+
 def mark_exhausted(model):
     """
     Record that the API itself said `model` is out of requests for the day.
@@ -306,15 +331,23 @@ def report():
     models = dict(usage["models"])
     # A model can be flagged spent without ever having served a request today,
     # and that is exactly the case worth seeing in the log.
-    for model in usage["spent"]:
+    for model in list(usage["spent"]) + list(usage["failed"]):
         models.setdefault(model, 0)
     if not models:
         return ""
     return ", ".join(
-        f"{model}={max(0, GEMINI_REQUESTS_PER_DAY - count)}/{GEMINI_REQUESTS_PER_DAY} left"
+        f"{model}={max(0, GEMINI_REQUESTS_PER_DAY - count - failed_attempts(model, usage))}"
+        f"/{GEMINI_REQUESTS_PER_DAY} left"
+        + _failed_note(count, failed_attempts(model, usage))
         + _capped_note(usage["spent"].get(model))
         for model, count in sorted(models.items())
     )
+
+
+def _failed_note(served, failed):
+    """The served / failed split behind a model's remaining figure, when
+    server errors spent part of it."""
+    return f" ({served} served + {failed} failed 5xx attempt(s))" if failed else ""
 
 
 def _capped_note(entry):

@@ -167,10 +167,12 @@ jobs:
         # first gives a research record to every stored transcript that never
         # got one (its summary was quota-deferred until the video left the
         # feed, or failed), so those creators' calls reach the claims and the
-        # creators-vs-market tracker too. Bounded per run and quota-aware;
-        # never touches delivery state.
+        # creators-vs-market tracker too. --import-candidates then stores any
+        # committed offline extractions (data/research/candidates/) through
+        # the same validation as a model response, with no model request.
+        # Bounded per run and quota-aware; never touches delivery state.
         if: ${{ !inputs.video_url }}
-        run: python research_backfill.py --adopt-stored --retry
+        run: python research_backfill.py --adopt-stored --import-candidates --retry
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}

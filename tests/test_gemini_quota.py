@@ -109,6 +109,26 @@ class TestReport:
     def test_empty_when_nothing_spent(self):
         assert gemini_quota.report() == ""
 
+    def test_failed_attempts_spend_the_remaining_figure_but_not_the_served_count(self):
+        # The line that hid the 2026-10 outage: "18/20 left (capped by API)"
+        # with only the 2 served requests counted. The 503s count too.
+        for _ in range(2):
+            gemini_quota.record("gemini-3.6-flash")
+        for _ in range(15):
+            gemini_quota.record_failed("gemini-3.6-flash")
+        line = gemini_quota.report()
+        assert "gemini-3.6-flash=3/20 left (2 served + 15 failed 5xx attempt(s))" in line
+        assert gemini_quota.used("gemini-3.6-flash") == 2
+        assert gemini_quota.is_exhausted("gemini-3.6-flash") is False      # the API's verdict decides that
+        gemini_quota.record_failed("gemini-3.7-flash")
+        assert "gemini-3.7-flash=19/20 left (0 served + 1 failed 5xx attempt(s))" in gemini_quota.report()
+
+    def test_failed_attempts_reset_with_the_pacific_day(self, monkeypatch):
+        gemini_quota.record_failed("gemini-3.6-flash")
+        tomorrow = gemini_quota.quota_day() + gemini_quota.timedelta(days=1)
+        monkeypatch.setattr(gemini_quota, "quota_day", lambda now=None: tomorrow)
+        assert gemini_quota.failed_attempts("gemini-3.6-flash") == 0
+
 
 # Real payload shapes, trimmed. Google names the offending quota in the error
 # body and nowhere else — the status code alone cannot tell a limit that clears

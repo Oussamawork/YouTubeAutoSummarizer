@@ -47,6 +47,13 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   summarized in complete-coverage chunks and merged (`_summarize_chunked`,
   resumable via `data/research/partials/`, quota-checked before it starts).
   `SUMMARY_MAX_OUTPUT_TOKENS` caps what the model writes, never what it reads.
+  **5xx answers are billed by the free tier** (2026-10: "503 high demand"
+  retries emptied both summary models' daily quota with 2–10 requests
+  served), so `_call_provider` retries a 5xx at most `LLM_OVERLOAD_RETRIES` (2)
+  times per call and `LLM_OVERLOAD_MAX_FAILED_PER_RUN` (3) times per run, then
+  skips the model for the run; a call that ends on 5xx returns the quota
+  sentinel so the video DEFERS — never `""`, which reads as a failed summary
+  (`manual_review`, final). See `docs/tdd-gemini-transcripts.md` § 10.
 - `model_capabilities.py` — per-model input/output token limits: live Gemini
   `models.get` (cached in `data/model_capabilities.json`), `MODEL_CAPABILITIES_JSON`
   override, then the dated registry, then a small default for unknown models.
@@ -194,8 +201,16 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   into manual review kept its transcript but never reached the claims or the
   tracker (40 such on 2026-10-16). Videos still pending a summary in
   `seen_videos.json`, rejected captures and wrong-language text are skipped;
-  the daily job runs `--adopt-stored --retry`, so `--retry` extracts them
-  under the summary reserve. Bounded, quota-aware, resumable.
+  the daily job runs `--adopt-stored --import-candidates --retry`, so `--retry`
+  extracts them under the summary reserve. `--import-candidates` stores
+  committed offline extractions (`data/research/candidates/<video_id>.json`:
+  `video_id`, `transcript_hash`, `extraction_prompt_version`, `source`, and a
+  model-shaped `response`) through `process_video` with no model request:
+  validated by `signals.build_research` exactly like a model response, run
+  identity `offline:<source>` (`offline_identity`), `extraction_model`
+  "offline-extraction"; a changed transcript or prompt version is skipped and
+  a finished video is never overridden. The 63-transcript backlog of
+  2026-10-17 was cleared that way. Bounded, quota-aware, resumable.
 - `research_analytics.py` — analytics over canonical claims: data-quality
   header with denominators, descriptive counts, consensus of one current
   **view** per source/asset/horizon bucket, the portfolio-disclosure and
@@ -223,7 +238,10 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   **provisional**: it is honored for `GEMINI_SPENT_RECHECK_MINUTES` (doubling on
   each repeat) and then re-probed, because the API has written a model off after
   three requests — see `docs/tdd-gemini-transcripts.md` § 9. Only the locally
-  counted cap is final.
+  counted cap is final. Attempts answered with a 5xx are counted apart
+  (`record_failed`, `failed` in the usage file): they spend the budget line's
+  remaining figure ("3/20 left (2 served + 15 failed 5xx attempt(s))") but
+  never the served count or `is_exhausted` (§ 10).
 - `signals.py` — the combined summary+claims fast path (one request, two
   products, validated independently: a malformed claims array never costs the
   summary and is recorded as `failed_retryable`, never as an empty result).
@@ -465,8 +483,10 @@ workflow timeout.
   changing `transcript.py` budget logic or channel caps.
 - `docs/tdd-gemini-transcripts.md` — the August 2026 two-day outage, the real
   per-model free-tier limits (20 requests/day, not 1,500), measured cost of a
-  Gemini video transcript, and why the transcript and summary model pools must
-  stay disjoint. Read before changing either model list.
+  Gemini video transcript, why the transcript and summary model pools must
+  stay disjoint, and § 10: 503 retries are billed, how a 503 storm became 63
+  unprocessed transcripts, and the owner options (billing, a third model, a
+  second provider). Read before changing either model list or retry logic.
 - `docs/tdd-full-transcript-claims.md` — why the 120k-char head/tail cut was
   removed, the token-budget algorithm, capability discovery, the chunked
   paths, the claim schema and prompt, the research-state design, the

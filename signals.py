@@ -284,7 +284,10 @@ def _research_context(context, coverage_status="full", mode=None, chunk_tokens=N
         ctx["chunk_tokens"] = chunk_tokens
     mode = ctx.get("extraction_mode") or "combined"
     if nt is not None:
-        identity = extraction_identity(mode, ctx.get("chunk_tokens"))
+        # An offline extraction (research_backfill --import-candidates) brings
+        # its own identity: no model was configured for it, so the current
+        # provider chain must not be written into its run key.
+        identity = ctx.get("fixed_run_identity") or extraction_identity(mode, ctx.get("chunk_tokens"))
         ctx["run_identity"] = identity
         ctx["run_key"] = research_state.run_key(nt.transcript_hash, nt.normalization_version,
                                                 claims_mod.EXTRACTION_PROMPT_VERSION,

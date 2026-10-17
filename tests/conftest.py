@@ -38,6 +38,7 @@ def _isolated_gemini_quota(tmp_path, monkeypatch):
     yesterday's counts nor write today's.
     """
     import gemini_quota
+    import summarizer
     import transcript
 
     monkeypatch.setattr(
@@ -46,6 +47,7 @@ def _isolated_gemini_quota(tmp_path, monkeypatch):
     # Run-scoped rate-limit memory is process state, so it leaks between tests
     # unless it is reset with the counter it complements.
     monkeypatch.setattr(transcript, "_RATE_LIMITED_THIS_RUN", set())
+    monkeypatch.setattr(summarizer, "_FAILED_ATTEMPTS", {})
 
 
 @pytest.fixture(autouse=True)

@@ -689,6 +689,60 @@ class TestRateLimitHandling:
 
         assert waits and max(waits) == summarizer.LLM_RETRY_AFTER_CAP
 
+    def test_a_503_storm_defers_the_video_instead_of_failing_it(self, monkeypatch):
+        # 2026-10-16: "503 UNAVAILABLE: high demand" on every attempt. Returning
+        # "" sent the video down the failed-summary path (manual_review, lost
+        # for good); an outage is a deferral, and the model is left usable by
+        # the next run — the API never said the day was gone.
+        calls = self._responses(monkeypatch, [self._Resp(503, '{"status": "UNAVAILABLE"}')])
+        result = summarizer._call_provider(self._gemini(), "transcript text")
+
+        assert result == summarizer.QUOTA_EXHAUSTED_SENTINEL
+        assert len(calls) == summarizer.LLM_OVERLOAD_RETRIES + 1
+        assert gemini_quota.failed_attempts("gemini-3.7-flash") == len(calls)   # the free tier bills them
+        assert gemini_quota.used("gemini-3.7-flash") == 0                      # nothing was served
+        assert gemini_quota.is_exhausted("gemini-3.7-flash") is False
+
+    def test_the_overload_breaker_caps_failed_attempts_per_run(self, monkeypatch):
+        # The waste was per VIDEO: each one re-tried the overloaded model three
+        # times. Across calls in one run the failed attempts are capped.
+        calls = self._responses(monkeypatch, [self._Resp(503), self._Resp(200, payload=self._OK)])
+        assert summarizer._call_provider(self._gemini(), "first video") == "a summary"
+        assert len(calls) == 2
+
+        calls = self._responses(monkeypatch, [self._Resp(503)])
+        assert summarizer._call_provider(self._gemini(), "second video") == summarizer.QUOTA_EXHAUSTED_SENTINEL
+        assert len(calls) == summarizer.LLM_OVERLOAD_MAX_FAILED_PER_RUN - 1     # 1 failed before + 2 now
+        assert gemini_quota.failed_attempts("gemini-3.7-flash") == summarizer.LLM_OVERLOAD_MAX_FAILED_PER_RUN
+        assert gemini_quota.used("gemini-3.7-flash") == 1
+
+
+def test_every_model_overloaded_defers_rather_than_failing(monkeypatch):
+    # Both summary models answering 503 must come back as quota (defer, retry
+    # next run), never as "" (a failed summary): that path ends in
+    # manual_review, a final outcome, with the transcript stored and never
+    # researched.
+    providers = [dict(_gemini_provider()[0]),
+                 dict(_gemini_provider()[0], name="gemini-3.6-flash", model="gemini-3.6-flash")]
+    monkeypatch.setattr(summarizer, "_provider_configs", lambda: providers)
+    monkeypatch.setattr(summarizer.time, "sleep", lambda s: None)
+    posted = []
+
+    class _Busy:
+        status_code, text, headers = 503, '{"status": "UNAVAILABLE"}', {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        posted.append(json["model"])
+        return _Busy()
+
+    monkeypatch.setattr(summarizer.requests, "post", fake_post)
+    assert summarizer.complete("system", "user message") == summarizer.QUOTA_EXHAUSTED_SENTINEL
+    assert summarizer._EXHAUSTED_PROVIDERS == {"gemini-3.7-flash", "gemini-3.6-flash"}
+    # A later video in the same run spends nothing on either of them.
+    before = len(posted)
+    assert summarizer.complete("system", "next video") == summarizer.QUOTA_EXHAUSTED_SENTINEL
+    assert len(posted) == before
+
 
 def _gemini_provider():
     return [{
