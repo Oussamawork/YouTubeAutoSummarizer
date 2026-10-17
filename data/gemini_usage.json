@@ -1,8 +1,8 @@
 {
   "day": "2026-10-17",
   "models": {
-    "gemini-3.5-flash": 4,
-    "gemini-3.6-flash": 2,
+    "gemini-3.5-flash": 6,
+    "gemini-3.6-flash": 4,
     "gemini-3.7-flash": 20
   },
   "spent": {}
