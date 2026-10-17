@@ -1,7 +1,7 @@
 {
   "models": {
     "gemini-3.6-flash": {
-      "capability_checked_at": "2026-10-10T21:27:19+00:00",
+      "capability_checked_at": "2026-10-17T22:06:50+00:00",
       "context_window_limit": null,
       "input_token_limit": 1048576,
       "output_token_limit": 65536,
