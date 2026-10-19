@@ -37,5 +37,26 @@
       "last_video_id": "XOmt1qanNWc"
     }
   },
-  "pending": {}
+  "pending": {
+    "3m_ctu3RWcc": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
+    "8DCwORvros4": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
+    "OqLp9kGsih8": {
+      "attempts": 0,
+      "channel_id": "UC_niVs5ITmD-qgnxph8CohA"
+    },
+    "rgEQY8FX6dw": {
+      "attempts": 0,
+      "channel_id": "UCp6aBHRM6ZS_kLeC57HV4kg"
+    },
+    "vBt4asdgxoI": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    }
+  }
 }
