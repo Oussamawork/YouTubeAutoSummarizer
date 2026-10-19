@@ -185,6 +185,8 @@ _CURATED = [
     _us("JNJ", "XNYS", HC), _us("TDOC", "XNYS", HC), _us("DUK", "XNYS", UTIL), _us("MCO", "XNYS", FIN),
     _us("DLO", "XNAS", FIN, name="dLocal"), _us("ONON", "XNYS", CD, name="On Holding"),
     _us("DUOL", "XNAS", None, name="Duolingo"),
+    _us("GEV", "XNYS", IND, name="GE Vernova"), _us("WDAY", "XNAS", IT), _us("FIX", "XNYS", IND, name="Comfort Systems"),
+    _us("APLD", "XNAS", None, name="Applied Digital"),
     # broad and sector ETFs (a claim about SPY scores raw: SPY vs SPY is no benchmark)
     _etf("SPY", "ARCX"), _etf("VOO", "ARCX"), _etf("QQQ", "XNAS"), _etf("IWM", "ARCX"), _etf("DIA", "ARCX"),
     _etf("XLK", "ARCX", IT), _etf("XLF", "ARCX", FIN), _etf("XLE", "ARCX", ENE), _etf("XLV", "ARCX", HC),

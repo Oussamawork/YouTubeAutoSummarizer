@@ -51,9 +51,19 @@ def test_every_name_alias_resolves_to_its_own_value():
     ("Duke Energy", "DUK"), ("Core Weave", "CRWV"), ("Robin Hood", "HOOD"), ("On Holding", "ONON"),
     ("Nokia", "NOK"), ("United Health Group", "UNH"), ("Palenteer", "PLTR"), ("Lamentum", "LITE"),
     ("Sandix", "SNDK"), ("Vertive", "VRT"), ("Moody's", "MCO"),
+    # claims extracted 2026-10-13..17, and HKCM's spellings of Atlassian
+    ("Lowe's", "LOW"), ("Taiwan Semi", "TSM"), ("GE Vernova", "GEV"), ("Workday", "WDAY"),
+    ("Applied Digital", "APLD"), ("Comfort System", "FIX"), ("Adlesin", "TEAM"), ("Atläschen", "TEAM"),
 ])
 def test_name_corrections_resolve(name, ticker):
     assert canonical_ticker({"name": name}) == ticker
+    assert (resolve_instrument(ticker, name) is None) == (ticker in UNPRICEABLE_TICKERS)
+
+
+def test_workday_is_a_name_only_in_capitals_or_before_stock():
+    assert not tn.alias_mentions("after a long workday I check the charts")
+    assert [m.group(1) for m in tn.alias_mentions("does workday stock look cheap")] == ["workday"]
+    assert [m.group(1) for m in tn.alias_mentions("WORKDAY beat estimates")] == ["WORKDAY"]
 
 
 def test_recorded_ticker_contradicting_a_curated_name_is_corrected():

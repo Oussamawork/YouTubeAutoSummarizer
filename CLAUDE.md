@@ -474,6 +474,10 @@ once the digest itself has been accepted. Runs stop starting new videos after
 workflow timeout.
 
 ## Design docs
+- `TO-DO.md` — what is still open: the owner's decisions (Gemini capacity,
+  the offline extractions, rankings, non-US listings, schedule), the ticker
+  corrections waiting on a catalogue check, and code follow-ups. Update it
+  when an item is done or decided.
 - `docs/architecture.md` — the end-to-end pipeline: discovery and gating, the
   transcript source cascade and its budget gates, how the summarizer is instructed,
   what each outcome does to the video, and the fan-out after a summary. Start here.

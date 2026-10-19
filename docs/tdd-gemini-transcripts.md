@@ -340,6 +340,11 @@ nothing deferred for quota: capacity is fine until a 503 storm burns it.
 
 ### What would remove the constraint (owner decisions)
 
+`SUMMARY_MODELS`, `GEMINI_REQUESTS_PER_DAY` and the two `LLM_OVERLOAD_*`
+limits are repo variables passed to every model-calling step of
+`daily-summary.yml` (until 2026-10-19 they were not, so setting them did
+nothing). An unset variable keeps the code default.
+
 1. **Billing on the AI Studio project** (paid tier). It lifts the 20-request
    free-tier cap and the free tier's 503 deprioritisation. At the 2026-10
    volume (≈20–30 requests a day of 5–20k input and 3–4k output tokens, so

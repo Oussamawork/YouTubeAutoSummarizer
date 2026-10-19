@@ -193,6 +193,8 @@ ASSET_ALIASES = {
     "NCINO": "NCNO",    # "nCino": its TICKER_ALIASES key is ticker-shaped, so only read from a ticker field
     "RSP": "RSP",       # "the broader market, RSP as an ETF": Invesco S&P 500 Equal Weight
     "ADLESIAN": "TEAM", "ATLESION": "TEAM",   # "Adlesian aus dem Softwarebereich"
+    "ADLESIN": "TEAM", "ATLÄSCHEN": "TEAM",   # Phantom 2026-10-12: "die Adlesin Aktie ... 240% im Plus"
+    "ATLASAN": "TEAM",                        # HKCM 2026-09-29: "Atlasan ist ein Bestandteil des Tech 33"
     "PALUNTEER": "PLTR", "PALANTIA": "PLTR", "THE TRADEDESK": "TTD", "TRADEDESK": "TTD",
     "VERTOV": "VRT",                          # "caterpillar, Vertov and Eaton"
     "MARLL": "MRVL",                          # "a connectivity company ... custom silicon"
@@ -208,6 +210,15 @@ ASSET_ALIASES = {
     "INTUIT": "INTU", "LAM RESEARCH": "LRCX", "TELADOC": "TDOC", "TELADOC HEALTH": "TDOC",
     "DUKE ENERGY": "DUK", "ROBIN HOOD": "HOOD", "ON HOLDING": "ONON", "ON HOLDINGS": "ONON",
     "NOKIA": "NOK", "UNITED HEALTH GROUP": "UNH", "DLOCAL": "DLO",
+    # named in claims extracted 2026-10-13..17 without a ticker
+    "LOWE'S": "LOW", "LOWES": "LOW",          # Parkev 2026-10-16: "Lowe's ... current market price is $186"
+    "TAIWAN SEMI": "TSM",                     # FinVid 2026-10-15: "I own Taiwan Semi"
+    # each the only listing of that name: TheStreet 2026-10-16 "GE Vernova ...
+    # supplying all the gas turbines"; Parkev 2026-10-13 "Workday forecasting
+    # 2028 fiscal year revenues" (a common word, see COMMON_WORD_NAMES); the
+    # model's own APLD / FIX beside "Applied Digital" / "Comfort System"
+    "GE VERNOVA": "GEV", "WORKDAY": "WDAY", "APPLIED DIGITAL": "APLD",
+    "COMFORT SYSTEMS": "FIX", "COMFORT SYSTEMS USA": "FIX", "COMFORT SYSTEM": "FIX",
     # crypto: the bare symbols are names too ("XRP", "ETH"), and Polygon's
     # token migrated from MATIC to POL in 2024
     "XRP": "XRP", "ETH": "ETH", "BTC": "BTC", "SOL": "SOL", "POLYGON": "POL", "VTHO": "VTHO",
@@ -307,7 +318,7 @@ UNPRICEABLE_TICKERS = {
 # asset only when written in capitals or followed by "stock" / "Aktie".
 # Read by claims (titles, subjects) and transcript_normalize (free text).
 COMMON_WORD_NAMES = frozenset({"STRATEGY", "AVALANCHE", "BLOCK", "BOOKING", "CARNIVAL", "NORWEGIAN", "COHERENT",
-                               "LILY", "PENDEL", "TKO", "UPSTART", "LUCID", "POLYGON", "TAO"})
+                               "LILY", "PENDEL", "TKO", "UPSTART", "LUCID", "POLYGON", "TAO", "WORKDAY"})
 
 # Name keys of ASSET_ALIASES that are ALSO another company's listed ticker:
 # "Ford" is Ford Motor (F), but FORD in a ticker field is Forward Industries
