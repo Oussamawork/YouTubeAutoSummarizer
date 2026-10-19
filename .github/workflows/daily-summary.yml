@@ -94,6 +94,15 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
           LLM_MODEL: ${{ vars.LLM_MODEL }}
+          # Capacity (docs/tdd-gemini-transcripts.md § 10): the models allowed
+          # to write summaries and claims (summarizer.SUMMARY_MODELS_DEFAULT
+          # when unset; add a third model or a second provider here), the
+          # per-model daily request cap (20 on the free tier; raise it after
+          # enabling billing) and the 5xx overload breaker (2 / 3).
+          SUMMARY_MODELS: ${{ vars.SUMMARY_MODELS }}
+          GEMINI_REQUESTS_PER_DAY: ${{ vars.GEMINI_REQUESTS_PER_DAY }}
+          LLM_OVERLOAD_RETRIES: ${{ vars.LLM_OVERLOAD_RETRIES }}
+          LLM_OVERLOAD_MAX_FAILED_PER_RUN: ${{ vars.LLM_OVERLOAD_MAX_FAILED_PER_RUN }}
           # Optional behavior tuning (repo variables, all have defaults):
           # DAILY_DIGEST=true bundles all of a run's summaries into one message;
           # MAX_VIDEOS_PER_RUN caps videos processed per channel per run.
@@ -159,14 +168,24 @@ jobs:
           LLM_LIVE_COUNT_TOKENS: ${{ vars.LLM_LIVE_COUNT_TOKENS }}
           TRANSCRIPT_LANGUAGES: ${{ vars.TRANSCRIPT_LANGUAGES }}
           RESEARCH_REFETCH_MAX_VIDEOS: ${{ vars.RESEARCH_REFETCH_MAX_VIDEOS }}
+          SUMMARY_MODELS: ${{ vars.SUMMARY_MODELS }}
+          GEMINI_REQUESTS_PER_DAY: ${{ vars.GEMINI_REQUESTS_PER_DAY }}
+          LLM_OVERLOAD_RETRIES: ${{ vars.LLM_OVERLOAD_RETRIES }}
+          LLM_OVERLOAD_MAX_FAILED_PER_RUN: ${{ vars.LLM_OVERLOAD_MAX_FAILED_PER_RUN }}
 
       - name: Retry pending research extractions
         # Videos whose summary went out but whose claims failed, were
         # quota-deferred or only partially covered are retried here from
-        # their stored transcripts (no transcript credit). Bounded per run
-        # and quota-aware; never touches delivery state.
+        # their stored transcripts (no transcript credit). --adopt-stored
+        # first gives a research record to every stored transcript that never
+        # got one (its summary was quota-deferred until the video left the
+        # feed, or failed), so those creators' calls reach the claims and the
+        # creators-vs-market tracker too. --import-candidates then stores any
+        # committed offline extractions (data/research/candidates/) through
+        # the same validation as a model response, with no model request.
+        # Bounded per run and quota-aware; never touches delivery state.
         if: ${{ !inputs.video_url }}
-        run: python research_backfill.py --retry
+        run: python research_backfill.py --adopt-stored --import-candidates --retry
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -179,6 +198,10 @@ jobs:
           LLM_LIVE_CAPABILITIES: ${{ vars.LLM_LIVE_CAPABILITIES }}
           LLM_LIVE_COUNT_TOKENS: ${{ vars.LLM_LIVE_COUNT_TOKENS }}
           RESEARCH_BACKFILL_MAX_VIDEOS: ${{ vars.RESEARCH_BACKFILL_MAX_VIDEOS }}
+          SUMMARY_MODELS: ${{ vars.SUMMARY_MODELS }}
+          GEMINI_REQUESTS_PER_DAY: ${{ vars.GEMINI_REQUESTS_PER_DAY }}
+          LLM_OVERLOAD_RETRIES: ${{ vars.LLM_OVERLOAD_RETRIES }}
+          LLM_OVERLOAD_MAX_FAILED_PER_RUN: ${{ vars.LLM_OVERLOAD_MAX_FAILED_PER_RUN }}
 
       - name: Persist dedup state, signals and research data
         if: always()  # commit progress even if the scraper step failed mid-run

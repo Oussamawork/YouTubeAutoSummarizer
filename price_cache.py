@@ -6,9 +6,11 @@ expensive — the free Twelve Data tier allows 8 requests/minute, and the signal
 dataset already spans ~180 distinct symbols, so a cold run paces out past any
 sensible workflow timeout.
 
-So closes are cached in `data/prices.json` and topped up by a separate weekly
-job (`warm-prices.yml`, Sundays) that has the time to be slow. The pulse and the
-scorecard then read the cache and only reach the network for what it is missing.
+So closes are cached in `data/prices.json` and topped up by a separate job
+(`warm-prices.yml`, Sundays and Fridays at 06:00 UTC) that has the time to be
+slow. The creators-vs-market tracker (Friday report, Monday pulse) reads the
+cache only; the strict scorecard reads it first and only reaches the network
+for what it is missing.
 
 Cache shape, keyed by our internal, provider-independent symbol (`nvda.us`,
 `btcusd`; see channel_scorecard.symbol_for):
@@ -33,9 +35,11 @@ from log import log_info, log_warn
 
 CACHE_FILE = "data/prices.json"
 CACHE_VERSION = 1
-# Closes older than this are dropped when the cache is saved. The longest
-# horizon the scorecard scores is 30 days, so a year of history is already
-# generous; the bound stops the committed file growing without limit.
+# Closes older than this are dropped when the cache is saved, so the
+# committed file cannot grow without limit — except where a caller says a
+# range still needs them (save's keep_from: the warm job passes every needed
+# range's start, because a strict-scorecard forecast's entry close is needed
+# until it matures, and stated horizons run to 547 days and beyond).
 MAX_HISTORY_DAYS = 400
 
 
@@ -97,13 +101,17 @@ def load(path=CACHE_FILE):
     return cache
 
 
-def save(cache, path=CACHE_FILE, today=None):
-    """Write the cache, trimming history beyond MAX_HISTORY_DAYS. Returns True
-    on success; a write failure is logged, never raised."""
+def save(cache, path=CACHE_FILE, today=None, keep_from=None):
+    """Write the cache, trimming history beyond MAX_HISTORY_DAYS — or, for a
+    symbol in `keep_from` ({symbol: date}), before the earlier of that bound
+    and the given date (a range still needed). Returns True on success; a
+    write failure is logged, never raised."""
     today = today or datetime.now(timezone.utc).date()
-    cutoff = today - timedelta(days=MAX_HISTORY_DAYS)
+    bound = today - timedelta(days=MAX_HISTORY_DAYS)
+    keep_from = keep_from or {}
     symbols = {}
     for symbol, entry in sorted(cache.items()):
+        cutoff = min(bound, keep_from[symbol]) if symbol in keep_from else bound
         closes = {d.isoformat(): c for d, c in sorted(entry["closes"].items())
                   if d >= cutoff}
         if not closes:

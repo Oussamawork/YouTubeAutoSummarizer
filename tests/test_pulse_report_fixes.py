@@ -128,7 +128,8 @@ def test_single_creator_assets_are_not_ranked_and_html_is_escaped():
     inputs = mp._canonical_pulse_inputs(7, date(2026, 7, 12), lambda *a: {}, claims=claims)
     text = mp.build_canonical_pulse(inputs, date(2026, 7, 12))
     agree = text.split("Where creators agree")[1].split("\n\n")[0]
-    assert "NVDA — 2 of 2 creators bullish · horizon: long-term" in agree and "PLTR" not in agree
+    # No horizon fragment: 86% of views name none, and it counted claims, not creators.
+    assert "NVDA — 2 of 2 creators bullish" in agree and "horizon" not in agree and "PLTR" not in agree
     html = mp.build_canonical_pulse(inputs, date(2026, 7, 12), html=True)
     assert "<b>Where creators agree</b>" in html and "<b>NVDA</b>" in html
     assert mp._Fmt(True).b("B & Co <x>") == "<b>B &amp; Co &lt;x&gt;</b>"

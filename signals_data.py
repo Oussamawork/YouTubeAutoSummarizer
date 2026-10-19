@@ -7,10 +7,13 @@ from any of them, which is what lets those modules import each other freely:
 before this split `market_pulse` was both the data layer and a report, so
 `channel_scorecard` had to import it at the top while it imported
 `channel_scorecard` lazily inside functions, and `ticker_resolver` compared an
-exception's class *name* because it could not import the class.
+exception's class *name* because it could not import the class. The one
+upward reference is a call-time read of instruments.REGISTRY in
+canonical_ticker (instruments imports this module, so it is deferred).
 """
 import json
 import os
+import re
 from collections import Counter
 from datetime import datetime
 
@@ -75,9 +78,23 @@ def _in_window(record, start, end):
 # counts, diluting consensus, breaking flip detection) and every ticker-less
 # directional call is invisible to the scorecard. A curated table in code is
 # deterministic and auditable in a way a model guess never is.
-# Keys are the normalized (upper, single-spaced) names observed in the dataset;
-# private companies (SpaceX, OpenAI, ...) are deliberately absent — they have
-# no ticker, and aggregating them by name is the correct behavior.
+# Keys are the normalized (upper, single-spaced) names observed in the dataset,
+# the transcripts' misspellings included ("ADLESIAN" is HKCM's spoken
+# Atlassian). Private companies (OpenAI, Anthropic, ...) are deliberately
+# absent — they have no ticker, and aggregating them by name is the correct
+# behavior. SpaceX is no longer one of them: it has been listed as SPCX since
+# June 2026 (the evidence is at TICKER_ALIASES["SPACEX"]).
+#
+# Only certain or high-confidence mappings belong here, and never a common
+# word, a channel's private shorthand or a market subject. Couch Investor's
+# "New" (Nu Holdings) and "Core" (CoreWeave) and HKCM's "XP" (XPeng) are
+# channel-scoped spellings; "GOLD", "OIL", "S&P 500" and "NASDAQ" are market
+# subjects, not securities; "TARGET", "NICE", "GRAB", "GM", "MERCK" and "COKE"
+# are words or ambiguous names (NICE and GRAB still resolve from a title or
+# spoken ticker). Every key is also matched in free text
+# (transcript_normalize._ALIAS_RE), and every value needs an
+# instruments.REGISTRY row or an UNPRICEABLE_TICKERS entry:
+# tests/test_ticker_corrections.py pins the deny list and the registry rule.
 ASSET_ALIASES = {
     # crypto
     "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL", "CHAINLINK": "LINK",
@@ -117,15 +134,105 @@ ASSET_ALIASES = {
     "NOVO NORDISK": "NVO", "STARBUCKS": "SBUX", "PEPSI": "PEP", "PEPSICO": "PEP",
     "UNITEDHEALTH": "UNH", "UNITED HEALTH": "UNH", "UNITEDHEALTH GROUP": "UNH",
     "MACY'S": "M", "MACYS": "M", "PELOTON": "PTON", "PLANET LABS": "PL",
-    "LULULEMON": "LULU", "ELI LILLY": "LLY", "LILLY": "LLY", "CAVA": "CAVA",
+    "LULULEMON": "LULU", "LULU": "LULU", "ELI LILLY": "LLY", "LILLY": "LLY", "CAVA": "CAVA",
     "CAVA GROUP": "CAVA", "NIBIUS": "NBIS", "MARCADO LIBRE": "MELI", "CARNIVAL": "CCL",
     "NORWEGIAN": "NCLH", "NORWEGIAN CRUISE LINE": "NCLH", "DIEBOLD": "DBD", "COINBASE": "COIN", "STRATEGY": "MSTR", "MICROSTRATEGY": "MSTR",
+    # --- 2026-10 audit of the canonical claims nothing resolved. Certain or
+    # high-confidence mappings only; where a speaker stated a price it was
+    # checked against the cached close ("current market price is 262" vs
+    # mcd.us 255.69, "176" vs ftnt.us 180.95, "$1,700" vs meli.us 1,696.56).
+    "SPACEX": "SPCX", "SPACE X": "SPCX",   # listed since June 2026, see TICKER_ALIASES
+    # technology
+    "FORTINET": "FTNT", "QUALCOMM": "QCOM", "RUBRIK": "RBRK", "RUBRIC": "RBRK", "SERVICE NOW": "NOW",
+    "IONQ": "IONQ", "SHOPIFY": "SHOP", "FICO": "FICO", "FAIR ISAAC": "FICO", "DELL": "DELL",
+    "TEXAS INSTRUMENTS": "TXN", "HEWLETT PACKARD ENTERPRISE": "HPE", "OKTA": "OKTA", "SENTINELONE": "S",
+    "MONGODB": "MDB", "LUMENTUM": "LITE", "APPLOVIN": "APP", "FIGMA": "FIG", "AMPHENOL": "APH",
+    "KLA": "KLAC", "TSM": "TSM", "APPLIED OPTO ELECTRONICS": "AAOI", "APPLIED OPTOELECTRONICS": "AAOI",
+    # communication services
+    "GOOGLE ALPHABET": "GOOGL", "PINTEREST": "PINS", "DISNEY": "DIS", "WALT DISNEY": "DIS", "AT&T": "T",
+    "VERIZON": "VZ", "T-MOBILE": "TMUS", "TMOBILE US": "TMUS", "TAKE-TWO": "TTWO",
+    "TAKE-TWO INTERACTIVE": "TTWO", "TKO": "TKO",
+    # consumer
+    "MCDONALD'S": "MCD", "MCDONALDS": "MCD", "COCA-COLA": "KO", "COCA COLA": "KO", "PEPSI-COLA": "PEP",
+    "PROCTER & GAMBLE": "PG", "COSTCO": "COST", "HERSHEY": "HSY", "SMUCKER": "SJM", "J.M. SMUCKER": "SJM",
+    "GENERAL MILLS": "GIS", "GENERAL MILLS INCORPORATED": "GIS", "TJX": "TJX", "TJX COMPANIES": "TJX",
+    "DICK'S SPORTING GOODS": "DKS", "DECKERS": "DECK", "GARMIN": "GRMN", "TEXAS ROADHOUSE": "TXRH",
+    "POOL CORPORATION": "POOL", "DRAFTKINGS": "DKNG", "SONY": "SONY", "SONY CORPORATION": "SONY",
+    "SONY GROUP": "SONY", "FORD": "F", "GENERAL MOTORS": "GM", "LUCID": "LCID", "RIVIAN": "RIVN",
+    "XPENG": "XPEV", "NIO": "NIO",
+    # financials (the big banks are in TICKER_ALIASES: speakers quote them as
+    # sources, so their names must not count as free-text asset mentions)
+    "UPSTART": "UPST", "ROBINHOOD": "HOOD", "CITI": "C", "NU HOLDING": "NU", "GRAB HOLDINGS": "GRAB",
+    # health care
+    "OSCAR HEALTH": "OSCR", "OCUGEN": "OCGN", "ILLUMINA": "ILMN", "INTUITIVE SURGICAL": "ISRG",
+    "CRISPR THERAPEUTICS": "CRSP", "CANOPY GROWTH": "CGC", "NOVO": "NVO",
+    # cannabis (Phantom by HKCM 2026-09: "Curaleaf, Aurora Cannabis, aber auch Green Thumb Industries")
+    "AURORA CANNABIS": "ACB", "CURALEAF": "CURLF", "CURALEAF HOLDINGS": "CURLF",
+    "GREEN THUMB INDUSTRIES": "GTBIF",
+    # industrials, utilities, energy, materials, real estate
+    "BLOOM ENERGY": "BE", "WASTE MANAGEMENT": "WM", "JOBY": "JOBY", "JOBY AVIATION": "JOBY", "BOEING": "BA",
+    "RAYTHEON": "RTX", "CATERPILLAR": "CAT", "EATON": "ETN", "QUANTA SERVICES": "PWR", "COPART": "CPRT",
+    "PACCAR": "PCAR", "LYFT": "LYFT", "FERGUSON ENTERPRISES": "FERG", "TUTOR PERINI": "TPC",
+    "VOYAGER TECHNOLOGIES": "VOYG", "AST SPACE MOBILE": "ASTS", "SERVE ROBOTICS": "SERV", "FIVERR": "FVRR",
+    "CEG": "CEG", "CONSTELLATION ENERGY": "CEG", "AMERICAN ELECTRIC POWER": "AEP", "PHILLIPS 66": "PSX",
+    "VALERO": "VLO", "FREEPORT-MCMORAN": "FCX", "DIGITAL REALTY": "DLR",
+    # A bare recorded "DOW" is the index (NOT_A_TICKER); the company name keeps
+    # the chemicals stock (NYSE: DOW) priceable.
+    "DOW INC": "DOW", "DOW INC.": "DOW", "DOW CHEMICAL": "DOW",
+    # Barrick Gold became Barrick Mining and moved from NYSE: GOLD to NYSE: B
+    # in May 2025; whatever trades as GOLD now is neither Barrick nor the metal.
+    "BARRICK": "B", "BARRICK GOLD": "B", "BARRICK GOLD CORPORATION": "B", "BARRICK MINING": "B",
+    "BARRICK MINING CORPORATION": "B",
+    "FRESNILLO": "FRESNILLO", "FRESNILLO PLC": "FRESNILLO",   # London (FRES); unpriceable, not NYSE: FR
+    # bitcoin miners and AI data centres
+    "MARA": "MARA", "MARA HOLDINGS": "MARA", "RIOT PLATFORMS": "RIOT", "CLEANSPARK": "CLSK",
+    "TERAWULF": "WULF",
+    # transcription variants, each read from its evidence
+    "MARCADO LIBÉ": "MELI", "MARCADO LIBE": "MELI", "MARCADO LIBRA": "MELI",   # "back under $1,700 per share"
+    "ELI LIY": "LLY", "LILY": "LLY", "NOVOR NORDISK": "NVO", "NOVO NORDLESS": "NVO",
+    "NCINO": "NCNO",    # "nCino": its TICKER_ALIASES key is ticker-shaped, so only read from a ticker field
+    "RSP": "RSP",       # "the broader market, RSP as an ETF": Invesco S&P 500 Equal Weight
+    "ADLESIAN": "TEAM", "ATLESION": "TEAM",   # "Adlesian aus dem Softwarebereich"
+    "ADLESIN": "TEAM", "ATLÄSCHEN": "TEAM",   # Phantom 2026-10-12: "die Adlesin Aktie ... 240% im Plus"
+    "ATLASAN": "TEAM",                        # HKCM 2026-09-29: "Atlasan ist ein Bestandteil des Tech 33"
+    "PALUNTEER": "PLTR", "PALANTIA": "PLTR", "THE TRADEDESK": "TTD", "TRADEDESK": "TTD",
+    "VERTOV": "VRT",                          # "caterpillar, Vertov and Eaton"
+    "MARLL": "MRVL",                          # "a connectivity company ... custom silicon"
+    "FREQUENT MAC MORAN": "FCX",              # "predominantly copper ... gold"
+    "TEROWOLF": "WULF", "TUDOR PERINI": "TPC", "CROWD STRIKE": "CRWD", "WESTERN DIG": "WDC",
+    # read from the 2026-10-17 backlog extraction (data/research/candidates/)
+    "PALENTEER": "PLTR", "CORE WEAVE": "CRWV", "VERTIVE": "VRT", "VERDIVE": "VRT",
+    "LAMENTUM": "LITE", "LUMENUM": "LITE",    # "companies like Lumenum ... this architectural upgrade"
+    "SANDIX": "SNDK", "SANDIS": "SNDK",       # beside Micron and Western Digital in memory talk
+    # companies named in full that had no entry (each the only listing of that name)
+    "DUOLINGO": "DUOL", "ZETA GLOBAL": "ZETA", "DOMINO'S": "DPZ", "DOMINOS": "DPZ",
+    "DOMINO'S PIZZA": "DPZ", "DATADOG": "DDOG", "JOHNSON AND JOHNSON": "JNJ", "JOHNSON & JOHNSON": "JNJ",
+    "INTUIT": "INTU", "LAM RESEARCH": "LRCX", "TELADOC": "TDOC", "TELADOC HEALTH": "TDOC",
+    "DUKE ENERGY": "DUK", "ROBIN HOOD": "HOOD", "ON HOLDING": "ONON", "ON HOLDINGS": "ONON",
+    "NOKIA": "NOK", "UNITED HEALTH GROUP": "UNH", "DLOCAL": "DLO",
+    # named in claims extracted 2026-10-13..17 without a ticker
+    "LOWE'S": "LOW", "LOWES": "LOW",          # Parkev 2026-10-16: "Lowe's ... current market price is $186"
+    "TAIWAN SEMI": "TSM",                     # FinVid 2026-10-15: "I own Taiwan Semi"
+    # each the only listing of that name: TheStreet 2026-10-16 "GE Vernova ...
+    # supplying all the gas turbines"; Parkev 2026-10-13 "Workday forecasting
+    # 2028 fiscal year revenues" (a common word, see COMMON_WORD_NAMES); the
+    # model's own APLD / FIX beside "Applied Digital" / "Comfort System"
+    "GE VERNOVA": "GEV", "WORKDAY": "WDAY", "APPLIED DIGITAL": "APLD",
+    "COMFORT SYSTEMS": "FIX", "COMFORT SYSTEMS USA": "FIX", "COMFORT SYSTEM": "FIX",
+    # crypto: the bare symbols are names too ("XRP", "ETH"), and Polygon's
+    # token migrated from MATIC to POL in 2024
+    "XRP": "XRP", "ETH": "ETH", "BTC": "BTC", "SOL": "SOL", "POLYGON": "POL", "VTHO": "VTHO",
+    "VETHOR": "VTHO", "PENDLE": "PENDLE", "PENDEL": "PENDLE", "AVAX": "AVAX", "AVALANCHE": "AVAX",
+    "SUI": "SUI", "SUIE": "SUI", "TAO": "TAO", "BITTENSOR": "TAO", "VECHAIN": "VET", "POLKADOT": "DOT",
 }
 
 # Trailing words speakers attach to a company name ("Amazon stock", "Nvidia
-# shares") that are not part of it: stripped before the alias lookup so the
-# asset folds into its ticker instead of aggregating under a second key.
-_NAME_SUFFIXES = (" STOCK", " STOCKS", " SHARES", " SHARE", " AKTIE", " AKTIEN", " INC", " INC.")
+# shares", "Canopy Growth-Aktie", "Sony Corporation") that are not part of it:
+# stripped before the alias lookup so the asset folds into its ticker instead
+# of aggregating under a second key.
+_NAME_SUFFIXES = (" STOCK", " STOCKS", " SHARES", " SHARE", " AKTIE", " AKTIEN", "-AKTIE", "-AKTIEN",
+                  " INC", " INC.", " CORP", " CORP.", " CORPORATION", " PLC")
+NAME_SUFFIXES = _NAME_SUFFIXES   # public: claims.py strips the same words
 
 # Recorded-ticker variants folded to one canonical symbol: dual share classes
 # and renames that speakers use interchangeably would otherwise still split an
@@ -134,6 +241,7 @@ TICKER_ALIASES = {
     "GOOG": "GOOGL",   # Alphabet share classes
     "UA": "UAA",       # Under Armour share classes
     "SQ": "XYZ",       # Block's 2025 ticker change
+    "MATIC": "POL",    # Polygon's token migrated from MATIC to POL in 2024
     # Speakers say the company name and the extractor records it in the ticker
     # field. Left alone these split one asset across two buckets — the dataset
     # carried both AAPL and APPLE, diluting mention counts and consensus in
@@ -142,24 +250,99 @@ TICKER_ALIASES = {
     "AMAZON": "AMZN", "MICROSOFT": "MSFT", "TESLA": "TSLA", "NETFLIX": "NFLX",
     "SALESFORCE": "CRM", "WESTERN DIGITAL": "WDC", "MASTEC": "MTZ",
     "NCINO": "NCNO", "BLOCK": "XYZ", "PALANTIR": "PLTR", "BROADCOM": "AVGO",
+    "XPENG": "XPEV",   # XPeng's NYSE ADR; nothing is listed as XPENG
+    # Banks resolve as a claim's subject ("I always like Citi ... and Goldman
+    # has always been the superior") but are kept out of ASSET_ALIASES, whose
+    # keys also count as free-text mentions: in "Goldman expects the stock to
+    # reach $200" the bank is the source, and "the stock" is whatever the
+    # speaker named before. Name-shaped keys here are read as names too.
+    "GOLDMAN": "GS", "GOLDMAN SACHS": "GS", "JP MORGAN": "JPM", "JPMORGAN": "JPM",
+    "BANK OF AMERICA": "BAC", "CITIGROUP": "C",
+    # A ratings agency is quoted as a source the same way ("Moody's
+    # downgraded ..."), but as a claim's subject it is the stock.
+    "MOODY'S": "MCO", "MOODYS": "MCO",
     # Tickers the transcript got wrong outright.
-    "SPACEX": "SPCX",  # verified live 2026-08-17: spcx.us returns closes,
-                       # while symbol search only surfaces Thai DRs and 3x
-                       # leveraged ETPs, which are the wrong instrument
+    # SpaceX has traded as SPCX since its June 2026 IPO. "spcx.us returns
+    # closes" only proved that a series exists; the data says it is SpaceX:
+    #   - creators type the ticker in their titles: Parkev 2026-08-04, 08-07
+    #     and 09-14 ("... | SPCX Stock Analysis"), and HKCM 2026-10-09 says
+    #     "SpaceX mit dem Ticker SPCX";
+    #   - stated prices sit within ~1% of the spcx.us closes: "IPO Levels ...
+    #     ungefähr 147 USD" (Phantom 09-06) vs 147.95 on 09-04, "$150 per
+    #     share" (Parkev 09-14) vs 151.21 / 148.15 on 09-11 / 09-14, and 469
+    #     USD at +172% (Phantom 10-06) implies 172.4 vs 171.92 on 10-06;
+    #   - the venue is Nasdaq (FinVid 09-15), as the XNAS registry row says.
+    # Symbol search only surfaces Thai DRs and 3x leveraged ETPs, which are
+    # the wrong instrument.
+    "SPACEX": "SPCX",
     "NEBL": "NBIS",    # Nebius is NBIS
     "RUBY": "RBRK",    # "Rubric" mis-transcribed; the company is Rubrik
     "PAS": "PAAS",     # Pan American Silver
+    "KLA": "KLAC",     # KLA Corp trades as KLAC
+    "I-REN": "IREN",   # Iris Energy, renamed IREN
 }
 
 # Recorded tickers that no US listing can price: private companies, and
 # foreign or unlisted names the speakers discuss by local ticker. Kept
 # explicit so they are skipped up front instead of spending a price request
 # per run to rediscover a 404. They still aggregate by name in the pulse —
-# only the price lookup is suppressed.
+# only the price lookup is suppressed. Only entries canonical_ticker can
+# actually return belong here: ADYEN and BASF were dropped because the alias
+# table and the learned map turn them into the ADRs ADYEY / BASFY first.
 UNPRICEABLE_TICKERS = {
     "OPENAI", "STRIPE", "BYTEDANCE", "ANTHROPIC", "WAYMO", "ANDURIL",  # private
     "CXMT", "YMTC",                             # unlisted Chinese memory makers
-    "SK HYNIX", "BASF", "VOW", "P911", "ADYEN",  # non-US listings
+    "SK HYNIX", "VOW", "P911",                  # non-US listings
+    # SK Hynix's 2026 US listing and Anthropic's pending IPO are on the
+    # ticker audit's needs-verification list: neither ticker is stated in the
+    # data, so both stay unpriceable until a catalogue lookup confirms one.
+    "FRESNILLO",                                # London-listed (FRES)
+    # NYSE "GOLD" is neither Barrick (NYSE: B since May 2025) nor the metal;
+    # the metal is priced only through a labelled proxy (GLD), never gold.us.
+    "GOLD",
+    "IRNT",                                     # IronNet, delisted in 2023
+    # Korean, Taiwanese and Shanghai codes: every one became a junk ".us"
+    # symbol that each cache warm retried.
+    "000660", "000660.KS", "005930", "005930.KS", "2454.TW", "688041.SS",
+    "ETHBTC",                                   # a ratio, not an instrument
+    # Legacy rows' type rule built these into the wrong company (ticker_audit
+    # KNOWN_WRONG_SYMBOLS): TheStreet's "Mogu ... space propulsion" is Moog
+    # (MOG.A, on the needs-verification list), not MOGU Inc.; "RCI" was the
+    # Columbia Research Enhanced Core ETF, not Rogers Communications.
+    "MOGU", "RCI",
+}
+
+# Curated names that are also ordinary words ("our strategy", "outrun the
+# avalanche", "das Pendel", "more upstart type companies", "a lucid look"):
+# in a title, inside a subject or in free transcript text they name the
+# asset only when written in capitals or followed by "stock" / "Aktie".
+# Read by claims (titles, subjects) and transcript_normalize (free text).
+COMMON_WORD_NAMES = frozenset({"STRATEGY", "AVALANCHE", "BLOCK", "BOOKING", "CARNIVAL", "NORWEGIAN", "COHERENT",
+                               "LILY", "PENDEL", "TKO", "UPSTART", "LUCID", "POLYGON", "TAO", "WORKDAY"})
+
+# Name keys of ASSET_ALIASES that are ALSO another company's listed ticker:
+# "Ford" is Ford Motor (F), but FORD in a ticker field is Forward Industries
+# (Nasdaq: FORD). A recorded or spoken ticker is never folded through these.
+LISTED_TICKER_KEYS = frozenset({"FORD"})
+
+# Index and benchmark names that titles and speakers put in the ticker field
+# ("NASDAQ kämpft mit dem Allzeithoch!"). None is a security — Nasdaq Inc is
+# NDAQ, and nasdaq.us or spx.us price nothing or the wrong thing — so a
+# recorded value in this set is dropped and the name decides: an index never
+# becomes a ticker, and the subject aggregates under its name.
+NOT_A_TICKER = frozenset({
+    "NASDAQ", "NDX", "SPX", "S&P 500", "S&P", "SP500", "DAX", "DXY", "NIKKEI", "DOW", "DJI", "DJIA", "VIX",
+})
+
+# A TICKER_ALIASES key shaped like a ticker (GOOG, RUBY, NEBL, PAS) is only
+# ever read from the ticker field: as a spoken name it means something else.
+_TICKER_SHAPED = re.compile(r"^[A-Z]{1,5}$")
+
+# A company's ticker before a rename, now held by another issuer (so no global
+# TICKER_ALIASES fold is safe): a record naming the company under its old
+# ticker means the company. Keyed by the current ticker.
+FORMER_TICKERS = {
+    "B": frozenset({"GOLD"}),   # Barrick Gold -> Barrick Mining, NYSE: GOLD -> B in May 2025
 }
 
 
@@ -167,13 +350,29 @@ def _normalized_name(asset):
     return " ".join((asset.get("name") or "").split()).upper()
 
 
-def _alias_for_name(name):
-    """Curated ticker for a spoken name, tolerating "<name> stock"."""
+def _name_alias(name):
+    """The curated ticker for an exact normalized name: ASSET_ALIASES, then
+    the name-shaped TICKER_ALIASES keys (SPACEX, MASTEC, I-REN), the same
+    two tables claims.resolve_entity reads."""
     if name in ASSET_ALIASES:
         return ASSET_ALIASES[name]
+    if name in TICKER_ALIASES and not _TICKER_SHAPED.match(name):
+        return TICKER_ALIASES[name]
+    return None
+
+
+def _alias_for_name(name):
+    """Curated ticker for a spoken name, tolerating "<name> stock"."""
+    if not name:
+        return None
+    found = _name_alias(name)
+    if found:
+        return found
     for suffix in _NAME_SUFFIXES:
-        if name.endswith(suffix) and name[: -len(suffix)] in ASSET_ALIASES:
-            return ASSET_ALIASES[name[: -len(suffix)]]
+        if name.endswith(suffix):
+            found = _name_alias(name[: -len(suffix)])
+            if found:
+                return found
     return None
 
 
@@ -237,33 +436,73 @@ def learned_ticker_entries(path=LEARNED_TICKERS_FILE):
     return _LEARNED_ENTRIES
 
 
+def _fold_recorded(ticker):
+    """A recorded ticker folded through the curated tables: a company name in
+    the ticker field ("SOLANA") through ASSET_ALIASES, then share classes,
+    renames and mis-transcriptions through TICKER_ALIASES."""
+    if ticker and ticker not in TICKER_ALIASES and ticker in ASSET_ALIASES and ticker not in LISTED_TICKER_KEYS:
+        # No listing prices a name (Twelve Data 404s SOLANA/USD) and it splits
+        # the asset from its real ticker. Every alias whose key is already a
+        # ticker maps to itself, so real tickers pass through unchanged.
+        ticker = ASSET_ALIASES[ticker]
+    return TICKER_ALIASES.get(ticker, ticker)
+
+
+def _curated_decision(ticker):
+    """True when the curated tables already decided what `ticker` is: an
+    UNPRICEABLE_TICKERS entry or an instruments.REGISTRY row. The registry is
+    read lazily — instruments imports this module, and by the time a ticker
+    is resolved both are loaded."""
+    if ticker in UNPRICEABLE_TICKERS:
+        return True
+    import instruments
+    return ticker in instruments.REGISTRY
+
+
 def canonical_ticker(asset):
     """
-    The asset's ticker, taking the recorded one first and falling back to the
-    curated alias table, then to the learned map. None when none of them
-    knows one.
+    The asset's ticker after the curated tables, or None when nothing knows
+    one. `asset` is {"ticker", "name"}; any other key (e.g. "channel") is
+    ignored. The rules, in order:
 
-    Order is deliberate: the curated table is hand-checked and wins, so a
-    learned entry can never quietly override a decision someone made on
-    purpose. Learned entries only fill gaps the table doesn't cover.
+    1. An index name in the ticker field (NOT_A_TICKER: NASDAQ, SPX, DAX, ...)
+       is dropped and the name decides; an index never becomes a ticker.
+    2. A curated name alias (ASSET_ALIASES after suffix stripping, plus the
+       name-shaped TICKER_ALIASES keys) outranks a recorded ticker that
+       contradicts it. Such records name another company: "Sony Corporation"
+       recorded as SY (So-Young, ~$2.6) is SONY, "CoreWeave" recorded as CRWE
+       (Crown Equity, a penny stock) is CRWV. Agreement is judged after
+       folding the recorded ticker (Google/GOOG -> GOOGL; Nvidia/NVDA is
+       unchanged). A recorded ticker that is itself a curated decision — a
+       registered instrument or an UNPRICEABLE entry — is kept, unless it is
+       the named company's former ticker ("Barrick Mining Corporation" under
+       its pre-2025 GOLD is B).
+    3. Otherwise the recorded ticker, folded through ASSET_ALIASES (a company
+       name in the ticker field, "SOLANA" -> SOL) and TICKER_ALIASES (share
+       classes, renames, mis-transcriptions).
+    4. The learned map only fills gaps: it is consulted only when neither
+       curated table decided, so a learned entry can never quietly override
+       a decision someone made on purpose.
     """
-    ticker = (asset.get("ticker") or "").strip().upper()
+    recorded = (asset.get("ticker") or "").strip().upper()
+    if recorded in NOT_A_TICKER:
+        recorded = ""
     name = _normalized_name(asset)
-    if not ticker:
-        ticker = _alias_for_name(name)
-    elif ticker not in TICKER_ALIASES and ticker in ASSET_ALIASES:
-        # A company name recorded in the ticker field ("SOLANA"): no listing
-        # prices it (Twelve Data 404s SOLANA/USD) and it splits the asset from
-        # its real ticker. Every alias whose key is already a ticker maps to
-        # itself, so real tickers pass through unchanged.
-        ticker = ASSET_ALIASES[ticker]
-    if ticker and ticker in TICKER_ALIASES:
-        return TICKER_ALIASES[ticker]
+    folded = _fold_recorded(recorded)
+    curated = _alias_for_name(name)
+    if curated:
+        curated = TICKER_ALIASES.get(curated, curated)
+        if (not folded or folded == curated or not _curated_decision(folded)
+                or folded in FORMER_TICKERS.get(curated, ())):
+            return curated
+        return folded
+    if recorded in ASSET_ALIASES or recorded in TICKER_ALIASES:
+        return folded
     learned = learned_tickers()
-    for key in filter(None, (ticker, name)):
-        if key in learned:
+    for key in (recorded, name):
+        if key and key not in NOT_A_TICKER and key in learned:
             return learned[key]
-    return ticker or None
+    return recorded or None
 
 
 def _asset_key(asset):

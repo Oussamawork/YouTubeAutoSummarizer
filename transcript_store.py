@@ -138,6 +138,25 @@ def reject_transcript(video_id, reason, directory=None, index_path=None):
     return meta
 
 
+def load_index(index_path=None):
+    """The transcript index rows, oldest first (rejected captures included,
+    flagged `rejected`). An unreadable line is skipped; never raises."""
+    index_path = index_path or TRANSCRIPT_INDEX
+    rows = []
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("video_id"):
+                    rows.append(row)
+    except OSError:
+        pass
+    return rows
+
+
 def load_transcript(video_id, digest=None, directory=None):
     """The stored payload (metadata + raw_transcript) or None."""
     path = transcript_path(video_id, digest, directory=directory)

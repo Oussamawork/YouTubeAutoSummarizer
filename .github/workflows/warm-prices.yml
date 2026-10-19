@@ -2,13 +2,32 @@ name: Warm Price Cache
 
 # The price provider's free tier allows 8 requests/minute and the dataset spans
 # hundreds of symbols, so this job — not the Monday pulse or the Friday
-# scorecard — is the one allowed to be slow. It tops up data/prices.json ahead
-# of both. Closes are immutable, so a covered symbol is never refetched: only
-# new tickers and still-open horizons cost anything after the first run.
+# report — is the one allowed to be slow. It tops up data/prices.json twice a
+# week, ahead of each:
+#   - Sundays 06:00 UTC, for the Monday pulse (Friday's close);
+#   - Fridays 06:00 UTC, for the 16:00 UTC Friday report (Thursday's close).
+# Both reports mark every creator's calls to market from this cache alone
+# (creator_tracker.cache_fetcher, never a live request), so the warm covers
+# everything the tracker reads (creator_tracker.needed_price_ranges): each
+# call's symbol from the day before the call, the S&P 500 and Bitcoin
+# benchmarks, and the market context (SPY, QQQ, BTC, ETH).
+# Requests stop at the last completed session (crypto: yesterday, UTC), so the
+# warm day's in-progress bar is never stored as a close, and refetching an
+# open range replaces any partial bar stored before. Closes are immutable: a
+# covered range is never refetched, and each open range costs one request per
+# symbol per run (a closed call's range ends soon after it closes; the
+# tracker looks back TRACKER_LOOKBACK_DAYS, 180) — about 150-250 a run today,
+# 25-40 minutes at 6/minute. The run is bounded however the book grows:
+# requests go out in priority order (S&P 500 and Bitcoin first, then the
+# tracker's symbols, stalest first), none starts after WARM_DEADLINE_MINUTES
+# (75), the cache is saved every 50 symbols, and the 450-request cap
+# (75 minutes x 6/minute) stays inside the 90-minute timeout with room for the
+# audit and persist steps. Whatever a run leaves goes first in the next one.
 
 on:
   schedule:
     - cron: '0 6 * * 0'  # Sundays at 06:00 UTC, ahead of the Monday pulse
+    - cron: '0 6 * * 5'  # Fridays at 06:00 UTC, ahead of the 16:00 UTC Friday report
   workflow_dispatch:      # Allows manual triggering from GitHub UI
     inputs:
       probe:
@@ -30,7 +49,7 @@ permissions:
 jobs:
   warm-prices:
     runs-on: ubuntu-latest
-    timeout-minutes: 90  # 8 requests/minute; a cold start is ~180 symbols
+    timeout-minutes: 90  # the warm stops starting requests at 75 minutes (WARM_DEADLINE_MINUTES)
 
     steps:
       - name: Checkout repo
@@ -68,12 +87,23 @@ jobs:
           PROBE: ${{ inputs.probe }}
           TWELVEDATA_API: ${{ secrets.TWELVEDATA_API }}
           # This job is the slow one by design, so it gets a far larger share
-          # of the 800/day quota than the interactive weekly jobs.
-          TWELVEDATA_MAX_REQUESTS: '600'
+          # of the 800/day quota than the interactive weekly jobs: as many
+          # requests as 75 minutes at 6/minute allow (the deadline below).
+          TWELVEDATA_MAX_REQUESTS: '450'
+          WARM_DEADLINE_MINUTES: '75'
           # --resolve asks the LLM to correct mis-heard company names; the
           # suggestion is only accepted once the provider's catalogue confirms
           # the ticker exists and belongs to that company.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Ticker audit (informational)
+        # Offline and read-only (no key, no network, edits nothing): checks
+        # the freshly warmed cache and the ticker tables for wrong
+        # instruments, orphaned series and partial candles, and prints the
+        # worklist to this log. It never fails or blocks the warm.
+        if: ${{ inputs.probe == '' && inputs.find == '' && !inputs.resolve }}
+        continue-on-error: true
+        run: python ticker_audit.py
 
       - name: Persist the price cache
         if: ${{ inputs.probe == '' && inputs.find == '' }}

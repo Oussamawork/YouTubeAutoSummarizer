@@ -25,12 +25,19 @@ docs/tdd-full-transcript-claims.md § 11.
 The aggregation below groups views per (asset, horizon bucket): a short-term
 bearish claim and a long-term bullish claim from the same source are two
 rows, never one averaged stance.
+
+Entity resolution is brought up to date at load time: `reresolve` re-runs
+claims.resolve_entity on every stored row resolved under an older
+claims.RESOLUTION_VERSION, so an alias or rule added after extraction corrects
+stored claims (ticker, subject kind, review reasons) without re-extracting.
 """
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
 
+import claims as _claims
 from claims import carries_view, is_headline_claim
+import instruments
 import research_state
 from signals_data import CONVICTION_WEIGHTS, UNPRICEABLE_TICKERS, canonical_ticker
 
@@ -41,27 +48,32 @@ BUCKETS = ("short", "medium", "long", "unspecified")
 HORIZON_LABELS = {"short": "short-term", "medium": "medium-term", "long": "long-term"}
 
 # Unresolved subjects that are references, not assets: the extractor keeps the
-# spoken phrase when coreference fails ("this business", "the company's"), and
-# a portfolio or cash position is not an instrument. They carry no ticker and
-# would otherwise count as distinct "assets" in consensus and new-on-radar.
-_PLACEHOLDER_FIRST_WORDS = {"THIS", "THAT", "THE", "THESE", "THOSE", "IT", "ITS", "MY", "OUR", "THEIR", "HIS", "HER"}
+# spoken phrase when coreference fails ("this business", "the company's",
+# German "die Aktie"), and a portfolio or cash position is not an instrument.
+# They carry no ticker and would otherwise count as distinct "assets" in
+# consensus and new-on-radar.
+_PLACEHOLDER_FIRST_WORDS = {"THIS", "THAT", "THE", "THESE", "THOSE", "IT", "ITS", "MY", "OUR", "THEIR", "HIS", "HER",
+                            "THEY", "THEM", "DIE", "DER", "DAS", "DEN", "DEM", "ES", "EACH"}
+# Leading articles after which a name the tables know is still that name
+# ("THE S&P 500", "THE TRADEDESK", German "DER BITCOIN", "DER DAX").
+_ARTICLES = {"THE", "DER", "DIE", "DAS", "DEN", "DEM"}
 _NON_ASSETS = {"CASH", "PORTFOLIO", "MY PORTFOLIO", "WHITE COUNT", "PRICE", "RECESSION",
-               "COMPUTE", "CLARITY ACT", "MARKET", "THE MARKET", "STOCKS", "EVERYTHING"}
+               "COMPUTE", "CLARITY ACT", "MARKET", "THE MARKET", "MARKETS", "THE MARKETS", "STOCKS", "EVERYTHING",
+               "THEY", "THEM", "STOCK", "COMPANY", "BUSINESS", "MANAGEMENT TEAM", "REVENUE", "DEMAND", "AI",
+               "THE WORLD", "KURS", "AKTIE", "TITEL", "ETF", "ETFS", "OTHERS", "SHORT TERM", "LONG TERM",
+               "INTERNATIONAL"}
 # Chart-reading vocabulary the extractor sometimes keeps as the subject
-# ("wave two or B wave", "the SOL/BTC chart").
-_NON_ASSET_PATTERN = re.compile(r"\bWAVES?\b|\bCHART\b|\bCOUNT\b")
+# ("wave two or B wave", "the SOL/BTC chart", "the support zone", "the 50-week
+# SMA", "Ethereum against Bitcoin", "the monthly candle").
+_NON_ASSET_PATTERN = re.compile(
+    r"\b(WAVES?|CHART|COUNT|SUPPORTS?|RESISTANCE|SCENARIO|UPTREND|DOWNTREND|RETRACEMENT|FIBONACCI|SMA|EMA|RSI|"
+    r"RALLY|RATIO|AGAINST|CANDLES?)\b")
 
-# Spellings of one un-tickered theme folded to one key, so oil talk is not
-# split across OIL, OIL PRICES and WTI (each a single creator on its own).
-MACRO_ALIASES = {
-    "OIL PRICES": "OIL", "OIL PRICE": "OIL", "CRUDE OIL": "OIL", "CRUDE": "OIL", "WTI": "OIL",
-    "BRENT": "OIL", "ÖL": "OIL", "ÖLPREIS": "OIL",
-    "MIDCAPS": "MID CAPS", "MID-CAPS": "MID CAPS",
-    "BITCOIN DOMINANZ": "BITCOIN DOMINANCE", "BTC DOMINANCE": "BITCOIN DOMINANCE",
-    "NASDAC": "NASDAQ", "NASDAQ 100": "NASDAQ", "NASDAQ-100": "NASDAQ",
-    "S&P": "S&P 500", "SP500": "S&P 500", "S&P500": "S&P 500",
-    "GOLD PRICE": "GOLD", "GOLDPREIS": "GOLD",
-}
+# Spellings of one un-tickered market folded to one key, so oil talk is not
+# split across OIL, OIL PRICES and WTI (each a single creator on its own). The
+# table is claims.MARKET_SUBJECTS, whose keys are the contract the creator
+# tracker's market proxies price against.
+MACRO_ALIASES = dict(_claims.MARKET_SUBJECTS)
 
 # Price targets: only a price level the speaker expects the asset to reach.
 # A recommendation's number is an entry level ("Nvidia at 200 or under,
@@ -77,9 +89,17 @@ def display_label(asset, bucket):
 
 
 def is_placeholder_asset(key, ticker=None):
-    """True for an unresolved reference phrase or a non-instrument."""
+    """True for an unresolved reference phrase or a non-instrument: a
+    placeholder word, chart vocabulary, or a pair such as "SOL/BTC". A name
+    after an article that the market or alias tables know ("THE S&P 500",
+    "THE TRADEDESK", "THE FED", German "DER BITCOIN") is a name, not a
+    reference."""
     if ticker or not key:
         return not key
+    if "/" in key:
+        return True
+    if key.split()[0] in _ARTICLES and (_claims.market_key(key) or _claims.name_ticker(key)):
+        return False
     if key in _NON_ASSETS or key.endswith(" PORTFOLIO") or _NON_ASSET_PATTERN.search(key):
         return True
     return key.split()[0] in _PLACEHOLDER_FIRST_WORDS
@@ -108,8 +128,86 @@ LEGACY_TYPE = {"stock": "stock", "crypto": "crypto", "etf": "etf", "index": "ind
                "commodity": "commodity", "macro": "macro"}
 
 
+# Review reasons that only ever described the model's ticker field. Under the
+# current rules an unverifiable model ticker is dropped with a non-blocking
+# resolution note instead, and only a ticker that CONTRADICTS the subject's
+# curated one is reviewed (ticker_subject_mismatch).
+_STALE_RESOLUTION_REASONS = frozenset({"ticker_not_in_evidence"})
+
+
+def _resolution_method(row, ent):
+    """(entity_resolution_method, confidence) after re-resolution, following
+    validate_claims' labels as far as the stored fields allow (the segment
+    text is not stored, so an in-segment mention cannot be told apart)."""
+    method = row.get("entity_resolution_method")
+    confidence = row.get("entity_resolution_confidence")
+    status = ent["entity_resolution_status"]
+    if method == "local_coreference":
+        return method, confidence   # the transcript resolved it; the stored name is its result
+    if ent["resolution_method_hint"] == "title":
+        return "title", 0.6 if status == "confirmed" else 0.5
+    if status in ("unresolved", "ambiguous"):
+        return "unresolved", 0.0
+    if method in (None, "unresolved") or (method == "explicit_mention" and _claims._is_generic(
+            row.get("canonical_entity_name") or row.get("subject_mention"))):
+        subject = _claims._fold(row.get("canonical_entity_name") or row.get("subject_mention") or "")[0]
+        if subject and subject in _claims._fold(row.get("evidence_text") or "")[0]:
+            return "explicit_mention", 1.0 if status == "confirmed" else 0.8
+        if subject and subject in _claims._fold(row.get("video_title") or "")[0]:
+            return "title", 0.6
+        return "curated_mapping", 0.5
+    return method, confidence
+
+
+def reresolve(row):
+    """
+    A stored claim with its entity resolution brought up to the current rules
+    (claims.RESOLUTION_VERSION), without re-extraction: claims.resolve_entity
+    re-runs on the claim's own fields (resolved name or spoken subject, the
+    model's ticker, evidence, title, asset type, channel) and its verdict
+    replaces ticker, ticker_source, entity_resolution_status, subject_kind and
+    resolution_notes (and canonical_entity_name for a market subject). The
+    retired review reason ticker_not_in_evidence is dropped, a new one is
+    added, and review_required is recomputed from what is left the way
+    validate_claims computes it. A stored verdict that is ambiguous, or one
+    that would turn ambiguous (AMBIGUOUS_MENTIONS grew), is kept until a
+    re-extraction. testable / testability_issues are not recomputed.
+
+    Pure: returns a new dict, or `row` itself when it was resolved under the
+    current version.
+    """
+    if row.get("resolution_version") == _claims.RESOLUTION_VERSION:
+        return row
+    subject = row.get("canonical_entity_name") or row.get("subject_mention")
+    ent = _claims.resolve_entity(subject, row.get("ticker_spoken"), row.get("evidence_text"), row.get("video_title"),
+                                 row.get("asset_type"), channel=row.get("channel_name"))
+    if row.get("entity_resolution_status") == "ambiguous" or ent["entity_resolution_status"] == "ambiguous":
+        # Coreference ambiguity needs the transcript, and a newly ambiguous
+        # name is the table's change of mind: the stored verdict stands.
+        ent = {"canonical_entity_name": row.get("canonical_entity_name"), "ticker": row.get("ticker"),
+               "ticker_source": row.get("ticker_source"),
+               "entity_resolution_status": row.get("entity_resolution_status"), "review_reason": None,
+               "subject_kind": row.get("subject_kind") or "instrument",
+               "resolution_notes": list(row.get("resolution_notes") or []), "resolution_method_hint": None}
+    out = dict(row)
+    out.update(ticker=ent["ticker"], ticker_source=ent["ticker_source"],
+               entity_resolution_status=ent["entity_resolution_status"], subject_kind=ent["subject_kind"],
+               resolution_notes=list(ent["resolution_notes"]), resolution_version=_claims.RESOLUTION_VERSION)
+    if ent["subject_kind"] == "market":
+        out["canonical_entity_name"] = ent["canonical_entity_name"]
+    out["entity_resolution_method"], out["entity_resolution_confidence"] = _resolution_method(row, ent)
+    reasons = [r for r in (row.get("review_reasons") or []) if r not in _STALE_RESOLUTION_REASONS]
+    if ent["review_reason"] and ent["review_reason"] not in reasons:
+        reasons.append(ent["review_reason"])
+    out["review_reasons"] = reasons
+    out["review_required"] = bool(reasons) or row.get("evidence_start_character") is None \
+        or out["entity_resolution_status"] == "ambiguous" or row.get("extraction_confidence") == "low"
+    return out
+
+
 def load_canonical_claims(state=None, path=None, conditions=None):
-    """Active, non-legacy, non-repeated claims with condition outcomes applied."""
+    """Active, non-legacy, non-repeated claims with entity resolution brought
+    up to the current rules (reresolve) and condition outcomes applied."""
     state = state or research_state.load_state()
     rows = research_state.load_active_claims(state, path=path, include_legacy=False)
     evaluations = conditions if conditions is not None else research_state.load_condition_evaluations()
@@ -117,6 +215,7 @@ def load_canonical_claims(state=None, path=None, conditions=None):
     for row in rows:
         if row.get("repeat_of_claim_id"):
             continue
+        row = reresolve(row)
         ev = evaluations.get(row.get("claim_id"))
         if ev:
             row = dict(row)
@@ -157,20 +256,32 @@ def source_of(claim):
 
 def asset_key(claim):
     """The asset identity analytics group on: the resolved ticker, folded
-    through the curated alias tables, else the spoken name."""
-    ticker = canonical_ticker({"ticker": claim.get("ticker"), "name": claim.get("canonical_entity_name")
-                               or claim.get("subject_mention")})
+    through the curated alias tables, else the market key ("the S&P 500" ->
+    "S&P 500", "Silber" -> "SILVER"), else the spoken name without trailing
+    words such as " stock". None for a placeholder phrase, and for a basket
+    or a metric subject: "Google and Meta" is not one asset and a company's
+    gross margin is not its share price, so neither may vote as one in view
+    analytics, the pulse or the tracker."""
+    if claim.get("subject_kind") in ("basket", "metric"):
+        return None
+    ticker = resolved_ticker(claim)
     if ticker:
         return ticker
-    key = " ".join((claim.get("canonical_entity_name") or claim.get("subject_mention") or "").split()).upper() or None
+    name = claim.get("canonical_entity_name") or claim.get("subject_mention") or ""
+    key = _claims.market_key(name) or _claims.strip_name(name)
     key = MACRO_ALIASES.get(key, key)
     return None if is_placeholder_asset(key) else key
 
 
 def resolved_ticker(claim):
-    """The claim's ticker after the curated alias tables, or None."""
-    return canonical_ticker({"ticker": claim.get("ticker"), "name": claim.get("canonical_entity_name")
-                             or claim.get("subject_mention")})
+    """The claim's ticker after the curated tables, or None: the claim's
+    channel's own spelling first (claims.CHANNEL_ALIASES: Couch Investor's
+    "New" is Nu Holdings), then signals_data.canonical_ticker."""
+    name = claim.get("canonical_entity_name") or claim.get("subject_mention")
+    scoped = _claims.channel_ticker(name, claim.get("channel_name"))
+    if scoped:
+        return scoped
+    return canonical_ticker({"ticker": claim.get("ticker"), "name": name, "channel": claim.get("channel_name")})
 
 
 UP = {"increase", "recover", "outperform"}
@@ -234,13 +345,12 @@ def aggregate_views(claims, channel_weights=None):
             all_targets[(key, bucket)].append(target)
     for (key, bucket), per_source in latest_views(claims).items():
         sample = next(iter(per_source.values()))
-        ticker = canonical_ticker({"ticker": sample.get("ticker"), "name": sample.get("canonical_entity_name")
-                                   or sample.get("subject_mention")})
+        ticker = resolved_ticker(sample)
         entry = {
             "asset": key, "horizon_bucket": bucket,
             "label": display_label(ticker or key, bucket),
             "ticker": ticker,
-            "type": LEGACY_TYPE.get(sample.get("asset_type"), "other"),
+            "type": _entry_type(ticker, [sample]),
             "mentions": mentions[(key, bucket)], "channels": set(per_source),
             "bull": 0, "bear": 0, "neutral": 0,
             "bull_w": 0.0, "bear_w": 0.0, "neutral_w": 0.0,
@@ -296,12 +406,57 @@ def video_tone(claims):
             for vid, counts in per_video.items()}
 
 
+def _entry_type(ticker, rows):
+    """An aggregate entry's asset type: the instrument's when the ticker
+    resolves to one (a SpaceX claim the model typed private_company is the
+    SPCX stock; a Bitcoin typed stock is the coin), else the latest claim's
+    model-written type."""
+    inst = instruments.resolve_instrument(ticker, None, None) if ticker else None
+    if inst is not None:
+        return inst.asset_type
+    return LEGACY_TYPE.get(next((c.get("asset_type") for c in reversed(rows) if c.get("asset_type")), None), "other")
+
+
+# Contractions and possessives stay lower case after an apostrophe
+# ("McDonald's", "Dick's"); a name part does not ("O'Reilly").
+_APOSTROPHE_TAILS = {"", "S", "T", "D", "M", "LL", "RE", "VE"}
+
+
+def _capitalize_part(part):
+    titled = part.title()
+    if len(part) > 3 and titled.startswith("Mc"):
+        titled = "Mc" + titled[2:].capitalize()      # McDonald, McKesson
+    return titled
+
+
+def _display_word(word):
+    if len(word) <= 2:
+        return word
+    if "'" in word:
+        head, _, tail = word.partition("'")
+        return _capitalize_part(head) + "'" + (tail.lower() if tail in _APOSTROPHE_TAILS else _capitalize_part(tail))
+    return _capitalize_part(word)
+
+
+# Market keys whose readable form title case gets wrong ("Dxy", "NIKKEI 225").
+_MARKET_LABELS = {
+    "DXY": "DXY", "DAX": "DAX", "NIKKEI 225": "Nikkei 225", "RUSSELL 2000": "Russell 2000",
+    "USDT DOMINANCE": "USDT dominance", "BITCOIN DOMINANCE": "Bitcoin dominance", "US STOCK MARKET": "US stocks",
+    "US TREASURIES": "US Treasuries", "GOLD MINERS": "Gold miners", "SMALL CAPS": "Small caps",
+    "MID CAPS": "Mid caps", "CONSUMER DISCRETIONARY": "Consumer discretionary",
+    "CONSUMER STAPLES": "Consumer staples", "HEALTHCARE": "Health care",
+}
+
+
 def _display_name(key):
-    """Readable label for an un-tickered asset key: "OIL" -> "Oil", keeping
-    short all-caps index names ("S&P 500") as they are."""
+    """Readable label for an un-tickered asset key: "OIL" -> "Oil",
+    "MCDONALD'S" -> "McDonald's", "DXY" -> "DXY", keeping short all-caps
+    index names ("S&P 500") as they are."""
+    if key in _MARKET_LABELS:
+        return _MARKET_LABELS[key]
     if any(ch.isdigit() or ch == "&" for ch in key):
         return key
-    return " ".join(w if len(w) <= 2 else w.title() for w in key.split())
+    return " ".join(_display_word(w) for w in key.split())
 
 
 def aggregate_views_by_asset(claims, channel_weights=None):
@@ -321,9 +476,11 @@ def aggregate_views_by_asset(claims, channel_weights=None):
 
     Entries carry the aggregate_views shape the charts consume (label,
     ticker, type, mentions, channels, bull / bear / neutral, *_w, actions,
-    targets) plus `votes` {creator: lean}, `videos`, and `horizons`.
-    Price targets are one per creator (their latest), so one creator
-    repeating a number does not become a consensus target.
+    targets) plus `votes` {creator: lean}, `videos`, `horizons` and
+    `target_by` {creator: target}. Price targets are one per creator (their
+    latest), so one creator repeating a number does not become a consensus
+    target; target_by says whose each one is, so a report can keep a
+    dissenter's level off the majority's row.
     """
     channel_weights = channel_weights or {}
     per_asset = defaultdict(list)
@@ -342,11 +499,11 @@ def aggregate_views_by_asset(claims, channel_weights=None):
         ticker = next((t for t in (resolved_ticker(c) for c in reversed(rows)) if t), None)
         entry = {
             "asset": key, "label": ticker or _display_name(key), "ticker": ticker,
-            "type": LEGACY_TYPE.get(next((c.get("asset_type") for c in reversed(rows) if c.get("asset_type")), None), "other"),
+            "type": _entry_type(ticker, rows),
             "mentions": len(rows), "videos": len({c.get("video_id") for c in rows}),
             "channels": set(by_source), "votes": {},
             "bull": 0, "bear": 0, "neutral": 0, "bull_w": 0.0, "bear_w": 0.0, "neutral_w": 0.0,
-            "actions": Counter(), "targets": [], "horizons": Counter(),
+            "actions": Counter(), "targets": [], "target_by": {}, "horizons": Counter(),
             "claim_ids": [c.get("claim_id") for c in rows],
         }
         for source, own in by_source.items():
@@ -369,6 +526,7 @@ def aggregate_views_by_asset(claims, channel_weights=None):
             target = next((t for t in (price_target_of(c) for c in reversed(own)) if t is not None), None)
             if target is not None:
                 entry["targets"].append(target)
+                entry["target_by"][source] = target
         entries[key] = entry
     return entries
 
@@ -400,11 +558,66 @@ def _states_a_position(evidence):
     return bool(_OWNERSHIP_CUE.search(evidence)) and not _NEGATED_OWNERSHIP.search(evidence)
 
 
+# What the creator says they DID, read from the evidence, in priority order:
+# "I sold half" is a trim, not an exit. A stored position says what they hold
+# ("owns"); an action outranks it, so "I sold my PayPal stock earlier this
+# year" reads "sold PYPL", never "owns PYPL".
+_DISCLOSED_ACTIONS = (
+    ("trimmed", re.compile(
+        r"\b(sold (half|a (third|quarter|portion|part|bit|little)|some|part|\d+ ?/ ?\d+|\d+ ?(%|percent))|"
+        r"trimm(ed|ing)|cut\b[^.]{0,30}\bposition|reduced (my|our) (position|stake)|teilweise verkauft)", re.I)),
+    ("sold", re.compile(
+        r"\b(i sold|we sold|i'?ve sold|sold (my|our|all|out|everything)|no longer (own|hold)|exited|verkauft)\b",
+        re.I)),
+    ("added", re.compile(
+        r"\b(bought|added|add(ing)? (more|to (my|our))|buying more|purchased|doubled (my|our) (position|stake)|"
+        r"nachgekauft|gekauft|aufgestockt)\b", re.I)),
+)
+_ACTION_PRIORITY = {action: i for i, (action, _) in enumerate(_DISCLOSED_ACTIONS)}
+_TRADE_ACTIONS = frozenset(_ACTION_PRIORITY)
+# A negated action ("I haven't sold") or one describing a holding ("every
+# share that I've bought", "the stock I bought") rather than reporting a
+# trade ("I announced that I added to my position" is still a trade).
+_ACTION_NEGATION = re.compile(
+    r"(\b(not|never|nicht|nie|kein\w*)\b|n't\b)[^.!?,;]{0,20}$"
+    r"|\b(shares?|stocks?|positions?|everything|which)\s+(that\s+)?(i|we)\s*('ve|'d|\s+have|\s+had)?\s*$", re.I)
+
+
+def disclosed_action(evidence, subject=None):
+    """
+    "sold", "trimmed" or "added" when the evidence says the creator traded
+    the asset, else None. A negated action ("I haven't sold") does not
+    count. When the evidence states two different actions ("I sold Tesla and
+    bought Nvidia"), the one nearest the subject wins.
+    """
+    ev = evidence if isinstance(evidence, str) else ""
+    found = {}
+    for action, pattern in _DISCLOSED_ACTIONS:
+        for m in pattern.finditer(ev):
+            if not _ACTION_NEGATION.search(ev[max(0, m.start() - 30):m.start()]):
+                found[action] = m.start()
+                break
+    if "trimmed" in found and "sold" in found and abs(found["trimmed"] - found["sold"]) <= 12:
+        del found["sold"]   # "I sold half": one trim, read twice
+    if not found:
+        return None
+    position = None
+    if len(found) > 1 and isinstance(subject, str) and subject.strip():
+        position = ev.lower().find(" ".join(subject.split()).lower())
+    if position is not None and position >= 0:
+        return min(found, key=lambda a: (abs(found[a] - position), _ACTION_PRIORITY[a]))
+    return min(found, key=_ACTION_PRIORITY.get)
+
+
 def portfolio_disclosures(claims, start=None, end=None):
     """
     The separate portfolio-disclosure report: who disclosed what position in
     which asset. Read from claim_type=portfolio_disclosure records only —
     these never enter stance analytics, and a view never enters this report.
+    `position` is the action the evidence states (disclosed_action: sold /
+    trimmed / added) when it states one, else the stored position; a stated
+    exit ("I no longer own it") is reported as sold, not dropped as a
+    negated holding.
     """
     rows = []
     for c in claims:
@@ -412,11 +625,14 @@ def portfolio_disclosures(claims, start=None, end=None):
             continue
         if start is not None and not in_window(c, start, end):
             continue
-        if c.get("portfolio_disclosure") in _NOT_A_POSITION or not _states_a_position(c.get("evidence_text")):
+        action = disclosed_action(c.get("evidence_text"), c.get("subject_mention"))
+        if action is None and (c.get("portfolio_disclosure") in _NOT_A_POSITION
+                               or not _states_a_position(c.get("evidence_text"))):
             continue
         rows.append({
             "source": source_of(c), "asset": asset_key(c), "ticker": resolved_ticker(c),
-            "position": c.get("portfolio_disclosure"), "date": (claim_date(c).isoformat() if claim_date(c) else None),
+            "position": action or c.get("portfolio_disclosure"),
+            "date": (claim_date(c).isoformat() if claim_date(c) else None),
             "evidence": c.get("evidence_text"), "claim_id": c.get("claim_id"),
             "review_required": bool(c.get("review_required")),
         })
@@ -449,25 +665,73 @@ def format_portfolio_disclosures(rows):
 def disclosure_groups(rows):
     """[(source, [(position, "A, B")])], most assets first. Only reviewed-clean
     rows with a resolved ticker reach a reader: an unverified or unresolved
-    disclosure ("UNITED HEALTH AKTIE*") is maintainer material, not news."""
-    grouped = defaultdict(lambda: defaultdict(set))
+    disclosure ("UNITED HEALTH AKTIE*") is maintainer material, not news.
+    One line per (source, ticker): the latest disclosure wins (by date; on
+    one date a trade outranks a holding statement, then row order), so a
+    creator who bought and later sold reads "sold"."""
+    def rank(r):
+        return r.get("date") or "", r.get("position") in _TRADE_ACTIONS
+
+    latest = {}
     for r in rows:
         if r.get("review_required") or not r.get("ticker") or is_placeholder_asset(r["asset"]):
             continue
+        key = (r["source"], r["ticker"])
+        if key not in latest or rank(r) >= rank(latest[key]):
+            latest[key] = r
+    grouped = defaultdict(lambda: defaultdict(set))
+    for (source, ticker), r in latest.items():
         position = POSITION_LABELS.get(r["position"], str(r["position"] or "mentions").replace("_", " "))
-        grouped[r["source"]][position].add(r["ticker"])
+        grouped[source][position].add(ticker)
     ordered = sorted(grouped, key=lambda s: (-sum(len(a) for a in grouped[s].values()), s))
     return [(s, [(p, ", ".join(sorted(a))) for p, a in sorted(grouped[s].items())]) for s in ordered]
 
 
+# Tickers that are both a coin and a US listing (Stacks / Seagate, Chainlink /
+# Interlink, ...): only for these does a claim's explicit type choose the
+# namespace over the instrument registry.
+COLLIDING_TICKERS = frozenset({"STX", "LINK", "SOL", "COMP", "UNI", "DOT", "NEAR", "ONE",
+                               # coins whose ticker is also a NYSE listing: Sun Communities (SUI),
+                               # Vermilion Energy (VET), AXIS Capital (AXS), Forum Energy (FET),
+                               # TRX Gold (TRX)
+                               "SUI", "VET", "AXS", "FET", "TRX"})
+
+
 def priceable_symbol(entry_or_claim):
-    """Internal price symbol for a view entry / claim, or None."""
-    ticker = (entry_or_claim.get("ticker") or "").upper()
+    """
+    Internal price symbol for a view entry / claim, or None. The resolved
+    ticker decides, registry first (instruments.resolve_instrument): a
+    SpaceX claim the model typed private_company prices as spcx.us, and a
+    Bitcoin typed "stock" as btcusd, never the btc.us Grayscale trust. The
+    model's asset_type only matters where the registry cannot decide:
+      - a COLLIDING_TICKERS ticker whose explicit stock / etf / crypto type
+        contradicts the registry is priced in the type's namespace (a listing
+        as "<t>.us", a coin only when it is a known coin), never guessed;
+      - a known coin (claims.crypto_tickers) or a crypto-typed ticker prices
+        as "<t>usd";
+      - any other unregistered stock / etf / private_company / other /
+        untyped ticker as "<t>.us".
+    UNPRICEABLE_TICKERS and market types (index, commodity, ...) give None.
+    """
+    ticker = (resolved_ticker(entry_or_claim) or "").upper()
     if not ticker or ticker in UNPRICEABLE_TICKERS:
         return None
     asset_type = entry_or_claim.get("type") or entry_or_claim.get("asset_type")
-    if asset_type in ("stock", "etf"):
-        return f"{ticker.lower()}.us"
-    if asset_type == "crypto":
+    explicit = {"stock": "listing", "etf": "listing", "crypto": "coin"}.get(asset_type)
+    inst = instruments.resolve_instrument(ticker, None, None)
+    if inst is not None:
+        kind = "coin" if inst.asset_type == "crypto" else "listing"
+        if not (ticker in COLLIDING_TICKERS and explicit and explicit != kind):
+            return inst.symbol
+    coins = _claims.crypto_tickers()
+    if ticker in COLLIDING_TICKERS:
+        if explicit == "listing":
+            return f"{ticker.lower()}.us"
+        if explicit == "coin" and ticker in coins:
+            return f"{ticker.lower()}usd"
+        return None
+    if ticker in coins or asset_type == "crypto":
         return f"{ticker.lower()}usd"
+    if asset_type in ("stock", "etf", "private_company", "other", None):
+        return f"{ticker.lower()}.us"
     return None

@@ -326,17 +326,23 @@ controls nothing new.
 **Canonical data source.** `canonical_claims.load_canonical_claims` is the
 one loader: active run per video (superseded runs out), no
 `schema_version="legacy"` rows, no cross-chunk repeats, the latest recorded
-condition outcome overlaid. `headline_claims` and `view_claims` narrow it
-further; `aggregate_views` groups per (asset, horizon bucket) with one
-current view per source.
+condition outcome overlaid, and every stored claim's entity resolution
+re-run under the current tables (`reresolve`, § 13.10). `headline_claims`
+and `view_claims` narrow it further; `aggregate_views` groups per (asset,
+horizon bucket) with one current view per source; `aggregate_views_by_asset`
+per asset with one vote per creator. Two layers read prices from it: the
+**creators-vs-market tracker** (`creator_tracker`, § 13.9) — every call
+marked to market from the committed cache, never live — and the **strict
+scorecard** (§ 13.1), the verdict layer, which scores only matured, dated
+forecasts and is the only reader that may fetch live (cache first).
 
 | Scheduled job | Entry point | Data source |
 | --- | --- | --- |
-| `weekly-pulse.yml` (Mon) | `market_pulse.main` → `_canonical_pulse_inputs` | canonical claims via `load_canonical_claims`; tone from each video's own view claims (`video_tone`); charts from the same views (`pulse_charts.build_chart_data(..., tone=…)`); latest prices for USD targets; track-record weights only when `SCORECARD_RANKINGS=true` |
-| `weekly-scorecard.yml` (Fri) | `channel_scorecard.main` → `generate_canonical_scorecard` | canonical claims scored by `research_analytics.scorecard` under `scorecard_pricing`; experimental / unranked by default; conditional-forecast report appended |
-| research report (`research_analytics.main`) | `build_report` | canonical claims; quality header, consensus, flips, disclosures, conditional report, scorecard |
-| `warm-prices.yml` (Sun) | `warm_prices.needed_ranges` | canonical forecast + benchmark ranges (`canonical_ranges`) **plus** the legacy ranges, so both the production jobs and the legacy consumers find their closes cached |
-| `daily-summary.yml` | `scraper.py`, `research_backfill.py --retry` | writes claims, state and the compatibility row; reads neither. Separate claim extractions are queued until every eligible video has been delivered and run only above the summary reserve (§ 13.8) |
+| `weekly-pulse.yml` (Mon) | `market_pulse.main` → `_canonical_pulse_inputs` | canonical claims via `load_canonical_claims`; `creator_tracker.track_record` at `default_as_of(today)` from the cache (market block, the move since the consensus side's first call via `asset_outcome`, the pooled line, last week's picks); tone from each video's own view claims (`video_tone`); charts from the same views; one target list for text and upside chart; track-record weights only when `SCORECARD_RANKINGS=true` |
+| `weekly-scorecard.yml` (Fri) | `channel_scorecard.main` → `generate_weekly_report` | the tracker's report (`format_report`) and its two charts, read from the cache only; then `generate_canonical_scorecard`: canonical claims scored by `research_analytics.scorecard` under `scorecard_pricing`, matured by the last completed session, experimental / unranked by default, compact below the sample minimum, with the conditional calls of the last `CONDITIONAL_WINDOW_DAYS` (30) counted (not the all-time list of 445 rows) |
+| research report (`research_analytics.main`) | `build_report` | canonical claims; quality header, consensus, the tracker's summary block, view changes (≥ `RESEARCH_FLIP_MIN_GAP_DAYS` apart), disclosures, the compact conditional block, scorecard |
+| `warm-prices.yml` (Sun + Fri 06:00 UTC) | `warm_prices.needed_ranges` | canonical forecast + benchmark ranges (`canonical_ranges`), the tracker's exact requests (`creator_tracker.needed_price_ranges`) **plus** the legacy ranges, each capped at the last completed session; then `ticker_audit.py` (informational) |
+| `daily-summary.yml` | `scraper.py`, `research_backfill.py --adopt-stored --retry` | writes claims, state and the compatibility row; reads neither. Separate claim extractions are queued until every eligible video has been delivered and run only above the summary reserve (§ 13.8) |
 
 **Legacy consumers that remain** (compatibility only, never the headline
 result): `market_pulse.build_pulse` / `aggregate_assets` (run only with
@@ -359,17 +365,27 @@ transcripts only (a missing transcript stays `failed_retryable:
 transcript_not_stored`; re-fetching remains the daily job's budgeted
 decision), at most `RESEARCH_BACKFILL_MAX_VIDEOS` per run, stopping on quota.
 `--reprocess` re-extracts videos whose active run predates the current
-versions and supersedes the old run. The daily workflow runs `--retry` after
-the scraper and commits `data/research/` and `data/transcripts/`.
+versions and supersedes the old run. `--adopt-stored` gives a `pending`
+record to stored transcripts that never got research because their summary
+never went out (quota-deferred until the video left the feed, or failed into
+manual review; 40 on 2026-10-16) — skipping videos still pending a summary,
+rejected captures and wrong-language text — so `--retry` extracts them. The
+daily workflow runs `--adopt-stored --retry` after the scraper and commits
+`data/research/` and `data/transcripts/`.
 
 ## 13. Analytics
 
 `research_analytics.py`: quality header (unchanged), descriptive counts,
 consensus = latest **view** claim per source per asset per horizon bucket
 (`claims.carries_view`; buckets never merged; `net_stance = (bull -
-bear)/(bull + bear)` only when the denominator is non-zero), flips (same
-source/asset/bucket), the portfolio-disclosure report, the conditional-
-forecast report, and the scorecard below.
+bear)/(bull + bear)` only when the denominator is non-zero; canonical keys,
+placeholder / basket / metric subjects left out), **view changes** (one lean
+per video, `creator_tracker.video_calls`, reversing between different videos
+at least `RESEARCH_FLIP_MIN_GAP_DAYS` = 7 apart; quicker reversals are only
+counted per creator: in the 30 days to 2026-10-16, 37 of 64 claim-level
+"flips" were scenario talk inside one video), the portfolio-disclosure
+report, the compact conditional-forecast report, the tracker's summary
+block (§ 13.9), and the scorecard below.
 
 ### 13.1 Scorecard methodology (`scorecard_pricing.py`)
 
@@ -471,6 +487,26 @@ even when the horizon close has moved away again. Per-source
 unconditional scorecard (`conditional`); scored only with
 `include_conditional=True` and `condition_status == met`.
 
+*Strict rules added 2026-10.* Only price forecasts are scored
+(`forecast_metric` None or `price`; a revenue / margin / rate forecast is
+`non_price_metric`). A ticker-less macro, index, sector, commodity,
+currency or bond subject, or a market / basket / metric subject, is
+`not_an_instrument` (a resolution gap with a ticker stays
+`unresolved_instrument`). A target is only `canonical_claims.price_target_of`,
+on the called side of the entry and within 0.2–5× of it
+(`target_skipped` says why one was not tested). When the video went up
+during the entry session (crypto: during its UTC day), that day's high and
+low are replaced by its close before `evaluate_target` runs: an intraday
+extreme that printed before the video never counts. Forecasts count as
+matured by the last completed session (`creator_tracker.default_as_of`),
+never on a bar still printing. NYSE half days (day after Thanksgiving,
+Christmas Eve, July 3 when Independence Day is Tuesday–Friday) close at
+13:00 in `session_relation`. A coin's benchmark is reported under the
+`asset_class` rule (ETH vs BTC), not `country`. Below
+`MIN_SCORECARD_SAMPLE` the Friday block is compact: one plain line per
+scored forecast, the count of dated forecasts still to mature and the next
+date, and a one-line conditional count.
+
 ### 13.2 Conditional-forecast model
 
 `testability_type`: `unconditional_testable` (forward-looking, resolved
@@ -489,9 +525,15 @@ is never by itself the reason. Fields: `condition_text`, `condition_status`
 Outcomes are appended to `data/research/condition_evaluations.jsonl`
 (`research_state.record_condition_evaluation`) and overlaid by the loader;
 the latest wins. The separate report:
-`research_analytics.conditional_forecast_report` (in the research report
-and the scorecard message). Conditional forecasts stay out of unconditional
-rankings by default.
+`research_analytics.conditional_forecast_report` (the compact block in the
+research report: two summary lines, at most six examples — evaluated rows
+first, then own-view observable triggers interleaved across creators — and
+a "Not listed" count; the Friday message only counts them). A price level
+needs a number that is not a span of time: "over the next 6 months" and
+"hold it for the next 5 years" are subjective, and the report recomputes
+observability under the current rules. No production job evaluates
+conditions yet, so every row reads `not_evaluated`. Conditional forecasts
+stay out of unconditional rankings by default.
 
 ### 13.3 Suspicious-empty detection (`claims.suspicious_empty_check`)
 
@@ -714,6 +756,120 @@ spending what a later video's summary needs:
    after the second video's summary, and that with a day budget the first
    video's extraction would have exhausted, both summaries still go out and
    no claims request is made.
+
+### 13.9 Creators vs the market (`creator_tracker.py`)
+
+The strict scorecard is the verdict layer, and on 2026-10-16 it scores one
+claim: stated horizons run to 2027-28 (median 547 days). The reports lead
+with a separate **mark-to-market** layer instead, which answers "what did
+each creator call, and what has the market done since?" and may never be
+read as a verdict or a ranking.
+
+*Call unit.* One creator (channel) × asset × change of view. Inputs are
+canonical view claims that are directional, a view on the security (a
+recommendation, price target, valuation view or stance, or a price / market
+cap forecast — never revenue, earnings, margins or rates), not trigger-
+conditional ("buy at 600" waits; "as long as support holds" qualifies and
+counts) and about something tradable: a resolved ticker, a `PROXIES` market
+(S&P 500 → SPY, Nasdaq → QQQ, sectors → the SPDR funds, KBE, SMH, IGV,
+CIBR, gold → GLD, oil → USO, ...), or an instrument-typed name. Themes,
+sectors without a fund, macro, bonds and unlisted companies are
+`not_an_instrument` (claim exclusion), so "no ticker" counts real gaps. Each
+video casts one vote per asset (`lean`, 2/3); a mixed video, or one whose
+vote flips when its review-required own views are added, makes no call.
+
+*Episodes.* A same-direction video reiterates (entry unchanged); an
+opposite one closes the call as reversed at the reversing video's next
+close; a video after the opening video's horizon (the earliest horizon among
+its claims in the call's direction) opens a new call. Spellings of one fund
+are one asset.
+
+*Prices and dates.* Entry = `scorecard_pricing.entry_point` on the
+instrument's exchange; when the cached series starts after that session the
+call is `no_entry_close`, never entered at a later close. One effective
+as-of for every asset class: the last spy.us close on or before
+`default_as_of(today)` (the Thursday close for the Friday run, Friday's for
+the Monday run); crypto is marked at that date's UTC close. With no S&P 500
+close within 14 days nothing is marked and the report says the prices are
+stale. Benchmark over identical dates: SPY for stocks, ETFs and proxies,
+BTC for other coins, nothing for SPY / VOO / IVV / BTC.
+
+*Metrics.* ret, dir_ret (signed by the call), right (dir_ret > 0), excess,
+dir_excess and beat (> 0): beat means the call beat the market **in its
+direction** — a bearish call beats when its asset falls more, or rises less,
+than the market, so it can beat while being wrong. w28 repeats the check 28
+days after the entry (the same-length comparison). An open call counts once
+it is 7 days old (`TRACKER_MIN_CALL_AGE_DAYS`), a call reversed within 7
+days is scenario talk (`reversed_within_min_age`, priced but not counted),
+an open mark more than 5 days behind the as-of is `stale_mark`.
+
+*Targets.* The latest level stated before the mark, from the newest video
+whose own next close printed before the mark; it must lie beyond both the
+entry and that statement close on the call's side (a level the price had
+already passed when it was said is not a target) and within 0.2–5× of the
+entry; the first such level in a video wins (later ones are bull cases);
+reach is tested from the day after the statement close. Proxies never get
+targets.
+
+*Aggregates and honesty.* Per creator (ordered by scored calls, never by
+results; "small sample" under 10 calls; "mostly guests" for guest panels),
+pooled, per asset (agreement needs creators from two houses: "Phantom by
+HKCM" and "HKCM GLOBAL" are HKCM's, `creator_houses`), market context. Every
+rate prints its denominator, every output says "mark-to-market, not a
+verdict", `SCORECARD_RANKINGS` is never read.
+
+*Price budget.* The tracker reads `data/prices.json` only (`cache_fetcher`).
+`needed_price_ranges(claims, today)` is exactly the requests `track_record`
+makes — one per symbol, from the day before its first call to the as-of, or
+to shortly after its last closing event when every call on it has closed —
+and the warm job covers them on Sundays and Fridays. Every open call's
+symbol is refetched each run (about a dozen new symbols a week), so the
+lookback (`TRACKER_LOOKBACK_DAYS`, 180) bounds the cost, and the warm runs in
+priority order under a 75-minute deadline, saving as it goes.
+
+*Coverage on 2026-10-16.* 2,729 canonical claims → 517 video calls → 288
+calls on tradable assets (67 opinions on themes and markets without a fund
+are not calls) → 141 marked to market from the sandbox cache (ending Fri
+Oct 9); the rest wait for prices (56 calls on symbols never cached), age, or
+a ticker (15, each on the audit's worklist).
+
+### 13.10 Ticker resolution and verification
+
+*Load-time re-resolution.* `claims.resolve_entity` re-runs on every stored
+claim at load (`canonical_claims.reresolve`), so an alias or rule change
+corrects stored claims without re-extraction; a stored ambiguous verdict is
+kept; testability is not recomputed. Claims gain `subject_kind`
+(instrument / market / basket / metric), `resolution_notes` and
+`resolution_version` (`RESOLUTION_VERSION`, not part of the run key; bump it
+when the rules or the channel / market tables change). The retired review
+reason `ticker_not_in_evidence` is dropped: an unverifiable model ticker is
+removed with a non-blocking note, and only a model ticker that contradicts
+the subject's curated one is reviewed (`ticker_subject_mismatch`).
+
+*The rules.* The name decides; a curated name outranks a contradicting
+recorded ticker unless that ticker is itself a registered instrument or
+UNPRICEABLE; a recorded index name is never a ticker; a spoken name is
+never read as a ticker by the tracker; a coin ticker that is also a NYSE
+listing follows the claim's explicit type; a channel's own spellings apply
+to that channel only. Market spellings fold to the keys the tracker prices
+(`claims.MARKET_SUBJECTS` ↔ `creator_tracker.PROXIES`; never priced: DAX,
+NIKKEI 225, DXY, BITCOIN / USDT DOMINANCE, COPPER, FED, INFLATION,
+US TREASURIES, BONDS, ALTCOINS).
+
+*Verification* (`ticker_audit.py`). Prices the speakers stated are checked
+against the claim symbol's first close after publication (band 0.67–1.5×):
+on 2026-10-16 all 91 stated prices matched, confirming 65 symbols. Known-wrong
+symbols (btc.us — a Bitcoin trust, not the coin; gold.us; crwe.us — not
+CoreWeave; sy.us; fr.us; mogu.us; new.us; rci.us) must never be produced
+again (`--strict` errors). Only certain or high-confidence corrections enter
+the tables; the rest sit in `NEEDS_VERIFICATION` with their evidence and the
+exact `warm_prices.py --find/--probe` step. To promote one: run the step,
+then add a registry row or an alias scoped as narrowly as the evidence (the
+channel, the title or the asset type).
+
+*Measured effect* (committed data): review-required claims 942 → 636, view
+claims 1,167 → 1,415 (More Crypto Online 168 → 300), claims with no ticker
+1,009 → 608 (376 of them market subjects, which take no ticker by design).
 
 ## 14. Tests
 

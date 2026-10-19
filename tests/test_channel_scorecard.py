@@ -1,10 +1,19 @@
-"""Tests for the per-channel accuracy scorecard (prices mocked, no network)."""
+"""Tests for the Friday report — creators vs the market, its charts and the
+strict scorecard — and the legacy per-channel scorecard (prices mocked or
+read from a test cache, never the network)."""
 import json
+import os
 from datetime import date, timedelta
 
 import pytest
 
+import canonical_claims
 import channel_scorecard as cs
+import creator_tracker
+import price_cache
+import pulse_charts
+import scorecard_pricing as sp
+from tests.test_canonical_analytics import _claim
 
 
 def _rec(day, channel, assets):
@@ -90,7 +99,8 @@ def test_build_scorecard_report():
     assert "Channel Scorecard" in text
     assert "Couch Investor — 7d: 2/3 (67%) avg +2.0% — 30d: 1/1 (100%) avg +20.0%" in text
     assert "More Crypto Online — 7d: 0/2 (0%) avg -2.0%" in text
-    assert cs.DISCLAIMER in text
+    # The legacy report measures a fixed-horizon hit rate and keeps its own footer.
+    assert cs.LEGACY_DISCLAIMER in text and cs.DISCLAIMER not in text
     # Ranked: Couch Investor (67%) above More Crypto Online (0%)
     assert text.index("Couch Investor") < text.index("More Crypto Online")
 
@@ -123,8 +133,53 @@ def test_symbol_for_scores_ticker_less_calls_via_alias():
     # not "CVX") and were invisible to the scorecard.
     assert cs.symbol_for({"ticker": None, "name": "Chevron", "type": "stock"}) == "cvx.us"
     assert cs.symbol_for({"ticker": None, "name": "Bitcoin", "type": "crypto"}) == "btcusd"
+    # SpaceX by name now resolves through the curated name alias (SPACEX -> SPCX).
+    assert cs.symbol_for({"ticker": None, "name": "SpaceX", "type": "stock"}) == "spcx.us"
     # No alias and no ticker -> still honestly unpriceable.
-    assert cs.symbol_for({"ticker": None, "name": "SpaceX", "type": "stock"}) is None
+    assert cs.symbol_for({"ticker": None, "name": "Zorblax Industries", "type": "stock"}) is None
+
+
+def test_symbol_for_is_registry_first():
+    """The instrument registry outranks the row's model-written type: a
+    'stock' Bitcoin is the coin, never btc.us (the Grayscale Bitcoin Mini
+    Trust), and a SpaceX typed private/other is the SPCX listing."""
+    assert cs.symbol_for({"name": "Bitcoin", "ticker": "BTC", "type": "stock"}) == "btcusd"
+    assert cs.symbol_for({"name": "Ethereum", "ticker": None, "type": "stock"}) == "ethusd"
+    assert cs.symbol_for({"name": "SpaceX", "ticker": "SPCX", "type": "private_company"}) == "spcx.us"
+    assert cs.symbol_for({"name": "SpaceX", "ticker": None, "type": "other"}) == "spcx.us"
+    # An unregistered ticker keeps the type rule ...
+    assert cs.symbol_for({"name": "Zorblax", "ticker": "ZRBX", "type": "stock"}) == "zrbx.us"
+    assert cs.symbol_for({"name": "Zorblax", "ticker": "ZRBX", "type": "other"}) is None
+    # ... and an index (or a market theme) is never priced from its type.
+    assert cs.symbol_for({"name": "S&P 500", "ticker": "SPX", "type": "index"}) is None
+    # A foreign listing code typed stock would 404 as '.us' on every warm run.
+    assert cs.symbol_for({"name": "Foreign Co", "ticker": "123456", "type": "stock"}) is None
+    assert cs.symbol_for({"name": "Foreign Co", "ticker": "ABC.DE", "type": "stock"}) is None
+    assert cs.symbol_for({"name": "Share class", "ticker": "ZRBX.B", "type": "stock"}) == "zrbx.b.us"
+    # Unpriceable decisions still win.
+    assert cs.symbol_for({"name": "OpenAI", "ticker": "OPENAI", "type": "other"}) is None
+
+
+def test_symbol_for_applies_the_channels_own_spelling(monkeypatch):
+    """A legacy row is priced with its channel's own spelling first, as
+    canonical claims are (Couch Investor's "New" is Nu Holdings)."""
+    import claims as claims_module
+    monkeypatch.setitem(claims_module.CHANNEL_ALIASES, "Zorb Channel", {"ZORB": "NVDA"})
+    row = {"name": "Zorb", "ticker": None, "type": "stock", "stance": "bullish"}
+    assert cs.symbol_for(row, "Zorb Channel") == "nvda.us"
+    assert cs.symbol_for(row) is None and cs.symbol_for(row, "Another Channel") is None
+    calls = list(cs._directional_calls([_rec("2026-09-01", "Zorb Channel", [row])]))
+    assert [symbol for _, _, _, symbol, _ in calls] == ["nvda.us"]
+
+
+def test_symbol_for_lets_an_explicit_type_pick_the_namespace_of_a_colliding_ticker(monkeypatch):
+    """Only for a ticker that is both a coin and a US listing does the type
+    choose (canonical_claims.COLLIDING_TICKERS, as in priceable_symbol)."""
+    ticker = next(t for t in sorted(canonical_claims.COLLIDING_TICKERS)
+                  if (inst := cs.instruments.REGISTRY.get(t)) is not None and inst.asset_type == "crypto")
+    assert cs.symbol_for({"name": ticker, "ticker": ticker, "type": "crypto"}) == f"{ticker.lower()}usd"
+    assert cs.symbol_for({"name": ticker, "ticker": ticker, "type": None}) == f"{ticker.lower()}usd"
+    assert cs.symbol_for({"name": ticker, "ticker": ticker, "type": "stock"}) == f"{ticker.lower()}.us"
 
 
 # --- Twelve Data price source -------------------------------------------------
@@ -264,8 +319,11 @@ def test_unpriceable_tickers_are_skipped_before_any_request():
 
 
 def test_spacex_is_priceable_via_the_curated_ticker():
-    """Verified live 2026-08-17: spcx.us returns closes, so SpaceX is no
-    longer written off as private."""
+    """SpaceX is the SPCX listing, by evidence in the data rather than by a
+    series merely existing: creators titled their videos "SPCX Stock
+    Analysis", and on 2026-09-14 one said SpaceX was "now trading at $150 per
+    share, about 10% above its IPO price" against a cached spcx.us close of
+    148.15 that day."""
     assert cs.symbol_for({"name": "SpaceX", "ticker": "SPACEX",
                           "type": "stock"}) == "spcx.us"
 
@@ -318,3 +376,318 @@ def test_symbol_search_raises_rather_than_claiming_no_listings(monkeypatch):
     monkeypatch.setattr(cs.requests, "get", lambda *a, **k: _Resp(status_code=429))
     with pytest.raises(cs.SearchUnavailable):
         cs.search_symbols("Rubrik", "tok")
+
+
+# --- The Friday report: creators vs the market, charts, strict scorecard ------
+
+@pytest.fixture(autouse=True)
+def _charts_in_tmp(tmp_path, monkeypatch):
+    """main() writes chart PNGs to CHARTS_DIR by default: never into the checkout."""
+    monkeypatch.setattr(cs, "CHARTS_DIR", str(tmp_path / "default-charts"))
+
+
+US = sp.EXCHANGES["us"]
+FRIDAY = date(2026, 10, 16)                  # the weekly-scorecard.yml run (16:00 UTC, mid-session)
+THURSDAY = date(2026, 10, 15)                # creator_tracker.default_as_of(FRIDAY)
+CREATORS = (("Alpha", "2026-09-08"), ("Beta", "2026-09-10"), ("Gamma", "2026-09-14"))
+
+
+def _sessions(start, end):
+    days, day = [], start
+    while day <= end:
+        if sp.is_trading_day(US, day):
+            days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+def _line(first, step, end=THURSDAY):
+    return {d: round(first + i * step, 4) for i, d in enumerate(_sessions(date(2026, 8, 24), end))}
+
+
+def _install_cache(**series):
+    """A process-wide price cache holding these {symbol: {date: close}} series."""
+    price_cache.reset({s: {"from": min(c), "to": max(c), "closes": dict(c), "adjustment": "split_adjusted"}
+                       for s, c in series.items()})
+
+
+def _market_cache(end=THURSDAY):
+    _install_cache(**{"spy.us": _line(500, 1, end), "nvda.us": _line(100, 2, end),
+                      "aapl.us": _line(200, -1, end), "msft.us": _line(300, 0.5, end)})
+
+
+def _calls():
+    """Three creators, each bullish on NVDA, AAPL and MSFT in one video:
+    nine calls, three per creator, three assets all three agree on."""
+    return [_claim(creator, asset, "bullish", "unspecified", published=day, video=f"{creator}-{day}", n=n)
+            for creator, day in CREATORS for n, asset in enumerate(("NVDA", "AAPL", "MSFT"))]
+
+
+def _no_live_prices(monkeypatch):
+    monkeypatch.setattr(cs, "fetch_prices_live",
+                        lambda *a, **k: pytest.fail("the Friday report must not fetch prices live here"))
+    monkeypatch.setattr(cs.requests, "get", lambda *a, **k: pytest.fail("no network in tests"))
+
+
+def test_weekly_report_leads_with_the_tracker_and_keeps_the_strict_scorecard(monkeypatch):
+    _market_cache()
+    _no_live_prices(monkeypatch)
+    report = cs.generate_weekly_report(today=FRIDAY, claims=_calls())
+    messages, record = report["messages"], report["record"]
+    assert set(report) == {"messages", "charts", "record"} and report["charts"] == []
+    # Marked to the last completed session (Thursday for the Friday run).
+    assert record["requested_as_of"] == THURSDAY and record["as_of"] == THURSDAY
+    assert record["stats"]["scored"] == 9
+    assert messages[0].startswith("📈 Creators vs the market")
+    assert "marked to Thu Oct 15 close" in messages[0] and creator_tracker.REPORT_LABEL in messages[0]
+    assert "right 2/3" in messages[0]                    # every rate carries its denominator
+    # The tracker's messages come first and are its own, in order ...
+    assert messages[:-1] == creator_tracker.format_report(record)
+    assert any("Where creators agreed" in m for m in messages[:-1])
+    # ... and the strict scorecard closes the report, experimental and unranked.
+    strict = messages[-1]
+    assert strict.startswith("🎯 Strict scorecard — matured, dated forecasts only (EXPERIMENTAL — unranked)")
+    assert "canonical claims" in strict and strict.rstrip().endswith(cs.DISCLAIMER)
+    assert all(len(m) <= creator_tracker.MAX_MESSAGE_CHARS for m in messages[:-1])
+
+
+def test_weekly_report_tracker_never_goes_live(monkeypatch):
+    # The cache stops a week before the as-of and lacks AAPL entirely: a
+    # live-capable fetcher would fill both gaps; the tracker must not try.
+    _install_cache(**{"spy.us": _line(500, 1), "nvda.us": _line(100, 2, end=date(2026, 10, 8))})
+    _no_live_prices(monkeypatch)
+    claims = [_claim("Alpha", "NVDA", "bullish", "unspecified", published="2026-09-08"),
+              _claim("Alpha", "AAPL", "bullish", "unspecified", published="2026-09-08", n=1)]
+    report = cs.generate_weekly_report(today=FRIDAY, claims=claims)
+    calls = {r["asset"]: r for r in report["record"]["calls"]}
+    assert calls["NVDA"]["reason"] == "stale_mark" and calls["AAPL"]["reason"] == "no_prices"
+    assert report["messages"] and report["messages"][-1].startswith("🎯 Strict scorecard")
+
+    # The default tracker fetcher is the cache fetcher: what it was asked for
+    # is exactly the tracker's planned requests, all ending at the as-of.
+    seen = []
+    real = creator_tracker.cache_fetcher
+
+    def recording_cache_fetcher(cache=None):
+        fetch = real(cache)
+        seen.append(fetch)
+        return fetch
+
+    monkeypatch.setattr(creator_tracker, "cache_fetcher", recording_cache_fetcher)
+    cs.generate_weekly_report(today=FRIDAY, claims=claims)
+    assert len(seen) == 1
+    assert sorted(seen[0].requests) == sorted(creator_tracker.needed_price_ranges(claims, FRIDAY))
+    assert {end for _, _, end in seen[0].requests} == {THURSDAY}
+
+
+def test_strict_block_is_sent_when_nothing_matured(monkeypatch):
+    _market_cache()
+    _no_live_prices(monkeypatch)
+    claims = _calls()                                   # views, but no dated forecast
+    strict = cs.generate_canonical_scorecard(FRIDAY, cs.fetch_price_series, claims=claims)
+    assert strict.startswith("🎯 Strict scorecard — matured, dated forecasts only (EXPERIMENTAL — unranked)")
+    assert "no matured forecasts yet" in strict and "canonical claims" in strict
+    assert "forecasts matured by the Thu Oct 15 close" in strict
+    assert cs.generate_canonical_scorecard(FRIDAY, cs.fetch_price_series, claims=[]) == ""
+
+    # And the send path delivers it, last.
+    sent = _send_mode(monkeypatch, claims)
+    assert cs.main([]) == 0
+    texts = [payload for kind, payload in sent if kind == "text"]
+    assert texts[-1] == strict and texts[0].startswith("📈 Creators vs the market")
+
+
+def test_strict_block_counts_forecasts_matured_by_the_last_completed_session():
+    """A forecast ending on the run day is judged next week: at 16:00 UTC on a
+    Friday that day's close is still printing."""
+    fetched = []
+
+    def fetch(symbol, start, end):
+        fetched.append((symbol, start, end))
+        return {}
+    fetch.price_provenance = {"provider": "test", "adjustment": "split_adjusted",
+                              "corporate_action_status": "split_adjusted"}
+    ending_today = _claim("Alpha", "NVDA", "bullish", "short", published="2026-10-01", testable=True,
+                          testability_type="unconditional_testable", forecast_end_date=FRIDAY.isoformat())
+    strict = cs.generate_canonical_scorecard(FRIDAY, fetch, claims=[ending_today])
+    assert "no matured forecasts yet" in strict
+    assert fetched == []                                # nothing matured, nothing fetched
+    ended_thursday = dict(ending_today, forecast_end_date=THURSDAY.isoformat(), claim_id="thu")
+    cs.generate_canonical_scorecard(FRIDAY, fetch, claims=[ended_thursday])
+    assert fetched and max(end for _, _, end in fetched) <= THURSDAY
+
+
+def test_strict_block_lists_conditionals_from_the_trailing_window_only():
+    recent = _claim("Alpha", "NVDA", "bullish", "unspecified", published="2026-10-10",
+                    condition="if it drops under 150", condition_observable=True, n=1)
+    old = _claim("Beta", "AAPL", "bullish", "unspecified", published="2026-08-01",
+                 condition="if it drops under 150", condition_observable=True, n=2)
+    strict = cs.generate_canonical_scorecard(FRIDAY, cs.fetch_price_series, claims=[recent, old])
+    # Below the sample minimum the Friday block only counts them (the research
+    # report lists them): Beta's is 76 days old, outside the 30-day window.
+    assert "🔀 1 own conditional call in the last 30 days" in strict and "none evaluated yet" in strict
+
+
+def test_chart_failure_never_blocks_the_text(monkeypatch, tmp_path):
+    _market_cache()
+    _no_live_prices(monkeypatch)
+
+    def broken(*a, **k):
+        raise RuntimeError("renderer exploded")
+
+    monkeypatch.setattr(pulse_charts, "render_tracker_charts", broken)
+    report = cs.generate_weekly_report(today=FRIDAY, claims=_calls(), charts_dir=str(tmp_path))
+    assert report["charts"] == []
+    assert report["messages"][0].startswith("📈 Creators vs the market")
+    assert report["messages"][-1].startswith("🎯 Strict scorecard")
+
+    monkeypatch.setattr(pulse_charts, "build_tracker_chart_data", broken)
+    assert cs.generate_weekly_report(today=FRIDAY, claims=_calls(), charts_dir=str(tmp_path))["charts"] == []
+
+
+def test_weekly_report_draws_the_tracker_charts_from_the_same_record(monkeypatch, tmp_path):
+    _market_cache()
+    _no_live_prices(monkeypatch)
+    drawn = []
+    real_build = pulse_charts.build_tracker_chart_data
+
+    def spy_build(record):
+        drawn.append(record)
+        return real_build(record)
+
+    monkeypatch.setattr(pulse_charts, "build_tracker_chart_data", spy_build)
+    report = cs.generate_weekly_report(today=FRIDAY, claims=_calls(), charts_dir=str(tmp_path / "charts"))
+    assert drawn == [report["record"]]
+    assert [os.path.basename(p) for p in report["charts"]] == ["tracker-1-creators.png", "tracker-2-consensus.png"]
+    assert all(os.path.getsize(p) > 0 for p in report["charts"])
+
+
+def test_weekly_report_without_claims_is_empty(monkeypatch):
+    monkeypatch.setattr(canonical_claims, "load_canonical_claims", lambda *a, **k: [])
+    assert cs.generate_weekly_report(today=FRIDAY) == {"messages": [], "charts": [], "record": {}}
+
+
+_REAL_WEEKLY_REPORT = cs.generate_weekly_report
+
+
+def _patch_report(monkeypatch, claims, charts=None):
+    """main() builds the report for `claims` on FRIDAY; chart rendering is
+    replaced by files written to the requested directory (or by `charts`)."""
+    def report(**kwargs):
+        return _REAL_WEEKLY_REPORT(today=FRIDAY, claims=claims, **kwargs)
+
+    def fake_render(data, out_dir):
+        if charts is not None:
+            return charts
+        os.makedirs(out_dir, exist_ok=True)
+        paths = [os.path.join(out_dir, name) for name in ("tracker-1-creators.png", "tracker-2-consensus.png")]
+        for path in paths:
+            with open(path, "wb") as f:
+                f.write(b"png")
+        return paths
+
+    monkeypatch.setattr(cs, "generate_weekly_report", report)
+    monkeypatch.setattr(pulse_charts, "render_tracker_charts", fake_render)
+
+
+def _send_mode(monkeypatch, claims, text_ok=lambda text: True, album_ok=True):
+    """Send-mode main() with Telegram replaced by a recorder: [(kind, payload)]."""
+    _patch_report(monkeypatch, claims)
+    monkeypatch.setenv("TELEGRAM_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHANNEL_ID", "chat")
+    sent = []
+
+    def text(token, chat_id, body):
+        sent.append(("text", body))
+        return text_ok(body)
+
+    def album(token, chat_id, paths, caption=None):
+        sent.append(("album", (list(paths), caption)))
+        return album_ok
+
+    monkeypatch.setattr(cs, "send_telegram_text", text)
+    monkeypatch.setattr(cs, "send_telegram_photo_album", album)
+    return sent
+
+
+def test_dry_run_prints_tracker_then_strict(monkeypatch, capsys, tmp_path):
+    _market_cache()
+    _no_live_prices(monkeypatch)
+    _patch_report(monkeypatch, _calls())
+    logged = []
+    monkeypatch.setattr(cs, "log_info", lambda m: logged.append(m))
+    monkeypatch.setattr(cs, "send_telegram_text", lambda *a, **k: pytest.fail("a dry run never sends"))
+    monkeypatch.setattr(cs, "send_telegram_photo_album", lambda *a, **k: pytest.fail("a dry run never sends"))
+    charts_dir = tmp_path / "charts"
+    assert cs.main(["--dry-run", "--charts-dir", str(charts_dir)]) == 0
+    out = capsys.readouterr().out
+    tracker, strict = out.index("📈 Creators vs the market"), out.index("🎯 Strict scorecard")
+    assert tracker < out.index("Where creators agreed") < strict
+    assert "\n\n🎯 Strict scorecard" in out              # messages separated by a blank line
+    written = sorted(os.listdir(charts_dir))
+    assert written == ["tracker-1-creators.png", "tracker-2-consensus.png"]
+    assert any(m.startswith("Charts written: ") and str(charts_dir) in m for m in logged)
+
+
+def test_send_mode_sends_tracker_then_album_then_strict(monkeypatch):
+    _market_cache()
+    _no_live_prices(monkeypatch)
+    sent = _send_mode(monkeypatch, _calls())
+    assert cs.main([]) == 0
+    kinds = [kind for kind, _ in sent]
+    assert kinds[-2:] == ["album", "text"] and set(kinds[:-2]) == {"text"} and len(kinds) >= 4
+    assert sent[0][1].startswith("📈 Creators vs the market")
+    paths, caption = sent[-2][1]
+    assert caption == cs.CHART_ALBUM_CAPTION and len(paths) == 2
+    assert sent[-1][1].startswith("🎯 Strict scorecard")
+
+
+def test_album_failure_is_only_logged_but_a_text_failure_fails_the_run(monkeypatch):
+    _market_cache()
+    _no_live_prices(monkeypatch)
+    sent = _send_mode(monkeypatch, _calls(), album_ok=False)
+    assert cs.main([]) == 0                               # the album is an illustration
+    assert sent[-1][1].startswith("🎯 Strict scorecard")
+
+    sent = _send_mode(monkeypatch, _calls(), text_ok=lambda body: not body.startswith("📈"))
+    assert cs.main([]) == 1                               # a tracker message failed: stop there
+    assert [kind for kind, _ in sent] == ["text"]
+
+    sent = _send_mode(monkeypatch, _calls(), text_ok=lambda body: not body.startswith("🎯"))
+    assert cs.main([]) == 1                               # the strict block failed
+    assert sent[-1][1].startswith("🎯 Strict scorecard")
+
+
+def test_main_skips_without_claims_and_keeps_the_legacy_path(monkeypatch):
+    monkeypatch.setattr(canonical_claims, "load_canonical_claims", lambda *a, **k: [])
+    monkeypatch.setenv("TELEGRAM_TOKEN", "tok")
+    monkeypatch.setenv("TELEGRAM_CHANNEL_ID", "chat")
+    monkeypatch.setattr(cs, "send_telegram_text", lambda *a, **k: pytest.fail("nothing to send"))
+    assert cs.main([]) == 0
+    # --legacy is the old 7/30-day report, untouched by the new layout.
+    monkeypatch.setattr(cs, "generate_scorecard", lambda: "legacy report")
+    sent = []
+    monkeypatch.setattr(cs, "send_telegram_text", lambda token, chat, text: sent.append(text) or True)
+    assert cs.main(["--legacy"]) == 0 and sent == ["legacy report"]
+
+
+def test_strict_block_below_the_sample_minimum_is_plain_and_compact():
+    matured = _claim("Alpha", "NVDA", "bullish", "short", published="2026-07-01", testable=True,
+                     testability_type="unconditional_testable", forecast_end_date="2026-07-15")
+    later = dict(matured, claim_id="later", forecast_end_date="2026-11-20", video_id="v-later")
+    prices = {"nvda.us": {date(2026, 7, 1) + timedelta(days=i): 100.0 + i for i in range(40)},
+              "xlk.us": {date(2026, 7, 1) + timedelta(days=i): 200.0 for i in range(40)}}
+
+    def fetch(symbol, start, end):
+        return {d: v for d, v in prices.get(symbol, {}).items() if start <= d <= end}
+    fetch.price_provenance = {"provider": "test", "adjustment": "split_adjusted",
+                              "corporate_action_status": "split_adjusted"}
+    strict = cs.generate_canonical_scorecard(date(2026, 8, 1), fetch, claims=[matured, later])
+    lines = strict.splitlines()
+    assert lines[0] == "🎯 Strict scorecard — matured, dated forecasts only (EXPERIMENTAL — unranked)"
+    assert lines[2] == "1 scored so far (unranked) — a comparison needs 20."
+    assert lines[3].startswith("• Alpha — NVDA ▲ Jul 1 → Jul 15: +") and lines[3].endswith("right direction")
+    assert " vs XLK +0.0%" in lines[3]
+    assert "1 dated price forecast matures later (next: Nov 20)." in strict
+    for jargon in ("benchmark country", "data/research", "n/a", "excess vs benchmark"):
+        assert jargon not in strict, jargon

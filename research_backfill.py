@@ -23,6 +23,17 @@ Research retry / backfill job: resumable, idempotent, quota-aware.
                                                 transcripts in the channel's
                                                 language, under the normal
                                                 transcript budget, then extract
+  python research_backfill.py --adopt-stored    give a pending research record
+                                                to every stored transcript that
+                                                never got one (its summary was
+                                                quota-deferred until the video
+                                                left the feed, or failed), so
+                                                --retry extracts its claims
+  python research_backfill.py --import-candidates
+                                                store committed offline
+                                                extractions (data/research/
+                                                candidates/) through the same
+                                                validation as a model response
 
 Every mode is safe to stop and restart: state is saved per video, an
 extraction run is keyed by its complete identity (transcript hash,
@@ -45,7 +56,7 @@ import language_detect
 import research_budget
 import research_state
 import transcript_store
-from helpers import env_int, read_channels
+from helpers import env_int, load_state as load_seen_state, read_channels
 from log import log_info, log_warn
 import signals
 from signals import extract_research
@@ -61,6 +72,12 @@ RETRY_BACKOFF_HOURS = 6
 # --refetch spends transcript credits; keep one run small.
 MAX_REFETCH_PER_RUN = env_int("RESEARCH_REFETCH_MAX_VIDEOS", 3)
 CHANNELS_FILE = "channel_ids.txt"
+# The daily job's dedup state: its `pending` videos still wait for a summary.
+SEEN_VIDEOS_FILE = "seen_videos.json"
+# Committed offline extractions (--import-candidates) and the label their
+# claims carry in extraction_model — a source, never a model identifier.
+CANDIDATES_DIR = "data/research/candidates"
+OFFLINE_EXTRACTION_MODEL = "offline-extraction"
 
 
 def current_run_key(nt):
@@ -81,11 +98,12 @@ def _context(entry, stored):
     }
 
 
-def process_video(state, video_id, extractor=extract_research):
+def process_video(state, video_id, extractor=extract_research, check_budget=True, job="backfill"):
     """
     One research attempt for a stored transcript. Returns the research status
     written to the state. Idempotent: a run key already active for the video
-    is a no-op ("complete").
+    is a no-op ("complete"). `check_budget=False` is for extractors that make
+    no model request (the offline candidates import).
     """
     entry = research_state.get(state, video_id) or research_state.update(state, video_id)
     stored = transcript_store.load_transcript(video_id)
@@ -102,7 +120,7 @@ def process_video(state, video_id, extractor=extract_research):
     ctx["run_key"], ctx["run_identity"] = signals.planned_run(nt)
     # The same reserve the daily run applies: a backlog never eats the
     # requests today's summaries still need.
-    verdict = research_budget.check(nt)
+    verdict = research_budget.check(nt) if check_budget else {"allowed": True}
     if not verdict["allowed"]:
         research_state.update(state, video_id, research_status="quota_deferred",
                               failure_reason="summary_reserve_protected", budget_check=verdict)
@@ -140,7 +158,7 @@ def process_video(state, video_id, extractor=extract_research):
                     datetime.now(timezone.utc) + timedelta(hours=RETRY_BACKOFF_HOURS)
                 ).replace(microsecond=0).isoformat())
     research_state.record_run({
-        "video_id": video_id, "run_key": key, "status": status, "job": "backfill",
+        "video_id": video_id, "run_key": key, "status": status, "job": job,
         "identity": result.get("run_identity"), "chunk_boundaries": result.get("chunk_boundaries"),
         "coverage_status": result.get("coverage_status"), "claims": len(result.get("claims") or []),
         "warnings": result.get("warnings") or [], "failure_reason": result.get("failure_reason"),
@@ -326,6 +344,174 @@ def run_refetch(max_videos=None, fetcher=None, extractor=extract_research, state
     return tally
 
 
+def _adopt(state, video_id, stored, row=None, channel_languages=None):
+    """
+    Give a stored transcript without a research record a "pending" one, built
+    from the stored payload's metadata (the index row fills gaps), after the
+    --reject-foreign-transcripts language check. Returns the language
+    verdict; nothing is written when it fails.
+    """
+    row = row or {}
+    meta = {k: stored.get(k) or row.get(k) for k in ("channel_id", "channel_name", "video_title",
+                                                      "published_at", "video_url", "duration_seconds")}
+    meta["channel_id"] = _channel_id_of(meta, stored)
+    verdict = language_detect.verify_language(stored["raw_transcript"],
+                                              languages_for(meta, stored, channel_languages))
+    if verdict["ok"]:
+        research_state.update(
+            state, video_id, research_status="pending", delivery_status="not_sent",
+            adopted_from="stored_transcript", channel_id=meta["channel_id"],
+            channel_name=meta["channel_name"], video_title=meta["video_title"],
+            published_at=meta["published_at"], transcript_source=stored.get("transcript_source"),
+            transcript_language=verdict["language"] or stored.get("transcript_language"),
+            transcript_hash=stored.get("transcript_hash"), transcript_stored=True, failure_reason=None,
+        )
+    return verdict
+
+
+def run_adopt_stored(state=None, pending=None, channel_languages=None):
+    """
+    Start research for stored transcripts that never got any. Research used
+    to start only beside a delivered summary, so a video whose summary was
+    quota-deferred until it left the feed, or failed into manual review,
+    kept its saved transcript but never reached the claims, the
+    creators-vs-market tracker or the reports (49 of 443 stored transcripts
+    on 2026-10-16). Each gets a research record in status "pending", built
+    from the stored payload's metadata, and --retry extracts it from the
+    stored text under the usual summary-reserve guard: no transcript is
+    fetched and nothing is sent. A claim is priced from its video's
+    publication date, so a call extracted late still enters the track record
+    on the day it was made.
+
+    Skipped: videos that already have a research record; videos still
+    pending a summary in seen_videos.json (the daily run's combined
+    summary+claims call extracts them at no extra request); rejected or
+    missing captures; and text that is not in the channel's language (the
+    --reject-foreign-transcripts check). Offline and idempotent. Returns
+    {"adopted", "pending_summary", "foreign", "missing", "videos"}.
+    """
+    state = state if state is not None else research_state.load_state()
+    if pending is None:
+        pending = load_seen_state(SEEN_VIDEOS_FILE).get("pending") or {}
+    channel_languages = _channel_languages() if channel_languages is None else channel_languages
+    tally = {"adopted": 0, "pending_summary": 0, "foreign": 0, "missing": 0, "videos": []}
+    seen = set()
+    for row in transcript_store.load_index():
+        video_id = row["video_id"]
+        if video_id in seen or research_state.get(state, video_id):
+            continue
+        seen.add(video_id)
+        if video_id in pending:
+            tally["pending_summary"] += 1
+            continue
+        stored = transcript_store.load_transcript(video_id)
+        if not stored or not stored.get("raw_transcript"):
+            tally["missing"] += 1
+            continue
+        verdict = _adopt(state, video_id, stored, row, channel_languages)
+        if not verdict["ok"]:
+            tally["foreign"] += 1
+            log_warn(f"{video_id}: stored transcript is {verdict['language']} ({verdict['reason']}); not adopted.")
+            continue
+        tally["adopted"] += 1
+        tally["videos"].append(video_id)
+    research_state.save_state(state)
+    log_info(f"Stored transcripts without research: {tally['adopted']} adopted for --retry, "
+             f"{tally['pending_summary']} still pending a summary, {tally['foreign']} not in the "
+             f"channel's language, {tally['missing']} missing.")
+    return tally
+
+
+def offline_identity(source):
+    """The run identity of an offline extraction: the current versions and
+    chunk policy of a standalone run, with the source named where a model
+    policy would be — so it never passes for a model run, and a later model
+    re-extraction is a different run that supersedes it."""
+    identity = signals.extraction_identity("standalone")
+    identity.update(model_policy=f"offline:{source}", model_config="offline candidates file")
+    return identity
+
+
+def _candidates_extractor(payload):
+    """An extractor for process_video that validates a committed model-shaped
+    response instead of calling a model (signals.build_research: the same
+    gate Gemini's output passes)."""
+    def extractor(nt, ctx):
+        ctx = dict(ctx, normalized=nt, extraction_model=OFFLINE_EXTRACTION_MODEL,
+                   fixed_run_identity=offline_identity(payload.get("source") or "unknown"))
+        return signals.build_research(payload["response"], ctx, coverage_status="full", standalone=True)
+    return extractor
+
+
+def run_import_candidates(state=None, directory=None, channel_languages=None):
+    """
+    Store committed offline extractions through the production research path.
+
+    When the model quota cannot keep up (docs/tdd-gemini-transcripts.md § 10),
+    claims can be proposed outside it — by an assistant working through the
+    backlog — and committed as data/research/candidates/<video_id>.json:
+    {"video_id", "transcript_hash", "extraction_prompt_version", "source",
+    "response": {"claims": [...], "extraction_metadata": {...}}}, the response
+    in exactly the shape the claims prompt asks a model for. Each is validated
+    by signals.build_research like a model response (evidence located
+    verbatim, numbers present in it, curated tickers, deterministic
+    testability, the suspicious-empty check) and stored by process_video, so
+    claims, review queue, segments, run record and compatibility row follow.
+    No model request is made, so no budget is checked.
+
+    Skipped: a file for another prompt version, or whose transcript hash no
+    longer matches the stored transcript (the text it was read from is gone);
+    a video whose research is already done (complete / needs_review /
+    no_claims_found): candidates fill gaps and never override a model run.
+    A video without a research record is adopted first (language-checked).
+    Idempotent. Returns {status or skip reason: count}.
+    """
+    import glob
+    import json
+    import os
+    state = state if state is not None else research_state.load_state()
+    directory = directory or CANDIDATES_DIR
+    channel_languages = _channel_languages() if channel_languages is None else channel_languages
+    tally = {}
+
+    def count(key):
+        tally[key] = tally.get(key, 0) + 1
+
+    for path in sorted(glob.glob(os.path.join(directory, "*.json"))):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, ValueError) as e:
+            log_warn(f"Unreadable candidates file {path}: {e}")
+            count("unreadable")
+            continue
+        video_id = payload.get("video_id") if isinstance(payload, dict) else None
+        if not video_id or not isinstance(payload.get("response"), dict):
+            count("malformed")
+            continue
+        if payload.get("extraction_prompt_version") != claims_mod.EXTRACTION_PROMPT_VERSION:
+            count("other_prompt_version")
+            continue
+        entry = research_state.get(state, video_id) or {}
+        if entry.get("research_status") in ("complete", "needs_review", "no_claims_found"):
+            count("already_done")
+            continue
+        stored = transcript_store.load_transcript(video_id)
+        if not stored or stored.get("transcript_hash") != payload.get("transcript_hash"):
+            log_warn(f"{video_id}: candidates were read from another transcript; not imported.")
+            count("transcript_changed")
+            continue
+        if not entry and not _adopt(state, video_id, stored, None, channel_languages)["ok"]:
+            count("foreign")
+            continue
+        status = process_video(state, video_id, extractor=_candidates_extractor(payload),
+                               check_budget=False, job="import_candidates")
+        count(status)
+    research_state.save_state(state)
+    log_info(f"Offline candidates imported: {tally or 'none'}.")
+    return tally
+
+
 def run_retry(max_videos=None, extractor=extract_research, state=None):
     state = state if state is not None else research_state.load_state()
     max_videos = MAX_VIDEOS_PER_RUN if max_videos is None else max_videos
@@ -398,10 +584,12 @@ def main():
     parser.add_argument("--import-legacy", action="store_true")
     parser.add_argument("--reject-foreign-transcripts", action="store_true")
     parser.add_argument("--refetch", action="store_true")
+    parser.add_argument("--adopt-stored", action="store_true")
+    parser.add_argument("--import-candidates", action="store_true")
     parser.add_argument("--max-videos", type=int, default=None)
     args = parser.parse_args()
     if not (args.retry or args.reprocess or args.import_legacy or args.reject_foreign_transcripts
-            or args.refetch):
+            or args.refetch or args.adopt_stored or args.import_candidates):
         parser.print_help()
         return 1
     if args.import_legacy:
@@ -410,6 +598,10 @@ def main():
         run_reject_foreign()
     if args.refetch:
         run_refetch(args.max_videos)
+    if args.adopt_stored:
+        run_adopt_stored()
+    if args.import_candidates:
+        run_import_candidates()
     if args.retry:
         run_retry(args.max_videos)
     if args.reprocess:

@@ -1,0 +1,15 @@
+{
+ "video_id": "Tm1Oth0FIbk",
+ "transcript_hash": "96c5ab92d56e031d31d103fddc95f055eec7c3a730b007f0ef8125cdbab150ac",
+ "extraction_prompt_version": "2",
+ "source": "assistant_backfill_2026-10-17",
+ "channel_name": "Phantom by HKCM",
+ "video_title": "Wer ist der beste Italiener aller Zeiten? 🇮🇹",
+ "published_at": "2026-10-13T17:00:00+00:00",
+ "response": {
+  "claims": [],
+  "extraction_metadata": {
+   "warnings": []
+  }
+ }
+}

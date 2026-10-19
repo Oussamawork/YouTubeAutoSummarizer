@@ -91,10 +91,25 @@ LLM_RETRY_BACKOFF = 2  # base seconds, multiplied by the attempt number
 # while still inside the same window and the provider gets written off.
 LLM_RETRY_AFTER_CAP = env_int("LLM_RETRY_AFTER_CAP", 75)
 TRANSIENT_STATUS = {500, 502, 503, 504}  # 429 is handled separately (quota/rate limit)
+# Server errors are not free. The free tier answers "503 UNAVAILABLE: This model
+# is currently experiencing high demand" in bursts, and every one of those
+# attempts still counts against the model's 20 requests a day: on 2026-10-08
+# and 2026-10-16 the API wrote both summary models off after 2-3 SERVED
+# requests in the first run of the Pacific day, the rest burnt by 503 retries
+# repeated video after video (docs/tdd-gemini-transcripts.md § 10). So a model
+# gets LLM_OVERLOAD_RETRIES retries within one call and at most
+# LLM_OVERLOAD_MAX_FAILED_PER_RUN failed attempts per run; after that it is
+# skipped for the rest of the run and the video DEFERS — a call that only ever
+# saw 5xx is an outage, never a failed summary (that path used to end in
+# manual_review and lose the video for good).
+LLM_OVERLOAD_RETRIES = env_int("LLM_OVERLOAD_RETRIES", 2)
+LLM_OVERLOAD_MAX_FAILED_PER_RUN = env_int("LLM_OVERLOAD_MAX_FAILED_PER_RUN", 3)
 
 # Providers found to be quota/rate-limited during this run. Once a provider 429s
 # persistently, later channels skip it instead of re-hitting the dead endpoint.
 _EXHAUSTED_PROVIDERS = set()
+# Server-error (5xx) attempts per provider this run: the overload breaker.
+_FAILED_ATTEMPTS = {}
 
 # Returned by _call_provider when the complete request does not fit the
 # provider's input capacity. The caller chooses a complete-coverage strategy
@@ -544,7 +559,7 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
     # every truncation into a discard — worse behavior for a bigger setting.
     start_cap = payload["max_tokens"]
     ceiling = max(LLM_MAX_TOKENS_CEILING, start_cap * (2 ** max(1, LLM_MAX_ESCALATIONS)))
-    attempt, escalations, rate_limits = 0, 0, 0
+    attempt, escalations, rate_limits, overloads = 0, 0, 0, 0
     while attempt < LLM_MAX_RETRIES:
         attempt += 1
         try:
@@ -648,13 +663,28 @@ def _call_provider(provider, transcript, title=None, system_prompt=None, user_me
             )
             return QUOTA_EXHAUSTED_SENTINEL
 
-        if resp.status_code in TRANSIENT_STATUS and attempt < LLM_MAX_RETRIES:
+        if resp.status_code in TRANSIENT_STATUS:
+            # Counted, because the free tier counts it (see LLM_OVERLOAD_RETRIES).
+            metered = _metered_model(provider)
+            if metered:
+                gemini_quota.record_failed(metered)
+            failed = _FAILED_ATTEMPTS.get(provider["name"], 0) + 1
+            _FAILED_ATTEMPTS[provider["name"]] = failed
+            overloads += 1
+            if overloads <= LLM_OVERLOAD_RETRIES and failed < LLM_OVERLOAD_MAX_FAILED_PER_RUN:
+                log_warn(
+                    f"Transient {provider['name']} status {resp.status_code} "
+                    f"(attempt {overloads}/{LLM_OVERLOAD_RETRIES + 1}); retrying."
+                )
+                time.sleep(LLM_RETRY_BACKOFF * overloads)
+                attempt -= 1  # an overload has its own budget, like a rate limit
+                continue
             log_warn(
-                f"Transient {provider['name']} status {resp.status_code} "
-                f"(attempt {attempt}/{LLM_MAX_RETRIES}); retrying."
+                f"{provider['name']} is overloaded ({resp.status_code} on {failed} attempt(s) this run); "
+                "skipping it for the rest of the run. Each failed attempt still counts against the "
+                "free daily quota, so the video waits for another model or the next run."
             )
-            time.sleep(LLM_RETRY_BACKOFF * attempt)
-            continue
+            return QUOTA_EXHAUSTED_SENTINEL
 
         # Some providers reject reasoning_effort outright. Drop it and retry
         # rather than lose the summary over an optional parameter.

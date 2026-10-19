@@ -112,6 +112,7 @@ This skips the channel scan and dedup state entirely — useful for any video, s
 | `PERSIST_TRANSCRIPTS` | `true` | Store raw transcripts gzip'd under `data/transcripts/` before any cleaning, so research can be reprocessed without another transcript credit. |
 | `EXHAUSTIVE_RESEARCH_MODE` / `RESEARCH_CHUNK_TOKENS` | `false` / `12000` | High-recall research: extract claims chunk by chunk even when the transcript fits. Multiplies requests; affects only the research branch. |
 | `RESEARCH_BACKFILL_MAX_VIDEOS` | `5` | Videos per run for `research_backfill.py --retry` (research retries from stored transcripts). |
+| `LLM_OVERLOAD_RETRIES` / `LLM_OVERLOAD_MAX_FAILED_PER_RUN` | `2` / `3` | Retries of a 5xx ("503 high demand") within one call, and failed attempts a model may take per run before it is skipped for the rest of the run. The free tier bills failed attempts too, so an overloaded model is left alone instead of being retried video after video, and the video defers (never a failed summary). See `docs/tdd-gemini-transcripts.md` § 10. |
 | `MAX_VIDEOS_PER_RUN` | `0` (no cap) | Max videos processed per channel per run; older ones go first, the rest wait for the next run. `0` processes everything the channel has due. |
 | `NO_TRANSCRIPT_MAX_ATTEMPTS` | `8` | Runs to retry a video whose captions aren't up yet. Giving up needs **this and** `NO_TRANSCRIPT_MIN_HOURS` to be satisfied. |
 | `NO_TRANSCRIPT_MIN_HOURS` | `36` | Never write a video off before it has been chased this long, whatever the polling rate. An attempt count alone is the wrong unit: at one run every two hours, three attempts is six hours, and auto-captions routinely take longer to appear. |
@@ -163,13 +164,20 @@ least want to miss first — the ones at the bottom absorb whatever is left.
 | `SUPADATA_CREDITS_PER_KEY` | `100` | Monthly credits each key contributes to the budget. |
 | `SUPADATA_MONTHLY_BUDGET` | keys × credits | Explicit override for the whole cycle's budget. |
 | `SUPADATA_DAILY_PACING` | `false` | Ration the cycle's credits across its remaining days instead of spending what's needed each run. Off means a day's videos are all processed that day. |
-| `TWELVEDATA_API` (secret) | — | Price data for implied upside, the accuracy scorecard and the price-target chart ([twelvedata.com](https://twelvedata.com), free tier: 800 requests/day, 8/min). Without it prices are unavailable and the jobs say so once per run (the keyless Stooq source it replaced sat behind a browser check and returned nothing to a server, verified 2026-08-17, and has been removed). |
-| `TWELVEDATA_MAX_REQUESTS` | `120` | Ceiling on price requests per run, so a paced run can't outlast its workflow timeout. The Sunday cache warmer raises it to 600. |
 | `SUPADATA_RESET_DAY` | `1` | Day of the month the plan's credits reset. Supadata resets on the plan's anniversary, not the 1st — the dashboard shows it ("Credits reset on 08/17" → set `17`). Only consulted when pacing is enabled: it makes the pacing think the cycle ends sooner than it does; a per-day ceiling of budget ÷ 28 limits the damage, but set it correctly. |
+| `TWELVEDATA_API` (secret) | — | Price data for implied upside, the accuracy scorecard and the price-target chart ([twelvedata.com](https://twelvedata.com), free tier: 800 requests/day, 8/min). Without it prices are unavailable and the jobs say so once per run (the keyless Stooq source it replaced sat behind a browser check and returned nothing to a server, verified 2026-08-17, and has been removed). |
+| `TWELVEDATA_MAX_REQUESTS` | `120` | Ceiling on price requests per run, so a paced run can't outlast its workflow timeout. The cache warmer raises it to 450 (75 minutes at 6/minute). |
+| `WARM_DEADLINE_MINUTES` | `75` | The cache warmer starts no request after this many minutes; what is left goes first next run. |
+| `TRACKER_LOOKBACK_DAYS` | `180` | How far back creators' calls are marked to market (every open call's symbol is refreshed each warm, so this bounds its cost). |
+| `TRACKER_MIN_CALL_AGE_DAYS` | `7` | An open call counts once it is this old; a call reversed sooner is not counted. |
+| `TRACKER_MIN_CREATOR_SAMPLE` | `10` | Creators with fewer marked calls are tagged "small sample". |
+| `TRACKER_CREATOR_HOUSES` | — | JSON `{"channel": "house"}` overriding which channels count as one house (by default a channel whose name contains another channel's name belongs to it). |
+| `RESEARCH_FLIP_MIN_GAP_DAYS` | `7` | The research report's view changes need two videos at least this far apart. |
+| `CONDITIONAL_WINDOW_DAYS` | `30` | The Friday report counts the conditional calls of this many trailing days. |
 
 ### Research dataset (claims) and market signals (on by default):
 
-Every delivered summary also produces **atomic, evidence-backed claims** — one record per asset × metric × direction × target × horizon × condition, each with a verbatim excerpt located in the normalized transcript, the speaker attribution (own view / guest / quoted analyst / question / retrospective), the ticker only when spoken or curated, and a deterministic testability verdict. They live in `data/research/claims.jsonl`; the research ledger `data/research/research_state.json` tracks extraction independently of Telegram delivery (a failed extraction is `failed_retryable` and retried by `research_backfill.py --retry` from the stored transcript, never recorded as "no claims"). `python research_analytics.py --dry-run` prints the data-quality header, consensus (one current view per source per asset per horizon bucket), stance changes and the scorecard. `data/signals.jsonl` continues to be written, now **derived** from the validated claims (`claims.claims_to_legacy_signals` documents the reduction).
+Every delivered summary also produces **atomic, evidence-backed claims** — one record per asset × metric × direction × target × horizon × condition, each with a verbatim excerpt located in the normalized transcript, the speaker attribution (own view / guest / quoted analyst / question / retrospective), the ticker only when spoken or curated, and a deterministic testability verdict. They live in `data/research/claims.jsonl`; the research ledger `data/research/research_state.json` tracks extraction independently of Telegram delivery (a failed extraction is `failed_retryable` and retried by `research_backfill.py --retry` from the stored transcript, never recorded as "no claims"). `python research_analytics.py --dry-run` prints the data-quality header, consensus (one current view per source per asset per horizon bucket), creators vs the market, view changes (different videos at least 7 days apart), the compact conditional calls and the strict scorecard. `data/signals.jsonl` continues to be written, now **derived** from the validated claims (`claims.claims_to_legacy_signals` documents the reduction).
 
 ### Market signals (on by default):
 
@@ -185,37 +193,49 @@ Telegram delivery or dedup state. The data is research input for later
 aggregation (sentiment trends, consensus flips, per-channel track records) —
 it is not investment advice.
 
-Once records accumulate, a **weekly market pulse** is sent every Monday by
-`.github/workflows/weekly-pulse.yml` (also runnable on demand, or locally with
-`python market_pulse.py --dry-run`): the trailing week's top mentioned assets
-with net stance and stated actions, consensus flips versus the prior week, and
-assets newly on the radar. Weeks with no data are skipped silently. Once the
-Friday scorecard has enough history (5+ evaluated calls for a channel), the
-pulse's consensus becomes **accuracy-weighted** — each channel's stance counts
-at 0.5 + its 7-day hit rate, shown in a report footer — and price targets are
-annotated with the **implied move** versus the latest close (best-effort).
-The text pulse is followed by a **photo album of six charts** built for
+Both weekly reports compare the creators' calls with **what the market did
+since** (`creator_tracker.py`): every call — one per creator, asset and change
+of view — is marked to market at the last completed trading session and held
+against the S&P 500 (crypto: Bitcoin) over the same days. Every rate prints
+its denominator ("right 26/62 · beat 21/62"), creators are listed by number
+of calls and never ranked, and the results are labelled **mark-to-market, not
+a verdict**. `python creator_tracker.py` prints it offline from the committed
+data.
+
+Every Monday, `.github/workflows/weekly-pulse.yml` sends the **weekly market
+pulse** (`python market_pulse.py --dry-run` locally): a one-paragraph
+takeaway, what the market did (S&P 500, Nasdaq-100, Bitcoin, Ether over the
+week and four weeks), where creators agree — each row with the move since
+their first call against the S&P 500 — one pooled creators-vs-market line,
+where they disagree, last week's picks one week on (✅/➖/❌), consensus
+changes, assets new on the radar, the mood and what creators say they own.
+Two channels of one house (HKCM and Phantom by HKCM) count once wherever two
+creators must agree. It is followed by a **photo album** of charts built for
 non-technical reading — each carries a plain-English headline and a "how to
-read" line on the image itself. Charts are best-effort: any that fails, or has
-too little history to mean anything, is skipped and never blocks the text.
+read" line on the image. Charts are best-effort and never block the text.
 
-Prices are not fetched by those jobs on the hot path. The provider's free tier
-allows 8 requests/minute and the dataset spans hundreds of symbols, so
-`.github/workflows/warm-prices.yml` runs every **Sunday** and tops up a
-committed cache of daily closes (`data/prices.json`, `python warm_prices.py
---dry-run` to see what it would fetch). Closes are immutable history, so a
-symbol whose calls have all elapsed is fetched once and never again — after the
-first warm, a normal week only pays for new tickers and still-open horizons.
-The Monday pulse and Friday scorecard read the cache and only reach the network
-for gaps.
+Every Friday, `.github/workflows/weekly-scorecard.yml` sends the **creators
+vs the market report** (`python channel_scorecard.py --dry-run` locally): the
+market, one line per creator (calls, right, beat, median vs the market, best
+and worst call), where creators agreed and disagreed with the move since,
+open price targets and how far they have come, then a two-chart album
+("creators vs the market" and "shared calls since the call"), then the
+**strict scorecard** of dated forecasts whose date has passed — the verdict
+layer, experimental and unranked, which stays small until the creators'
+horizons (mostly 2027-28) mature.
 
-Every Friday, `.github/workflows/weekly-scorecard.yml` sends a **per-channel
-accuracy scorecard** (`python channel_scorecard.py --dry-run` locally): each
-channel's directional calls are checked against free daily prices — was the
-price higher after a bullish call, lower after a bearish one — at 7- and
-30-day horizons, with hit rates and average move in the called direction.
-It waits automatically until the dataset spans at least a week, and always
-shows sample sizes (small samples are noise, not skill).
+Prices are never fetched by those reports on the hot path. The provider's
+free tier allows 8 requests/minute and the dataset spans hundreds of symbols,
+so `.github/workflows/warm-prices.yml` runs every **Sunday and Friday** at
+06:00 UTC and tops up a committed cache of daily closes (`data/prices.json`,
+`python warm_prices.py --dry-run` to see what it would fetch and how long it
+would take). It covers exactly what the tracker reads, stops at the last
+completed session (no partial candles), fetches the market and the newest
+calls first, and stops starting requests after 75 minutes, saving as it
+goes. After the warm, `python ticker_audit.py` checks the tickers and the
+cached series offline (wrong instruments, stated prices vs cached closes,
+stale or partial series) and prints the verification worklist; `--strict`
+exits 1 on errors.
 
 ### Dedup state (`seen_videos.json`):
 

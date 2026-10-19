@@ -40,7 +40,8 @@ BENCHMARKS (`resolve_benchmark`)
   methods are never ranked against each other.
 
 CALENDAR CONFIDENCE
-  Only NYSE closures are modelled by rule (calendar_confidence=full);
+  Only NYSE closures are modelled by rule (calendar_confidence=full), its
+  13:00 half days included (nyse_early_closes);
   crypto is continuous. Every other exchange is weekday-only
   (weekdays_only): its local holidays are NOT known here, so a publication
   or evaluation date on one resolves to whatever close the provider next
@@ -182,6 +183,23 @@ def nyse_holidays(year):
     return days
 
 
+def nyse_early_closes(year):
+    """NYSE half days (the close is 13:00 New York): the day after
+    Thanksgiving, Christmas Eve on a weekday, and July 3 when Independence
+    Day falls Tuesday to Friday — never a day that is itself a holiday. A
+    video published after 13:00 on one of them comes after that day's close."""
+    holidays = nyse_holidays(year)
+    days = {_nth_weekday(year, 11, 3, 4) + timedelta(days=1)}
+    if date(year, 12, 24).weekday() < 5:
+        days.add(date(year, 12, 24))
+    if 1 <= date(year, 7, 4).weekday() <= 4:
+        days.add(date(year, 7, 3))
+    return {d for d in days if d not in holidays}
+
+
+EARLY_CLOSE = time(13, 0)
+
+
 def is_trading_day(exchange, day):
     if exchange.calendar == "continuous":
         return True
@@ -230,9 +248,10 @@ def session_relation(exchange, published_utc, had_time=True):
     if not had_time:
         return "time_unknown", day
     t = local.time()
+    close = EARLY_CLOSE if exchange.calendar == "nyse" and day in nyse_early_closes(day.year) else exchange.close
     if t < exchange.open:
         return "before_open", day
-    if t >= exchange.close:
+    if t >= close:
         return "after_close", day
     return "during_session", day
 
@@ -392,6 +411,13 @@ def evaluate_target(series, target, direction, entry_day, eval_day):
     daily_close_target_reached, daily_close_first_reached_date,
     price_data_granularity. Direction is "bullish" (reach at or above) or
     "bearish" (reach at or below).
+
+    Every day in the window counts in full, its high and low included, so the
+    window must start after the publication: a caller whose entry session
+    began before the video either starts the day after it (creator_tracker,
+    from the statement's close) or replaces that day's high and low with its
+    close (research_analytics._post_publication_range). A high that printed
+    before the video was said must never count as the target being reached.
     """
     up = direction == "bullish"
 
@@ -478,6 +504,8 @@ def resolve_benchmark(asset_type, exchange, sector=None, symbol=None):
                         ((asset_type, "GLOBAL", None), "asset_class")):
         if key[2] is None and method == "sector":
             continue
+        if method == "country" and country == "GLOBAL":
+            continue       # a 24/7 asset has no country: ETH vs BTC is the asset-class rule
         bench = table.get(key)
         if bench:
             if symbol and bench == symbol:

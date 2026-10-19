@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import sys
 import time
 from collections import defaultdict
@@ -8,23 +9,39 @@ from datetime import datetime, timedelta, timezone
 import requests
 from dotenv import load_dotenv
 
+import instruments
 import price_cache
 import scorecard_pricing as sp
 from helpers import env_int
-from log import log_info, log_warn, log_error
-from sendToTelegram import send_telegram_text
+from log import describe_error, log_info, log_warn, log_error
+from sendToTelegram import send_telegram_photo_album, send_telegram_text
 from signals_data import (
     SIGNALS_FILE, load_signals, _parse_date, _iter_assets, canonical_ticker,
     UNPRICEABLE_TICKERS,
 )
 
-# Weekly per-source accuracy scorecard (Fridays, weekly-scorecard.yml).
+# The Friday report (weekly-scorecard.yml, Fridays 16:00 UTC).
 #
-# PRODUCTION PATH (main): canonical claims through canonical_claims.load_
-# canonical_claims, scored by research_analytics.scorecard under the rules in
-# scorecard_pricing (exchange-aware next-close entry, split-adjusted prices
-# with recorded provenance, per-claim benchmarks or an honest null). It is
-# reported as EXPERIMENTAL and unranked until SCORECARD_RANKINGS=true.
+# PRODUCTION PATH (main -> generate_weekly_report), in reading order:
+#   1. Creators vs the market (creator_tracker): every creator's calls since
+#      they were made, marked to the last completed session and held against
+#      the S&P 500 (crypto: Bitcoin) over the same days. Labelled
+#      "mark-to-market, not a verdict", never ranked. It reads the committed
+#      price cache only (creator_tracker.cache_fetcher) and never spends a
+#      live request: warm_prices covers creator_tracker.needed_price_ranges,
+#      Sundays and Fridays at 06:00 UTC.
+#   2. Its two charts (pulse_charts.render_tracker_charts), best-effort.
+#   3. The strict scorecard (generate_canonical_scorecard): canonical claims
+#      whose dated forecast has matured, scored by research_analytics.scorecard
+#      under scorecard_pricing (exchange-aware next-close entry, split-adjusted
+#      prices with recorded provenance, per-claim benchmarks or an honest
+#      null), plus the conditional calls of the last CONDITIONAL_WINDOW_DAYS.
+#      Below the sample minimum it is compact: one plain line per scored
+#      forecast, when the next ones mature, and a one-line conditional count.
+#      The verdict layer; it stays EXPERIMENTAL and unranked until
+#      SCORECARD_RANKINGS=true. Its matured forecasts are the only live price
+#      requests the job makes (cache first, live for gaps,
+#      TWELVEDATA_MAX_REQUESTS per run).
 #
 # LEGACY PATH (evaluate / build_scorecard / generate_scorecard, --legacy):
 # the original fixed 7/30-day directional hit rate over data/signals.jsonl —
@@ -72,28 +89,94 @@ HORIZONS = (7, 30)
 MIN_DATASET_AGE_DAYS = 7
 
 DISCLAIMER = (
+    "Mark-to-market since each call, and a strict scorecard of matured forecasts. "
+    "Small samples are noise. Research input, not investment advice."
+)
+# The legacy --legacy report's own footer: it measures something else (a
+# fixed 7/30-day directional hit rate), so it keeps the words that say so.
+LEGACY_DISCLAIMER = (
     "⚠️ Directional hit rate vs price after the call. Small samples are noise. "
     "Research input, not investment advice."
 )
 
+# The strict block's conditional-forecast summary covers claims published in
+# this many trailing days. All-time it listed 445 rows nobody could act on.
+CONDITIONAL_WINDOW_DAYS = env_int("CONDITIONAL_WINDOW_DAYS", 30)
+STRICT_HEADER = "🎯 Strict scorecard — matured, dated forecasts only"
+DATA_LINE = "Data: canonical claims (data/research/claims.jsonl, active runs only)"
+# Below the scorecard's sample minimum the strict block is compact: one plain
+# line per scored forecast, when the next ones mature, and a one-line
+# conditional count (the research report keeps the full list).
+COMPACT_DATA_LINE = ("The creators' own dated price forecasts matured by the {close} close, from the canonical "
+                     "claims (next-close entry, split-adjusted prices).")
+_BENCHMARK_NAMES = {"spy.us": "S&P 500", "btcusd": "Bitcoin"}
+# Where --dry-run (and the send path) writes the tracker chart PNGs; charts/
+# is gitignored.
+CHARTS_DIR = "charts/scorecard"
+CHART_ALBUM_CAPTION = ("Creators vs the market in charts — how to read each one is written on "
+                       "the image.")
 
-def symbol_for(asset):
+# The shape of a US listing's ticker: letters, optionally a share class
+# (BRK.B, MOG.A). Typed "stock", anything else — a KRX code (000660), a
+# Taiwan or German listing (2454.TW, SAP.DE) — would become a ".us" symbol
+# that 404s on every warm run, so the type rule does not price it.
+_US_TICKER = re.compile(r"[A-Z]{1,6}(?:[.-][A-C])?")
+_COIN_TICKER = re.compile(r"[A-Z0-9]{1,10}")
+
+
+def symbol_for(asset, channel=None):
     """
     Map an asset entry to an internal symbol, or None when it isn't priceable.
     Uses the canonical ticker (recorded, else the curated alias table), so a
     call on "Chevron" scores even though the speaker never said "CVX" — a
     third of directional calls were ticker-less and invisible before this.
+    Given the row's `channel`, that channel's own spelling comes first
+    (claims.CHANNEL_ALIASES, as canonical_claims.resolved_ticker applies it
+    to claims): Couch Investor's "New" is Nu Holdings, never new.us.
+
+    The instrument registry decides first (instruments.resolve_instrument,
+    given no claim type): the model-written type is the least reliable field
+    a legacy row has. "Bitcoin" typed stock prices as btcusd — never btc.us,
+    the Grayscale Bitcoin Mini Trust — and SpaceX or CoreWeave typed
+    "other" as spcx.us / crwv.us. Only for a ticker that is both a coin and a
+    US listing (canonical_claims.COLLIDING_TICKERS) does an explicit type
+    choose the namespace, as in canonical_claims.priceable_symbol. An
+    unregistered ticker falls back to the type rule: stock / etf ->
+    "<t>.us" (US-shaped tickers only), crypto -> "<t>usd"; index, commodity
+    and macro symbols vary too much per provider. UNPRICEABLE_TICKERS give
+    None.
     """
-    ticker = (canonical_ticker(asset) or "").upper()
+    ticker = (_channel_ticker(asset, channel) or canonical_ticker(asset) or "").upper()
     if not ticker or ticker in UNPRICEABLE_TICKERS:
         return None
-    ticker = ticker.lower()
     asset_type = asset.get("type")
+    inst = instruments.resolve_instrument(ticker, asset.get("name"))
+    if inst is not None and not _type_overrides_registry(ticker, asset_type, inst):
+        return inst.symbol
     if asset_type in ("stock", "etf"):
-        return f"{ticker}.us"
+        return f"{ticker.lower()}.us" if _US_TICKER.fullmatch(ticker) else None
     if asset_type == "crypto":
-        return f"{ticker}usd"
+        return f"{ticker.lower()}usd" if _COIN_TICKER.fullmatch(ticker) else None
     return None  # index/commodity/macro symbols vary too much per provider
+
+
+def _channel_ticker(asset, channel):
+    """The ticker `channel`'s own spelling of the asset's name stands for
+    (claims.channel_ticker), or None — always None without a channel."""
+    if not channel:
+        return None
+    import claims  # lazily, like the rest of this module's research imports
+    return claims.channel_ticker(asset.get("name"), channel)
+
+
+def _type_overrides_registry(ticker, asset_type, inst):
+    """True for a COLLIDING_TICKERS ticker (a coin AND a US listing) whose
+    explicit stock / etf / crypto type names the other namespace than the
+    registry's row: Interlink typed stock is not Chainlink."""
+    import canonical_claims  # lazily, like the rest of this module's research imports
+    explicit = {"stock": "listing", "etf": "listing", "crypto": "coin"}.get(asset_type)
+    kind = "coin" if inst.asset_type == "crypto" else "listing"
+    return ticker in canonical_claims.COLLIDING_TICKERS and explicit is not None and explicit != kind
 
 
 def twelvedata_key():
@@ -437,9 +520,9 @@ def _directional_calls(records):
         stance = asset.get("stance")
         if stance not in ("bullish", "bearish"):
             continue
-        symbol = symbol_for(asset)
-        signal_date = _parse_date(record.get("date"))
         channel = record.get("channel_name")
+        symbol = symbol_for(asset, channel)
+        signal_date = _parse_date(record.get("date"))
         if symbol and signal_date and channel:
             yield signal_date, channel, asset.get("ticker"), symbol, stance
 
@@ -528,7 +611,7 @@ def build_scorecard(stats, today):
     for channel in sorted(lines_by_channel, key=rank):
         lines.append(lines_by_channel[channel])
     lines.append("")
-    lines.append(DISCLAIMER)
+    lines.append(LEGACY_DISCLAIMER)
     return "\n".join(lines)
 
 
@@ -551,52 +634,224 @@ def generate_scorecard(today=None, path=SIGNALS_FILE, price_fetcher=fetch_prices
     return build_scorecard(stats, today)
 
 
+def _session_label(day):
+    """'Thu Oct 15' for a date."""
+    return f"{day:%a %b} {day.day}"
+
+
 def generate_canonical_scorecard(today=None, price_fetcher=fetch_price_series, claims=None):
     """
-    The production scorecard: canonical claims (active runs, no legacy rows,
-    no repeats) scored under scorecard_pricing. Returns "" when nothing is
-    scorable yet. Experimental and unranked unless SCORECARD_RANKINGS=true.
+    The strict scorecard block — the Friday report's verdict layer, sent
+    after the creators-vs-market report (generate_weekly_report). Canonical
+    claims (active runs, no legacy rows, no repeats) whose dated, testable
+    forecast has matured, scored by research_analytics.scorecard under
+    scorecard_pricing, then the conditional calls published in the last
+    CONDITIONAL_WINDOW_DAYS. With fewer scored forecasts than the sample
+    minimum the block is compact (_compact_scorecard_lines: one plain line
+    per forecast, when the next ones mature, a one-line conditional count);
+    from the minimum on it carries research_analytics' full source lines
+    and the conditional examples.
+
+    Forecasts count as matured by the last COMPLETED session
+    (creator_tracker.default_as_of(today)): the Friday job runs at 16:00 UTC,
+    mid-session, so a forecast ending today would be judged on a bar still
+    printing. The block is returned even when nothing has matured — a reader
+    should see that the verdict layer is still empty, and why; "" only when
+    there are no canonical claims. Experimental and unranked unless
+    SCORECARD_RANKINGS=true. `price_fetcher` is cache first, live for gaps:
+    the job's only live price requests.
     """
     import canonical_claims
+    import creator_tracker
     import research_analytics as ra
     today = today or datetime.now(timezone.utc).date()
     claims = canonical_claims.load_canonical_claims() if claims is None else claims
     if not claims:
         log_info("No canonical claims yet; the scorecard starts once research data accumulates.")
         return ""
-    sc = ra.scorecard(claims, today, price_fetcher)
+    as_of = creator_tracker.default_as_of(today)
+    sc = ra.scorecard(claims, as_of, price_fetcher)
     excluded, min_sample = sc.pop("_excluded"), sc.pop("_min_sample")
     rankings_on = sc.pop("_rankings_enabled")
     if not sc:
-        log_info(f"No matured, scorable forecasts yet (excluded: {excluded}).")
-        return ""
+        log_info(f"No matured, scorable forecasts yet (excluded: {excluded}); "
+                 "the strict block says so instead of being skipped.")
     rankable = ra.rankable_sources(sc, min_sample)
-    lines = [f"🎯 Source Scorecard — as of {today.isoformat()} "
-             f"({'ranked' if rankings_on and rankable else sp.SCORECARD_EXPERIMENTAL_LABEL})",
-             "Data: canonical claims (data/research/claims.jsonl, active runs only)", "",
-             ra.format_scorecard_lines(sc, excluded, min_sample, rankings_on, rankable), ""]
-    conditional = ra.format_conditional_report(ra.conditional_forecast_report(claims, today))
-    if conditional:
-        lines += [conditional, ""]
-    lines.append(DISCLAIMER)
+    label = "ranked" if rankings_on and rankable else sp.SCORECARD_EXPERIMENTAL_LABEL
+    window_start = today - timedelta(days=CONDITIONAL_WINDOW_DAYS)
+    window = [c for c in claims if canonical_claims.in_window(c, window_start, today)]
+    conditionals = ra.conditional_forecast_report(window, today)
+    scored = sum(v["n"] for v in sc.values())
+    if scored >= min_sample:
+        lines = [f"{STRICT_HEADER} ({label})",
+                 f"{DATA_LINE} · forecasts matured by the {_session_label(as_of)} close", "",
+                 ra.format_scorecard_lines(sc, excluded, min_sample, rankings_on, rankable)]
+        conditional = ra.format_conditional_report(conditionals)
+        if conditional:
+            lines += ["", conditional]
+    else:
+        lines = [f"{STRICT_HEADER} ({label})", COMPACT_DATA_LINE.format(close=_session_label(as_of))]
+        lines += _compact_scorecard_lines(sc, excluded, min_sample, claims, as_of)
+        conditional = _conditional_count_line(conditionals)
+        if conditional:
+            lines += ["", conditional]
+    lines += ["", DISCLAIMER]
     return "\n".join(lines)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Per-source accuracy scorecard from canonical claims + daily prices"
-    )
-    parser.add_argument("--dry-run", action="store_true", help="Print instead of sending")
-    parser.add_argument("--legacy", action="store_true",
-                        help="Use the legacy 7/30-day scorecard over data/signals.jsonl (compatibility only)")
-    args = parser.parse_args()
+def _mon_d(value):
+    """'Sep 17' from an ISO date string or a date; '?' otherwise."""
+    try:
+        day = value if hasattr(value, "strftime") else datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return "?"
+    return f"{day:%b} {day.day}"
 
-    scorecard = generate_scorecard() if args.legacy else generate_canonical_scorecard()
+
+def _forecast_line(source, s):
+    """One scored forecast in plain words: 'More Crypto Online — ETH ▼ Sep 17
+    → Oct 8: +1.1% vs Bitcoin +7.0% — wrong direction'."""
+    label = s.get("instrument_ticker") or s.get("symbol") or "?"
+    arrow = "▲" if s.get("direction") == "bullish" else "▼"
+    ret = s.get("raw_return") or 0.0
+    line = (f"• {source} — {label} {arrow} {_mon_d(s.get('entry_resolved_trading_date'))} → "
+            f"{_mon_d(s.get('evaluation_resolved_trading_date'))}: {100 * ret:+.1f}%")
+    bench = s.get("benchmark_symbol")
+    if bench and s.get("benchmark_return") is not None:
+        name = _BENCHMARK_NAMES.get(bench) or bench.split(".")[0].upper()
+        line += f" vs {name} {100 * s['benchmark_return']:+.1f}%"
+    if not ret:
+        line += " — no move"
+    else:
+        line += " — right direction" if (ret > 0) == (s.get("direction") == "bullish") else " — wrong direction"
+    if s.get("target_test_method"):
+        line += f"; target {s.get('target_value')} {'reached' if s.get('target_reached') else 'not reached'}"
+    return line
+
+
+def _next_maturity(claims, as_of):
+    """The earliest end date after `as_of` among the dated, testable price
+    forecasts still waiting to mature, or None."""
+    import canonical_claims
+    ends = []
+    for c in canonical_claims.headline_claims(claims):
+        if not c.get("testable") or c.get("condition") or c.get("forecast_metric") not in (None, "price"):
+            continue
+        try:
+            end = datetime.strptime(str(c.get("forecast_end_date"))[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if end > as_of:
+            ends.append(end)
+    return min(ends) if ends else None
+
+
+def _compact_scorecard_lines(sc, excluded, min_sample, claims, as_of):
+    """The strict block below the sample minimum: one plain line per scored
+    forecast (unranked), then how many dated price forecasts mature later
+    and when the next one does."""
+    scored = sum(v["n"] for v in sc.values())
+    lines = [f"{scored} scored so far (unranked) — a comparison needs {min_sample}." if scored
+             else "• no matured forecasts yet (unranked)."]
+    for source in sorted(sc):
+        lines += [_forecast_line(source, s) for s in sc[source].get("scored") or []]
+    waiting = (excluded or {}).get("not_matured", 0)
+    if waiting:
+        nxt = _next_maturity(claims, as_of)
+        lines.append(f"{waiting:,} dated price forecast{' matures' if waiting == 1 else 's mature'} later"
+                     + (f" (next: {_mon_d(nxt)})." if nxt else "."))
+    return lines
+
+
+def _conditional_count_line(rows):
+    """One line for the creators' conditional calls in the window (they wait
+    for their condition and stay out of the track record); the research
+    report lists them."""
+    import research_analytics as ra
+    own = [r for r in rows or [] if r.get("own_view")]
+    if not own:
+        return ""
+    evaluated = sum(1 for r in own if r.get("status") in ra._EVALUATED_STATUSES)
+    return (f"🔀 {len(own)} own conditional call{'' if len(own) == 1 else 's'} in the last {CONDITIONAL_WINDOW_DAYS} "
+            f"days (\"buy if it drops to …\") stay out of the track record; "
+            + (f"{evaluated} evaluated so far." if evaluated else "none evaluated yet.")
+            + " The research report lists them.")
+
+
+def generate_weekly_report(today=None, claims=None, price_fetcher=fetch_price_series,
+                           tracker_fetcher=None, charts_dir=None):
+    """
+    The Friday report, in reading order:
+
+      1. creators vs the market — creator_tracker.track_record at
+         creator_tracker.default_as_of(today) (the Thursday close for the
+         Friday run), formatted by creator_tracker.format_report. Read
+         through `tracker_fetcher`, by default creator_tracker.cache_fetcher():
+         the committed price cache only, never a live request;
+      2. its charts, when `charts_dir` is given: pulse_charts'
+         render_tracker_charts over build_tracker_chart_data(record), drawn
+         from the same record as the text. Best-effort: any failure is logged
+         and leaves no charts, never a broken report;
+      3. the strict scorecard block, generate_canonical_scorecard(today,
+         price_fetcher, claims) — the only part that may fetch live.
+
+    Returns {"messages": [str], "charts": [path], "record": dict}. The
+    messages are the tracker's (none when no call is marked yet) followed by
+    the strict block, which is always last and present whenever there are
+    claims. With no claims: no messages, no charts and an empty record.
+    """
+    import canonical_claims
+    import creator_tracker
+    today = today or datetime.now(timezone.utc).date()
+    claims = canonical_claims.load_canonical_claims() if claims is None else claims
+    if not claims:
+        log_info("No canonical claims yet; the Friday report starts once research data accumulates.")
+        return {"messages": [], "charts": [], "record": {}}
+    as_of = creator_tracker.default_as_of(today)
+    record = creator_tracker.track_record(claims, as_of, tracker_fetcher or creator_tracker.cache_fetcher())
+    stats = record["stats"]
+    source = "the given fetcher" if tracker_fetcher else "the price cache only, no live requests"
+    log_info(f"Creators vs the market: {stats['calls']} calls from {stats['video_calls']} video calls, "
+             f"{stats['scored']} marked to market at {record['as_of']} (requested {as_of}; read from {source}).")
+    worklist = creator_tracker.unpriced_assets(record)
+    if worklist:
+        # The ticker gaps behind "no ticker" / "not in the instrument
+        # registry", for the maintainer (ticker_audit has the full list).
+        log_info("Calls with no instrument (the ticker worklist): "
+                 + ", ".join(f"{asset} {n}" for asset, n in worklist))
+    if record["as_of"] < as_of:
+        # Maintainer detail for the workflow log; the report itself warns
+        # readers once the prices are more than a week old.
+        log_warn(f"The newest S&P 500 close in the price cache is {record['as_of']}, before the requested "
+                 f"{as_of}: calls are marked to that close. Has the Friday 06:00 UTC warm-prices run "
+                 "succeeded?")
+    messages = list(creator_tracker.format_report(record))
+    charts = _tracker_charts(record, charts_dir) if charts_dir else []
+    strict = generate_canonical_scorecard(today, price_fetcher, claims=claims)
+    if strict:
+        messages.append(strict)
+    return {"messages": messages, "charts": charts, "record": record}
+
+
+def _tracker_charts(record, out_dir):
+    """The creators-vs-market PNGs for `record`, or [] — never raises."""
+    try:
+        import pulse_charts
+        paths = pulse_charts.render_tracker_charts(pulse_charts.build_tracker_chart_data(record), out_dir)
+        return [p for p in (paths or []) if p]
+    except Exception as e:  # noqa: BLE001 - charts illustrate the text and must never block it
+        log_warn(f"Creators-vs-market charts unavailable this week: {describe_error(e)}")
+        return []
+
+
+def _legacy_main(dry_run):
+    """--legacy: the 7/30-day hit rate over data/signals.jsonl, unchanged."""
+    scorecard = generate_scorecard()
     if not scorecard:
         log_info("Nothing to score this week; skipping the scorecard.")
         return 0
 
-    if args.dry_run:
+    if dry_run:
         print(scorecard)
         return 0
 
@@ -610,6 +865,59 @@ def main():
         log_info("Weekly channel scorecard sent.")
         return 0
     return 1
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Friday report: creators vs the market (mark-to-market from the price cache), "
+                    "its charts, and the strict scorecard of matured forecasts"
+    )
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print every message and write the charts locally instead of sending")
+    parser.add_argument("--legacy", action="store_true",
+                        help="Use the legacy 7/30-day scorecard over data/signals.jsonl (compatibility only)")
+    parser.add_argument("--charts-dir", default=CHARTS_DIR,
+                        help=f"Directory the chart PNGs are written to (default: {CHARTS_DIR})")
+    parser.add_argument("--no-charts", action="store_true", help="Text only, without the chart album")
+    args = parser.parse_args(argv)
+
+    if args.legacy:
+        return _legacy_main(args.dry_run)
+
+    report = generate_weekly_report(charts_dir=None if args.no_charts else args.charts_dir)
+    messages, charts = report["messages"], report["charts"]
+    if not messages:
+        log_info("Nothing to report this week; skipping the Friday report.")
+        return 0
+
+    if args.dry_run:
+        print("\n\n".join(messages))
+        if charts:
+            log_info(f"Charts written: {', '.join(charts)}")
+        return 0
+
+    token = os.getenv("TELEGRAM_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHANNEL_ID")
+    if not token or not chat_id:
+        log_error("TELEGRAM_TOKEN and TELEGRAM_CHANNEL_ID must be set to send the scorecard.")
+        return 1
+
+    # The strict block is always the last message (generate_weekly_report).
+    *tracker_messages, strict = messages
+    for i, text in enumerate(tracker_messages, 1):
+        if not send_telegram_text(token, chat_id, text):
+            log_error(f"Creators-vs-market message {i}/{len(tracker_messages)} was not sent; "
+                      "stopping so no later part arrives without it.")
+            return 1
+    # The charts illustrate the text; failing to send them must not fail the run.
+    if charts and not send_telegram_photo_album(token, chat_id, charts, caption=CHART_ALBUM_CAPTION):
+        log_warn("Chart album failed to send; the text report goes out without it.")
+    if not send_telegram_text(token, chat_id, strict):
+        log_error("The strict scorecard block was not sent.")
+        return 1
+    log_info(f"Friday report sent: {len(tracker_messages)} creators-vs-market message(s), "
+             f"{len(charts)} chart(s) and the strict scorecard.")
+    return 0
 
 
 if __name__ == "__main__":

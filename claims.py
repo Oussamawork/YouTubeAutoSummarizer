@@ -6,11 +6,13 @@ direction, one target, one horizon, one condition. "Bearish on Nvidia for
 three months but bullish over five years" is two claims, never stance=mixed.
 The model proposes candidates; THIS module decides what enters the dataset:
 it locates each claim's verbatim evidence in the normalized transcript,
-checks that every number the claim carries appears in that evidence, refuses
-tickers the speaker did not say, resolves entities through the curated
-tables only, turns relative horizons into dates only under documented rules,
-and computes testability deterministically. Anything it cannot verify stays
-in the record with review_required=True and out of headline analytics.
+checks that every number the claim carries appears in that evidence, lets
+the curated tables decide the entity (a model ticker counts only when the
+evidence or the title carries it as a ticker), tells markets, baskets and
+metrics apart from single instruments, turns relative horizons into dates
+only under documented rules, and computes testability deterministically.
+Anything it cannot verify stays in the record with review_required=True and
+out of headline analytics.
 
 The compatibility view (`claims_to_legacy_signals`) reduces validated claims
 back into the shape data/signals.jsonl consumers read, and marks every place
@@ -22,10 +24,18 @@ import re
 from datetime import date, datetime, timedelta, timezone
 
 from log import log_info, log_warn
-from signals_data import ASSET_ALIASES, TICKER_ALIASES, learned_tickers
+from signals_data import (ASSET_ALIASES, COMMON_WORD_NAMES, FORMER_TICKERS, LISTED_TICKER_KEYS,
+                          NAME_SUFFIXES as _NAME_SUFFIXES, NOT_A_TICKER, TICKER_ALIASES, learned_tickers)
 
 SCHEMA_VERSION = "2"
 EXTRACTION_PROMPT_VERSION = "2"
+# The entity-resolution rules' own version, stored on every claim. Bumped
+# whenever a resolution rule or table below changes: canonical_claims.reresolve
+# re-runs resolution at load time on rows resolved under an older version, so
+# stored claims follow the current rules without a re-extraction. It is
+# deliberately NOT part of the run key (research_state.run_key): a resolution
+# change must never mark stored runs stale.
+RESOLUTION_VERSION = "3"
 
 # --- Enumerations -----------------------------------------------------------
 
@@ -78,6 +88,15 @@ PORTFOLIO = {"long", "short", "owns_unspecified", "no_position", "not_stated", "
 EXTRACTION_CONFIDENCE = {"high", "medium", "low"}
 ENTITY_STATUS = {"confirmed", "probable", "ambiguous", "unresolved"}
 TICKER_SOURCES = {"spoken", "title", "curated_mapping", "unresolved"}
+# What a claim's subject IS: one security or coin; a market (index, sector,
+# commodity, macro theme: never a ticker); a basket of several assets; or a
+# metric / segment of a company ("gross margin", "the AWS segment"), whose
+# company ticker is kept for traceability only.
+SUBJECT_KINDS = {"instrument", "market", "basket", "metric"}
+# Non-blocking notes on how the model's ticker was treated. None of them is a
+# review reason: the curated tables decided, and the note records it.
+RESOLUTION_NOTES = {"ticker_spoken_replaced", "ticker_spoken_unverified", "ticker_equals_name_unverified",
+                    "crypto_title_coreference", "multi_asset_subject"}
 COVERAGE = {"full", "chunked_full", "partial"}
 ASSET_TYPES = {"stock", "crypto", "etf", "index", "commodity", "macro", "currency",
                "bond", "private_company", "sector", "other"}
@@ -407,12 +426,17 @@ _SHORT_RE = re.compile(r"\b(i'?m short|i am short|we'?re short|we are short|shor
                        re.IGNORECASE)
 _NO_POSITION_RE = re.compile(r"\b(i don'?t own|i do not own|i have no position|no position in|"
                              r"i sold (all|out|everything|my (whole )?position))\b", re.IGNORECASE)
-_TICKER_WORD = re.compile(r"(?<![\w$])\$?([A-Za-z]{1,6})(?![\w])")
 # Generic references whose referent lives in the surrounding transcript.
 _GENERIC_SUBJECT = re.compile(
     r"^(it|its|it'?s|they|them|their|this|that|the (stock|company|name|shares|share price|coin|token|etf|"
     r"business|firm)|this (stock|company|name|one|coin|token|business)|that (stock|company|name|one)|"
     r"(the )?shares|the price)$", re.IGNORECASE)
+# More references of the same kind, including the German channels' ("die
+# Aktie", "das Unternehmen"). Bare "stocks" is not one: it means the market.
+_GENERIC_EXTRA = re.compile(
+    r"^(these|those|these shares|those shares|this kind of business|business|stock|"
+    r"(die|diese) aktie|(der|den|dem) kurs|(das|dieses) unternehmen|(die|diese) firma|"
+    r"(der|dieser|den) (coin|token)|es)$", re.IGNORECASE)
 # How far back a generic reference may look for its subject: the sentences
 # just before the evidence, inside the same segment.
 COREFERENCE_SENTENCES = 2
@@ -421,6 +445,8 @@ COREFERENCE_MAX_CHARS = 400
 # series or a scheduled release settles. Each rule records the source that
 # would settle it. Anything else stays a subjective condition — the claim is
 # recorded as conditional, not testable, with the specific reason.
+# ("6 months", "5 Jahre"; a hyphenated "50-day" / "200-week" average is a level)
+_NOT_A_SPAN = r"(?!\s*(?:days?|weeks?|months?|quarters?|years?|hours?|minutes?|jahre?n?|monate?n?|wochen?|tage?n?)\b)"
 OBSERVABLE_CONDITIONS = (
     (re.compile(r"\b(fed|fomc|federal reserve|central bank|ecb|boe|boj)\b.*\b(cut|cuts|cutting|hike|hikes|"
                 r"hiking|raise|raises|lower|lowers|pause|pauses|hold|holds)\b|\brate (cut|hike)s?\b",
@@ -433,17 +459,25 @@ OBSERVABLE_CONDITIONS = (
     (re.compile(r"\b(approv(al|ed|es)|fda|launch(es|ed)?|ships?|delivers?|merger|acquisition|"
                 r"deal closes|ipo|listing|halving|etf approval)\b", re.IGNORECASE),
      "scheduled_event", "public_announcements"),
-    (re.compile(r"(\$\s?\d|\d+(\.\d+)?\s?(k|thousand|million|billion|trillion|%|percent)?\b).*"
+    # A price level is a number with a comparator — never a span of time:
+    # "over the next 6 months" and "hold it for the next 5 years" are not levels.
+    (re.compile(r"(\$\s?\d|\d+(\.\d+)?\s?(k|thousand|million|billion|trillion|%|percent)?\b)" + _NOT_A_SPAN + r".*"
                 r"\b(above|below|under|over|beyond|past|through|breaks?|holds?|reclaims?|closes?|"
                 r"drops? to|falls? to|hits?|reach(es)?)\b|\b(above|below|under|over|beyond|past|"
                 r"breaks?|holds?|reclaims?|closes? (above|below)|drops? to|falls? to|hits?|reach(es)?)\b.*"
-                r"(\$\s?\d|\d+(\.\d+)?\s?(k|thousand|million|billion|trillion|%|percent)?\b)",
+                r"(\$\s?\d|\d+(\.\d+)?\s?(k|thousand|million|billion|trillion|%|percent)?\b)" + _NOT_A_SPAN,
                 re.IGNORECASE), "price_level", "daily_close"),
 )
 
 
 def _norm_name(name):
     return " ".join((name or "").split()).upper()
+
+
+def _is_generic(subject):
+    """True for a reference whose referent lives elsewhere ("the stock",
+    "it", "die Aktie"), never for a name."""
+    return bool(subject and (_GENERIC_SUBJECT.match(subject) or _GENERIC_EXTRA.match(subject)))
 
 
 def _s(value):
@@ -583,55 +617,648 @@ def _bucket_from_wording(text):
     return "unspecified"
 
 
-def resolve_entity(subject_mention, ticker_spoken, evidence, title, asset_type=None):
-    """
-    Deterministic entity resolution. Returns dict(canonical_entity_name, ticker,
-    ticker_source, entity_resolution_status, review_reason).
+# --- Entity resolution --------------------------------------------------------
+#
+# The NAME decides. A subject the curated tables know resolves to its ticker
+# whatever the model wrote in ticker_spoken; the model's ticker only confirms
+# it (provenance "spoken" / "title") or contradicts it, and a contradiction is
+# reviewed only when both sides are real tickers (ticker_subject_mismatch). On
+# its own a model ticker is accepted only when the evidence carries it AS A
+# TICKER ("$NVDA", "NVDA" in capitals, the word after "ticker"/"symbol") or
+# the creator typed it in the video title; anything else is dropped with a
+# NON-blocking resolution note, never a review reason. Markets, baskets and
+# metrics are told apart from single instruments (SUBJECT_KINDS), so an index,
+# a list of companies or a margin never borrows a security's ticker.
 
-    A spoken ticker is kept only when it actually appears in the evidence or
-    the title. Missing tickers come from the curated alias tables (and the
-    catalogue-verified learned map); a name in AMBIGUOUS_MENTIONS is never
-    resolved. Nothing is resolved on phonetic similarity.
+# Market subjects: indices, the broad market, sectors, commodities and macro
+# themes. None is a security, so none carries a ticker; every spelling folds to
+# ONE canonical key, the contract creator_tracker.PROXIES prices against
+# ("S&P 500" -> SPY). Bare "the market", "markets" and "stocks" are not here:
+# what they mean depends on the channel (the crypto market, the stock market),
+# so they stay placeholders.
+_MARKET_SPELLINGS = {
+    "S&P 500": ("S&P", "S&P 500", "S&P500", "SP500", "SP 500", "S AND P 500", "S&P 500 INDEX", "SPX",
+                "THE S&P 500", "THE S&P"),
+    "US STOCK MARKET": ("U.S. STOCKS", "US STOCKS", "U.S. STOCK MARKET", "US STOCK MARKET", "STOCK MARKET",
+                        "THE STOCK MARKET", "THE U.S. STOCK MARKET", "U.S. EQUITIES", "US EQUITIES",
+                        "EQUITY MARKETS", "AMERICAN STOCKS"),
+    "NASDAQ": ("NASDAQ", "NASDAQ 100", "NASDAQ-100", "NASDAC", "NASDACK", "NAST 100", "NASDAQ COMPOSITE", "NDX",
+               "THE NASDAQ", "NASTECH", "NESTECK", "NESTDECK"),   # the last three: HKCM's live streams
+    "DOW": ("DOW", "DOW JONES", "THE DOW", "DJIA"),
+    "RUSSELL 2000": ("RUSSELL 2000", "RUSSELL", "THE RUSSELL 2000"),
+    "SMALL CAPS": ("SMALL CAPS", "SMALL-CAPS", "SMALLCAPS", "SMALL CAP STOCKS"),
+    "MID CAPS": ("MID CAPS", "MIDCAPS", "MID-CAPS"),
+    "DAX": ("DAX", "DER DAX"),
+    "NIKKEI 225": ("NIKKEI", "NIKKEI 225", "NICKEY", "NICK 225"),
+    "DXY": ("DXY", "DOLLAR INDEX", "US DOLLAR INDEX", "US-DOLLAR INDEX"),
+    "BITCOIN DOMINANCE": ("BITCOIN DOMINANCE", "BTC DOMINANCE", "BITCOIN DOMINANZ", "DOMINANZ DES BITCOINS",
+                          "BITCOIN DOMINANCE EXCLUDING USDT AND USDC"),
+    "USDT DOMINANCE": ("USDT DOMINANCE",),
+    "GOLD": ("GOLD", "GOLD PRICE", "GOLDPREIS", "THE GOLD PRICE"),
+    "SILVER": ("SILVER", "SILBER", "SILBERPREIS"),
+    "OIL": ("OIL", "OIL PRICE", "OIL PRICES", "CRUDE", "CRUDE OIL", "WTI", "BRENT", "ÖL", "ÖLPREIS",
+            "LIGHT CRUDE OIL FUTURES"),
+    "COPPER": ("COPPER", "KUPFER"),
+    "GOLD MINERS": ("GOLD MINERS", "GOLD MINING STOCKS", "MINENAKTIEN", "GOLD AND SILVER MINING COMPANIES"),
+    "TECHNOLOGY": ("TECHNOLOGY", "TECH", "TECH SECTOR", "TECH STOCKS", "TECHNOLOGY SECTOR", "TECHNOLOGY STOCKS"),
+    "SEMICONDUCTORS": ("SEMICONDUCTORS", "SEMIS", "CHIPS", "CHIP STOCKS", "SEMICONDUCTOR STOCKS",
+                       "SEMICONDUCTOR SECTOR", "CHIP SPACE"),
+    "SOFTWARE": ("SOFTWARE", "SOFTWARE STOCKS", "SOFTWARE SECTOR", "SOFTWAREBEREICH", "SOFTWARESEKTOR"),
+    "FINANCIALS": ("FINANCIALS", "FINANCIAL SECTOR", "FINANCIAL STOCKS"),
+    "ENERGY": ("ENERGY", "ENERGY SECTOR", "ENERGY STOCKS", "OIL STOCKS"),
+    "CONSUMER DISCRETIONARY": ("CONSUMER DISCRETIONARY",),
+    "CYBERSECURITY": ("CYBERSECURITY", "CYBERSECURITY STOCKS", "CYBERSECURITY INDUSTRY", "CYBERSECURITY SECTOR"),
+    # The SPDR sector funds the scorecard already benchmarks against, and the
+    # bank fund (creator_tracker.PROXIES prices each).
+    "HEALTHCARE": ("HEALTHCARE", "HEALTH CARE", "HEALTHCARE SECTOR", "HEALTH CARE SECTOR", "HEALTHCARE STOCKS"),
+    "INDUSTRIALS": ("INDUSTRIALS", "INDUSTRIAL SECTOR", "INDUSTRIAL STOCKS", "INDUSTRIALS SECTOR"),
+    "CONSUMER STAPLES": ("CONSUMER STAPLES", "STAPLES", "CONSUMER STAPLES SECTOR", "STAPLES SECTOR"),
+    "UTILITIES": ("UTILITIES", "UTILITY SECTOR", "UTILITIES SECTOR", "UTILITY STOCKS"),
+    "MATERIALS": ("MATERIALS", "MATERIALS SECTOR", "BASIC MATERIALS"),
+    "BANKS": ("BANKS", "BANK STOCKS", "BANKING SECTOR", "BANKEN"),
+    "FED": ("FED", "THE FED", "FEDERAL RESERVE", "THE FEDERAL RESERVE", "CENTRAL BANK"),
+    "INFLATION": ("INFLATION", "US INFLATION", "U.S. INFLATION", "CPI", "CORE CPI", "HEADLINE CPI"),
+    # Only what names US government debt is US TREASURIES; "bonds" and German
+    # "Staatsanleihen" name no issuer, so they are BONDS (never priced either).
+    "US TREASURIES": ("TREASURIES", "US TREASURIES", "U.S. TREASURIES", "TREASURY BONDS", "10-YEAR TREASURY",
+                      "10-YEAR TREASURIES", "US-STAATSANLEIHEN"),
+    "BONDS": ("BONDS", "STAATSANLEIHEN", "10-YEAR BONDS", "ZEHNJÄHRIGE STAATSANLEIHEN", "ANLEIHEN",
+              "FIXED INCOME"),
+    "ALTCOINS": ("ALTCOINS", "ALTCOIN", "DEN ALTCOINS", "SELECTED ALTCOINS"),
+}
+MARKET_SUBJECTS = {spelling: key for key, spellings in _MARKET_SPELLINGS.items() for spelling in (key,) + spellings}
+# Spellings that are a market only under one asset type: the transcripts hear
+# Brent as "Brand" ("Brand is above $15 ... attacks on ships around the
+# straight of Hormuz"), but a "brand" is anything else in a stock video.
+_TYPED_MARKET_SPELLINGS = {("commodity", "BRAND"): "OIL"}
+# "<market> stocks" still names the market only for equity indices and
+# sectors ("DAX Aktien", "S&P 500 stocks"). Gold stocks are miners, not the
+# metal, and "Dow stock" is Dow Inc. A company form ("Inc", "Corp") is never
+# stripped into a market: "Dow Inc" is a company.
+_EQUITY_MARKET_KEYS = frozenset({
+    "S&P 500", "US STOCK MARKET", "NASDAQ", "RUSSELL 2000", "SMALL CAPS", "MID CAPS", "DAX", "NIKKEI 225",
+    "GOLD MINERS", "TECHNOLOGY", "SEMICONDUCTORS", "SOFTWARE", "FINANCIALS", "ENERGY", "CONSUMER DISCRETIONARY",
+    "CYBERSECURITY", "HEALTHCARE", "INDUSTRIALS", "CONSUMER STAPLES", "UTILITIES", "MATERIALS", "BANKS",
+})
+_STOCK_WORDS = (" STOCK", " STOCKS", " SHARES", " SHARE", " AKTIE", " AKTIEN", "-AKTIE", "-AKTIEN")
+# Asset types that are never one security: without a curated ticker the
+# subject is a market, and no ticker is the right answer rather than a gap.
+NON_SECURITY_TYPES = ("macro", "sector", "index", "commodity", "currency", "bond")
+
+# Creator-specific spellings: a name ONE channel uses for an asset (its
+# transcripts' recurring mis-hearing, its shorthand). Matched on the claim's
+# channel_name only and never applied globally: "new" and "core" are English
+# words everywhere else, and XP Inc. is a real company. Evidence:
+#   Couch Investor  "New had the first quarter of a billion dollars profit ...
+#                   comments from David, the CEO" and "moving on to new
+#                   holdings ... added more" (Nu Holdings); "core January 2028
+#                   $100 calls ... core is back under $80" against crwv.us at
+#                   ~87 (CoreWeave).
+#   HKCM            2026-10-13 "... ist Joo Peng geschrieben. XP ... XP ist eben
+#                   nicht nur ein Elektromobilitätshersteller" (XPeng, NYSE: XPEV).
+#   TheStreet       2026-09-11/14, a US dividend-growth fund manager: "our large
+#                   position in Merck" (Merck & Co., NYSE: MRK). Never global:
+#                   in the German channels Merck is Merck KGaA (XETRA: MRK).
+# FinVid's "Iron" (IREN, or Iron Mountain?) and Phantom by HKCM's "XP" are
+# medium-confidence reads and stay unresolved until the ticker audit verifies them.
+CHANNEL_ALIASES = {
+    "Couch Investor": {"NEW": "NU", "NEW HOLDINGS": "NU", "CORE": "CRWV", "COREE": "CRWV", "CORRE": "CRWV",
+                       "COROREE": "CRWV"},
+    "HKCM": {"XP": "XPEV", "JOO PENG": "XPEV"},
+    "TheStreet": {"MERCK": "MRK", "MERCK & CO": "MRK"},
+    # VeChain's gas token in "Diese 2 Altcoins haben ihren BODEN gefunden!" and
+    # the 13-coin portfolio walkthrough (2026-09/10), transcribed VTHO, WTHO,
+    # BTHO, VHO and Wthoo within the same passages ("WHO" is left alone).
+    "Phantom by HKCM": {"WTHO": "VTHO", "BTHO": "VTHO", "VHO": "VTHO", "WTHOO": "VTHO"},
+}
+
+# COMMON_WORD_NAMES (signals_data): curated names that are also ordinary
+# words count in a title or inside a subject only in capitals or before
+# "stock" / "Aktie".
+# Coins the dataset discusses beyond the instrument registry's crypto rows.
+_EXTRA_COINS = frozenset({"AXS", "BNB", "CRO", "FET", "HBAR", "TRX", "XLM", "ZEC"})
+
+_TICKER_SHAPE = re.compile(r"^[A-Z]{1,5}(?:\.[A-Z])?$")
+# A ticker the creator typed in a title: 1-5 capitals (optionally "$"-led or
+# a share class "BRK.B"), not part of a word, a hyphenation, "S&P" / "AT&T"
+# or an abbreviation such as "U.S.". One letter ("T Stock Analysis") counts
+# only with a "$" or followed by "stock".
+_TITLE_TICKER = re.compile(
+    r"(?<![\w$&.'’\-])(\$)?([A-Z]{1,5}(?:\.[A-Z](?![.\w]))?)(?![\w&\-]|\.[A-Za-z]|['’](?![sS]\b))")
+_STOCK_WORD_AFTER = re.compile(r"\s+(stock|stocks|shares|aktie|aktien)\b", re.IGNORECASE)
+_TITLE_NOISE = frozenset({
+    "I", "A", "AI", "AGI", "US", "USA", "UK", "EU", "CEO", "CFO", "CIO", "CTO", "IPO", "ETF", "ETFS", "FED", "THE",
+    "EPS", "OK", "TV", "CNBC", "NOT", "THIS", "DAS", "DIE", "DER", "UND", "AND", "ALL", "NOW", "BUY", "SELL",
+    "HOLD", "MORE", "NEW", "Q", "GDP", "CPI", "ATH", "WHY", "HOW", "JETZT", "ALLES", "NICHT", "DNA", "MAG", "SK",
+    "ATT", "AST", "PHASE", "CLOSE", "SMA", "EMA", "RSI", "IS", "IT", "MY", "TOP", "BIG", "WAS", "ARE", "AN", "OR",
+    "IN", "ON", "OF", "TO", "AT", "BY", "FOR", "GO", "NO", "YES", "VS", "PART", "LIVE", "NEWS", "WILL", "CAN",
+    "BEST", "HUGE", "WOW", "RED", "BIT", "USD", "EUR", "NFT", "ROI", "PE", "YTD", "YOY", "QOQ", "LLM", "GPU",
+    "CPU", "API", "HBM", "DRAM", "NAND", "SAAS", "EV", "EVS", "AR", "VR", "OTC", "SEC", "IRS", "FOMC", "ECB",
+})
+_TICKER_CUE = re.compile(r"\b(ticker|symbol)", re.IGNORECASE)
+# A ticker-cue only counts when it sits this close before the token.
+_TICKER_CUE_CHARS = 25
+_METRIC_SUBJECT = re.compile(
+    r"\b(revenues?|sales|margins?|earnings|eps|income|profits?|profitability|cash flow|free cash|buybacks?|"
+    r"guidance|growth rate|segment|annual recurring revenue|arr|debt|shipments|bit supply|ratios?|"
+    r"returns? on invested capital|roic|platform|management team|outlook|capex|backlog|bookings|market share|"
+    r"dividend (yield|growth|payments?|payout))\b", re.IGNORECASE)
+# A crypto channel's "price", "the market", "the bulls": the coin the video is about.
+_MARKET_REFERENCE = re.compile(r"^(the )?(market|price|bulls|bears)$", re.IGNORECASE)
+# Several assets in one subject: "Google and Meta", "SOL/BTC", "Fortinet vs.
+# Palo Alto". "AT&T" and "S&P" carry no spaces around "&", so they never split.
+_BASKET_SPLIT = re.compile(r"\s*[,/+]\s*|\s+&\s+|\s+(?:and|or|vs\.?|versus|plus|und|oder)\s+", re.IGNORECASE)
+
+
+def _name_key(name):
+    """Normalized lookup form: single-spaced, upper case, typographic
+    apostrophes folded ("McDonald’s" -> "MCDONALD'S")."""
+    if not isinstance(name, str):
+        return ""
+    return _norm_name(name.replace("’", "'").replace("‘", "'"))
+
+
+def _strip_suffixes(key, suffixes=_NAME_SUFFIXES):
+    """`key` without the trailing words speakers attach to a name ("Nvidia
+    stock", "Fair Isaac Corporation stock"); "earnings per share" and
+    "market share" keep their last word."""
+    while key:
+        for suffix in suffixes:
+            if key.endswith(suffix) and len(key) > len(suffix) and not (
+                    suffix == " SHARE" and key.endswith((" PER SHARE", " MARKET SHARE"))):
+                key = key[: -len(suffix)].rstrip(" ,")
+                break
+        else:
+            break
+    return key
+
+
+# A grouping key keeps a plural: "growth stocks" and "foreign stocks" are
+# categories, while "IonQ stock" is one company.
+_GROUPING_SUFFIXES = tuple(s for s in _NAME_SUFFIXES if s not in (" STOCKS", " AKTIEN", "-AKTIEN"))
+
+
+def strip_name(name):
+    """A spoken name as a grouping key: normalized, without trailing words
+    such as " stock" / " Aktie" / " Inc" ("IonQ stock" -> "IONQ")."""
+    return _strip_suffixes(_name_key(name), _GROUPING_SUFFIXES) or None
+
+
+# Leading articles a lookup tries without ("the S&P 500", "Der Bitcoin",
+# "die Aktie" is still generic: it names nothing once stripped).
+_ARTICLES = ("THE ", "DER ", "DIE ", "DAS ", "DEN ", "DEM ")
+
+
+def _without_article(key):
+    for article in _ARTICLES:
+        if key.startswith(article):
+            return key[len(article):]
+    return key
+
+
+def _name_variants(key):
+    """The spellings a name lookup tries, in order: as written, without
+    trailing words (" stock", " Inc"), without a possessive "'s", and
+    without a leading article ("the", German "der" / "die" / "das" /
+    "den" / "dem": "Der Bitcoin" is Bitcoin)."""
+    out = [key]
+    stripped = _strip_suffixes(key)
+    if stripped and stripped not in out:
+        out.append(stripped)
+    for variant in list(out):
+        if variant.endswith("'S") and variant[:-2] not in out:
+            out.append(variant[:-2])
+    for variant in list(out):
+        bare = _without_article(variant)
+        if bare != variant and bare not in out:
+            out.append(bare)
+    return [v for v in out if v]
+
+
+def market_key(name):
+    """The canonical MARKET_SUBJECTS key for an index / sector / commodity /
+    macro spelling ("the S&P 500", "Silber", "chip stocks"), else None."""
+    key = _name_key(name)
+    if not key:
+        return None
+    for candidate in (key, _without_article(key)):
+        if candidate in MARKET_SUBJECTS:
+            return MARKET_SUBJECTS[candidate]
+    stripped = _strip_suffixes(key, _STOCK_WORDS)
+    if stripped and stripped != key:
+        for candidate in (stripped, _without_article(stripped)):
+            found = MARKET_SUBJECTS.get(candidate)
+            if found in _EQUITY_MARKET_KEYS:
+                return found
+    return None
+
+
+def _name_shaped_alias(key):
+    """A TICKER_ALIASES key read as a NAME ("SPACEX", "AMAZON", "I-REN"). The
+    ticker-shaped keys (GOOG, RUBY, NEBL) are only ever read from a ticker
+    field: as a spoken name they mean something else."""
+    return TICKER_ALIASES.get(key) if not _TICKER_SHAPE.match(key) else None
+
+
+def _lookup_name(name, channel=None):
+    """(ticker, table) for a name: the channel's own spellings, then
+    ASSET_ALIASES, then the name-shaped TICKER_ALIASES keys, then the
+    catalogue-verified learned map, each trying the _name_variants. The
+    ticker is folded through TICKER_ALIASES; table is "channel", "curated" or
+    "learned". (None, None) when no table knows the name."""
+    key = _name_key(name)
+    if not key:
+        return None, None
+    variants = _name_variants(key)
+    scoped = CHANNEL_ALIASES.get(channel or "", {})
+    learned = learned_tickers()
+    for table, lookup in (("channel", scoped.get), ("curated", ASSET_ALIASES.get),
+                          ("curated", _name_shaped_alias), ("learned", learned.get)):
+        for variant in variants:
+            ticker = lookup(variant)
+            if ticker:
+                return TICKER_ALIASES.get(ticker, ticker), table
+    return None, None
+
+
+def name_ticker(name, channel=None):
+    """The curated ticker for a NAME (see _lookup_name), or None."""
+    return _lookup_name(name, channel)[0]
+
+
+def channel_ticker(name, channel):
+    """The ticker `channel`'s own spelling of `name` stands for (CHANNEL_ALIASES), or None."""
+    scoped = CHANNEL_ALIASES.get(channel or "")
+    key = _name_key(name)
+    if not scoped or not key:
+        return None
+    for variant in _name_variants(key):
+        if variant in scoped:
+            return TICKER_ALIASES.get(scoped[variant], scoped[variant])
+    return None
+
+
+def known_tickers():
+    """Tickers the curated tables vouch for: every alias value, every
+    TICKER_ALIASES target, the learned map and the instrument registry. A
+    ticker-shaped word that merely repeats the subject ("New", "mogu") is a
+    ticker only when it is one of these."""
+    import instruments
+    return (set(ASSET_ALIASES.values()) | set(TICKER_ALIASES.values()) | set(learned_tickers().values())
+            | set(instruments.REGISTRY))
+
+
+def crypto_tickers():
+    """Coins: the registry's crypto instruments plus the few other coins the dataset discusses."""
+    import instruments
+    return {t for t, inst in instruments.REGISTRY.items() if inst.asset_type == "crypto"} | _EXTRA_COINS
+
+
+def _spoken_raw(ticker_spoken):
+    """The model's ticker field as written: upper case, without a "$"."""
+    return _name_key((_s(ticker_spoken) or "").lstrip("$"))
+
+
+def fold_spoken_ticker(ticker_spoken, channel=None):
+    """
+    (ticker, was_name) for the model's ticker_spoken field. A NAME written in
+    the ticker field folds through the curated tables ("SOLANA" -> SOL,
+    "BITCOIN" -> BTC, "XPENG" -> XPEV; was_name=True); a market spelling
+    ("NASDAQ", "S&P 500") or anything not shaped like a ticker
+    (^[A-Z]{1,5}(.[A-Z])?$) is no ticker at all; a ticker-to-ticker rename
+    folds (GOOG -> GOOGL).
+    """
+    raw = _spoken_raw(ticker_spoken)
+    if not raw:
+        return None, False
+    if raw in NOT_A_TICKER or market_key(raw):
+        return None, True
+    if _TICKER_SHAPE.match(raw) and raw in TICKER_ALIASES and raw not in ASSET_ALIASES:
+        return TICKER_ALIASES[raw], False
+    if raw in LISTED_TICKER_KEYS:
+        return raw, False          # FORD in a ticker field is Forward Industries, not Ford Motor
+    named = name_ticker(raw, channel)
+    if named and named != raw:
+        return named, True
+    if not _TICKER_SHAPE.match(raw):
+        return None, True
+    return raw, False
+
+
+def _mostly_upper(text):
+    letters = [c for c in text or "" if c.isalpha()]
+    return bool(letters) and sum(1 for c in letters if c.isupper()) / len(letters) >= 0.6
+
+
+def title_tickers(title):
+    """{ticker} the creator TYPED in a title ("| FTNT Stock vs. PANW Stock",
+    "Why $MU ..."), folded through TICKER_ALIASES (GOOG -> GOOGL). Common
+    capitalised words, market spellings and an all-caps title's words are
+    not tickers."""
+    title = title if isinstance(title, str) else ""
+    if _mostly_upper(title):
+        return set()
+    found = set()
+    for m in _TITLE_TICKER.finditer(title):
+        dollar, token = m.group(1), m.group(2)
+        if token in _TITLE_NOISE or token in NOT_A_TICKER or token in MARKET_SUBJECTS:
+            continue
+        if len(token) == 1 and not dollar and not _STOCK_WORD_AFTER.match(title, m.end()):
+            continue
+        found.add(TICKER_ALIASES.get(token, token))
+    return found
+
+
+_LEARNED_RE_CACHE = {}
+
+
+def _learned_name_re():
+    learned = learned_tickers()
+    names = tuple(sorted(learned, key=len, reverse=True))
+    if names not in _LEARNED_RE_CACHE:
+        _LEARNED_RE_CACHE.clear()
+        _LEARNED_RE_CACHE[names] = re.compile(r"\b(" + "|".join(re.escape(n) for n in names) + r")\b",
+                                              re.IGNORECASE) if names else None
+    return _LEARNED_RE_CACHE[names]
+
+
+def _names_in(text, channel=None):
+    """{ticker} for the curated and learned names `text` mentions. A
+    COMMON_WORD_NAMES entry counts only in capitals or before "stock"."""
+    import transcript_normalize as tn
+    text = text if isinstance(text, str) else ""
+    found = set()
+    for m in tn._ALIAS_RE.finditer(text):
+        name = m.group(1)
+        if _name_key(name) in COMMON_WORD_NAMES and not (
+                (len(name) > 1 and name.isupper()) or _STOCK_WORD_AFTER.match(text, m.end())):
+            continue
+        ticker = name_ticker(name, channel)
+        if ticker:
+            found.add(ticker)
+    pattern = _learned_name_re()
+    if pattern is not None:
+        for m in pattern.finditer(text):
+            ticker = name_ticker(m.group(1), channel)
+            if ticker:
+                found.add(ticker)
+    return found
+
+
+# "Is Grab Stock a Buy?": a word the creator calls a stock in the title.
+_NAMED_STOCK = re.compile(r"(?<![\w$&.'’\-])([A-Z][A-Za-z]{1,4})\s+(?i:stock|stocks|shares|aktie|aktien)\b")
+
+
+def title_assets(title, channel=None):
+    """{ticker} a video title names: the curated company names it mentions,
+    the tickers the creator typed (title_tickers), and a known ticker the
+    title calls a stock by name ("Is Grab Stock a Buy?" -> GRAB). Markets
+    are not assets."""
+    title = title if isinstance(title, str) else ""
+    found = _names_in(title, channel) | title_tickers(title)
+    named = {m.group(1).upper() for m in _NAMED_STOCK.finditer(title)} - _TITLE_NOISE
+    if named:
+        found |= named & known_tickers()
+    return found
+
+
+def _spoken_in_evidence(ticker, evidence):
+    """True when the evidence carries `ticker` AS A TICKER: "$NVDA", "NVDA"
+    written in capitals (two letters or more, in an evidence that is not
+    all capitals), or within a few characters after "ticker" / "symbol"
+    ("ticker symbol Mogu"). An ordinary word in lower or title case ("New
+    is a well-run company", "iron") is not a spoken ticker."""
+    ev = evidence if isinstance(evidence, str) else ""
+    caps_count = not _mostly_upper(ev)
+    for m in re.finditer(r"(?<![\w$])(\$?)(" + re.escape(ticker) + r")(?!\w)", ev, re.IGNORECASE):
+        token = m.group(2)
+        if m.group(1) or _TICKER_CUE.search(ev[max(0, m.start() - _TICKER_CUE_CHARS):m.start()]):
+            return True
+        if caps_count and len(token) > 1 and token == ticker:
+            return True
+    return False
+
+
+def _name_in_text(name, text):
+    key = _name_key(name)
+    return bool(key) and re.search(r"(?<!\w)" + re.escape(key) + r"(?!\w)", _name_key(text)) is not None
+
+
+_NOT_A_NAME_START = re.compile(r"^(the|this|that|these|those|its|it|their|our|my|his|her|a|an|der|die|das|den)\b",
+                               re.IGNORECASE)
+
+
+def _subject_parts(mention, channel=None):
+    """[(part, identity)] for a subject joined by "and" / "or" / "vs" / "," /
+    "/" (one entry for a plain subject). identity is ("ticker", T) or
+    ("market", KEY) when the tables know the part, else None."""
+    text = (mention or "").replace("’", "'")
+    parts = [p.strip() for p in _BASKET_SPLIT.split(text) if p and p.strip()]
+    out = []
+    for part in parts:
+        ticker = name_ticker(part, channel)
+        market = None if ticker else market_key(part)
+        out.append((part, ("ticker", ticker) if ticker else ("market", market) if market else None))
+    return out
+
+
+def _is_basket(mention, channel=None):
+    """
+    True for a subject that names several assets: a list with two or more
+    commas; two or more parts naming distinct assets or markets ("Google and
+    Meta", "SOL/BTC", "AT&T and Verizon"); or one named asset beside a name
+    the tables do not know ("Google and Constellation"). "Hims & Hers",
+    "AT&T", "S&P 500" and "Procter & Gamble" stay whole (their parts name
+    nothing), and so does "Fair Isaac or FICO" (one asset, twice).
+    """
+    if (mention or "").count(",") >= 2:
+        return True
+    parts = _subject_parts(mention, channel)
+    if len(parts) < 2:
+        return False
+    distinct = {identity for _, identity in parts} - {None}
+    if len(distinct) >= 2:
+        return True
+    return len(distinct) == 1 and any(
+        identity is None and part[:1].isupper() and not _NOT_A_NAME_START.match(part) and not _is_generic(part)
+        for part, identity in parts)
+
+
+# A pair's quote side ("ETH BTC", "Ethereum Bitcoin", "sole BTC"): a coin
+# priced in another coin is a ratio chart, not one asset.
+_QUOTE_COINS = frozenset({"BTC", "ETH", "USDT", "USD", "BITCOIN", "ETHEREUM"})
+
+
+def _is_coin_pair(mention, asset_type=None, channel=None):
+    """True for a two-word crypto subject whose second word is a quote coin
+    and whose first is a coin too, or a short word the tables do not know
+    (a mis-hearing: "sole BTC" is SOL/BTC): "ETH BTC", "Ethereum Bitcoin"."""
+    if asset_type != "crypto":
+        return False
+    words = _name_key(mention).split()
+    if len(words) != 2 or words[1] not in _QUOTE_COINS:
+        return False
+    first = words[0]
+    if name_ticker(first, channel) or first in crypto_tickers() or first in _QUOTE_COINS:
+        return True
+    return len(first) <= 5 and first.isalpha() and not market_key(first) and first not in known_tickers()
+
+
+def _ticker_subject(mention, raw):
+    """True when the subject is the ticker itself, written as one: two or
+    more capitals, nothing else ("STX", not "Stx" or "the STX chart")."""
+    text = (mention or "").strip()
+    return bool(raw) and text == raw and len(text) >= 2 and text.isupper() and bool(_TICKER_SHAPE.match(text))
+
+
+def _registered(ticker):
+    import instruments
+    return ticker in instruments.REGISTRY
+
+
+def _one_asset_twice(mention, channel=None):
+    """The identity every part of a multi-part subject names, when they all
+    name the same one ("Fair Isaac Corporation or FICO stock" -> FICO)."""
+    parts = _subject_parts(mention, channel)
+    identities = {identity for _, identity in parts}
+    if len(parts) >= 2 and len(identities) == 1 and None not in identities:
+        return identities.pop()
+    return None
+
+
+def resolve_entity(subject_mention, ticker_spoken, evidence, title, asset_type=None, channel=None):
+    """
+    Deterministic entity resolution (see the section comment above). Returns
+    dict(canonical_entity_name, ticker, ticker_source, entity_resolution_status,
+    review_reason, subject_kind, resolution_notes, resolution_method_hint).
+
+    In order: a name in AMBIGUOUS_MENTIONS is never resolved; a market subject
+    (MARKET_SUBJECTS, or a macro / sector / index / commodity / currency /
+    bond type with no curated ticker) takes no ticker and is confirmed under
+    its canonical key; a curated name decides; a basket takes no ticker; a
+    metric takes the one company named inside it, else the title's; a generic
+    subject ("the company") inherits the title's asset (confirmed when the
+    title names one, probable for the model's pick among several); a crypto
+    channel's "price" / "the market" takes the one coin in the title
+    (probable); otherwise the model's ticker stands only when the evidence or
+    the title carries it as a ticker. resolution_method_hint="title" marks a
+    title coreference. Nothing is resolved on phonetic similarity.
     """
     mention = _s(subject_mention)
-    name_key = _norm_name(mention)
+    asset_type = asset_type if isinstance(asset_type, str) else None   # stored rows are data, not code
+    channel = channel if isinstance(channel, str) else None
     out = {"canonical_entity_name": mention, "ticker": None, "ticker_source": None,
-           "entity_resolution_status": "unresolved", "review_reason": None}
+           "entity_resolution_status": "unresolved", "review_reason": None, "subject_kind": "instrument",
+           "resolution_notes": [], "resolution_method_hint": None}
+    notes = out["resolution_notes"]
     if not mention:
         out["review_reason"] = "missing_asset"
         return out
-    if name_key in AMBIGUOUS_MENTIONS:
+    key = _name_key(mention)
+    if key in AMBIGUOUS_MENTIONS:
         out["entity_resolution_status"] = "ambiguous"
         out["review_reason"] = "ambiguous_entity"
         return out
-    spoken = (_s(ticker_spoken) or "").lstrip("$").upper()
-    if spoken:
-        ev_words = {m.group(1).upper() for m in _TICKER_WORD.finditer(evidence or "")}
-        title_words = {m.group(1).upper() for m in _TICKER_WORD.finditer(title or "")}
-        if spoken in ev_words:
-            out.update(ticker=TICKER_ALIASES.get(spoken, spoken), ticker_source="spoken",
-                       entity_resolution_status="confirmed")
-            return out
-        if spoken in title_words:
-            out.update(ticker=TICKER_ALIASES.get(spoken, spoken), ticker_source="title",
-                       entity_resolution_status="confirmed")
-            return out
-        out["review_reason"] = "ticker_not_in_evidence"
-    curated = ASSET_ALIASES.get(name_key) or TICKER_ALIASES.get(name_key)
+    spoken, was_name = fold_spoken_ticker(ticker_spoken, channel)
+    raw = _spoken_raw(ticker_spoken)   # as written: the evidence carries "GOOG", not its fold GOOGL
+    gave_ticker = bool(raw)
+
+    curated, table = _lookup_name(mention, channel)
+    twice = None if curated else _one_asset_twice(mention, channel)
+    market = market_key(mention) or _TYPED_MARKET_SPELLINGS.get((asset_type, key)) or (
+        twice[1] if twice and twice[0] == "market" else None)
+    if market:
+        out.update(ticker_source="unresolved", entity_resolution_status="confirmed", subject_kind="market",
+                   canonical_entity_name=market)
+        if spoken and not was_name:
+            notes.append("ticker_spoken_replaced")   # "SPY" for the S&P 500: the market, not one fund
+        return out
+
+    if twice:
+        curated, table = twice[1], "curated"
     if curated:
-        out.update(ticker=TICKER_ALIASES.get(curated, curated), ticker_source="curated_mapping",
-                   entity_resolution_status="confirmed", canonical_entity_name=mention)
+        source = "curated_mapping"
+        if spoken == curated and not was_name:
+            if _spoken_in_evidence(raw, evidence):
+                source = "spoken"
+            elif spoken in title_tickers(title):
+                source = "title"
+        elif spoken and spoken != curated:
+            if spoken in known_tickers() and spoken not in FORMER_TICKERS.get(curated, ()):
+                out["review_reason"] = "ticker_subject_mismatch"   # two real tickers disagree
+            else:
+                notes.append("ticker_spoken_replaced")             # "WEED", "NEW", a former ticker
+        out.update(ticker=curated, ticker_source=source,
+                   entity_resolution_status="probable" if table == "learned" else "confirmed")
         return out
-    learned = learned_tickers().get(name_key)
-    if learned:
-        out.update(ticker=learned, ticker_source="curated_mapping",
-                   entity_resolution_status="probable")
+
+    if _is_basket(mention, channel) or _is_coin_pair(mention, asset_type, channel):
+        out.update(ticker_source="unresolved", subject_kind="basket")
+        notes.append("multi_asset_subject")
         return out
-    if asset_type in ("macro", "sector", "index", "commodity", "currency", "bond"):
-        # Not a single security: no ticker is the right answer, not a gap.
-        out["entity_resolution_status"] = "confirmed"
-        out["ticker_source"] = "unresolved"
+
+    generic = _is_generic(mention)
+    metric = not generic and bool(_METRIC_SUBJECT.search(mention))
+    titled = title_assets(title, channel)
+    # A company's segment the model typed "sector" is still a metric of that
+    # company: it says so ("AWS segment") or the model pinned it to the
+    # video's company ("defense and intelligence" -> PL in a Planet Labs
+    # video). Any other non-security type is a market.
+    if asset_type == "sector" and not generic and spoken in titled:
+        metric = True
+    if asset_type in NON_SECURITY_TYPES and not (metric and asset_type == "sector"):
+        out.update(ticker_source="unresolved", entity_resolution_status="confirmed", subject_kind="market")
         return out
+    if metric:
+        out["subject_kind"] = "metric"
+        inside = _names_in(mention, channel) | (title_tickers(mention) & known_tickers())
+        if len(inside) == 1:
+            out.update(ticker=inside.pop(), ticker_source="curated_mapping", entity_resolution_status="confirmed")
+            return out
+    if _MARKET_REFERENCE.match(mention) and asset_type == "crypto":
+        coins = titled & crypto_tickers()
+        if len(coins) == 1:
+            out.update(ticker=coins.pop(), ticker_source="title", entity_resolution_status="probable",
+                       resolution_method_hint="title")
+            notes.append("crypto_title_coreference")
+            return out
+    if generic or metric:
+        # A reference inherits the title's asset: the model's pick when it is
+        # one of the title's assets (only probable among several), else the
+        # title's one asset when the model gave no ticker at all and the
+        # tables know that ticker (a stray capitalised title word is not one).
+        pick = spoken if spoken in titled else None
+        if pick is None and not gave_ticker and len(titled) == 1:
+            only = next(iter(titled))
+            pick = only if only in known_tickers() or only in crypto_tickers() else None
+        if pick:
+            out.update(ticker=pick, ticker_source="title", resolution_method_hint="title",
+                       entity_resolution_status="confirmed" if len(titled) == 1 else "probable")
+            return out
+
+    # The model's ticker on its own.
+    if spoken and not was_name and raw in _name_variants(key) and spoken not in known_tickers():
+        notes.append("ticker_equals_name_unverified")   # "New" -> NEW, "mogu" -> MOGU
+        spoken = None
+    if spoken:
+        if was_name:
+            # A curated name in the ticker field: the table vouches for its
+            # ticker, the evidence or the title for the name.
+            if spoken in titled or _name_in_text(raw, evidence):
+                out.update(ticker=spoken, ticker_source="curated_mapping", entity_resolution_status="confirmed")
+                return out
+        elif _spoken_in_evidence(raw, evidence):
+            out.update(ticker=spoken, ticker_source="spoken", entity_resolution_status="confirmed")
+            return out
+        elif spoken in titled:
+            out.update(ticker=spoken, ticker_source="title", entity_resolution_status="confirmed")
+            return out
+        elif _ticker_subject(mention, raw) and spoken == raw and _registered(spoken):
+            # The subject IS the ticker, written as one ("STX"), and the
+            # registry knows it: the speaker named the ticker.
+            out.update(ticker=spoken, ticker_source="spoken", entity_resolution_status="confirmed")
+            return out
+        notes.append("ticker_spoken_unverified")
     out["ticker_source"] = "unresolved"
     return out
 
@@ -701,7 +1328,7 @@ def _asset_mentions(text):
     checked."""
     import transcript_normalize as tn
     found = []
-    for m in tn._ALIAS_RE.finditer(text or ""):
+    for m in tn.alias_mentions(text):       # an ordinary word ("upstart") is no mention
         found.append((m.start(), m.group(1)))
     learned = learned_tickers()
     if learned:
@@ -1222,26 +1849,33 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
         subject = _s(raw.get("subject_mention"))
         resolution_method, resolution_confidence = "unresolved", 0.0
         coref_status = None
-        if subject and _GENERIC_SUBJECT.match(subject):
+        if _is_generic(subject):
             resolved_name, coref_status = local_subject(nt, span, evidence)
             if coref_status == "resolved":
                 warnings.append(f"claim {i}: '{subject}' resolved to '{resolved_name}' from local context")
                 subject = resolved_name
                 resolution_method, resolution_confidence = "local_coreference", 0.7
-        ent = resolve_entity(subject, raw.get("ticker_spoken"), evidence, context.get("video_title"), asset_type)
+        ent = resolve_entity(subject, raw.get("ticker_spoken"), evidence, context.get("video_title"), asset_type,
+                             channel=context.get("channel_name"))
         if coref_status == "ambiguous":
             ent.update(entity_resolution_status="ambiguous", ticker=None, ticker_source="unresolved",
-                       review_reason="ambiguous_coreference")
+                       review_reason="ambiguous_coreference", resolution_method_hint=None)
         if ent["review_reason"]:
             review.append(ent["review_reason"])
             if ent["review_reason"] == "missing_asset":
                 issues.append("missing_asset")
             elif ent["review_reason"] in ("ambiguous_entity", "ambiguous_coreference"):
                 issues.append("ambiguous_entity")
+        if ent["resolution_method_hint"] == "title" and resolution_method == "unresolved":
+            # A generic or metric subject that took the title's asset is a
+            # title coreference, never an "explicit mention" of "the company".
+            resolution_method = "title"
+            resolution_confidence = 0.6 if ent["entity_resolution_status"] == "confirmed" else 0.5
         # The asset mention must be supported: in the evidence itself, or at
         # least in the segment the evidence sits in ("the stock" one sentence
-        # after the name is normal speech, a name from nowhere is not).
-        if subject and span is not None and resolution_method == "unresolved":
+        # after the name is normal speech, a name from nowhere is not). A
+        # reference ("the company") names nothing, so it has nothing to find.
+        if subject and span is not None and resolution_method == "unresolved" and not _is_generic(subject):
             folded_subject = _fold(subject)[0]
             in_evidence = folded_subject and folded_subject in _fold(evidence)[0]
             in_segment = seg is not None and folded_subject and folded_subject in _fold(seg.normalized_text)[0]
@@ -1260,6 +1894,8 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
                 review.append("subject_not_in_evidence")
         if ent["entity_resolution_status"] in ("ambiguous", "unresolved") and coref_status != "resolved":
             resolution_method, resolution_confidence = "unresolved", 0.0
+        elif span is None and ent["ticker_source"] == "title" and resolution_method == "unresolved":
+            resolution_method, resolution_confidence = "title", 0.6
 
         # Horizon.
         horizon_original = _s(raw.get("horizon_original"))
@@ -1336,6 +1972,9 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
             "asset_type": asset_type,
             "sector": _s(raw.get("sector")),
             "entity_resolution_status": ent["entity_resolution_status"],
+            "subject_kind": ent["subject_kind"],
+            "resolution_notes": list(ent["resolution_notes"]),
+            "resolution_version": RESOLUTION_VERSION,
             "benchmark_name": _s(raw.get("benchmark_name")),
             "benchmark_ticker": None,
             "stance": stance,
