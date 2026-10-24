@@ -33,9 +33,14 @@
       "last_video_id": "jHrjLvpb6z4"
     },
     "UCwKB_00dPL3x5XmHF9IJCrg": {
-      "last_published": "2026-10-23T16:45:12+00:00",
-      "last_video_id": "R8zyCTNiP5c"
+      "last_published": "2026-10-24T13:45:15+00:00",
+      "last_video_id": "LauJrBZP3xc"
     }
   },
-  "pending": {}
+  "pending": {
+    "O7T5j4MCaXA": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    }
+  }
 }
