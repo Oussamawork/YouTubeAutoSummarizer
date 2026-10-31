@@ -541,61 +541,126 @@ def video_dates(claims):
 
 
 _NOT_A_POSITION = {"no_position", "not_stated", "unclear"}
+# Stored positions that say nothing specific: the evidence's own reading
+# (claims.portfolio_position under the current rules) replaces them.
+_UNSPECIFIED_POSITIONS = {None, "owns_unspecified", "not_stated", "unclear"}
 # A disclosure must say the speaker holds or traded something; the extractor
 # once read "I'm not invested in SpaceX", "a company I used to own" and "we
-# know Macy's" as ownership.
-_OWNERSHIP_CUE = re.compile(
-    r"\b(own|owned|holding|holdings|position|bought|buy|buying|invest\w*|shares|stake|portfolio|added|"
-    r"sold|trimmed|long|investiert|gekauft|halten|halte|tranche|eingestiegen|depot|positionen)\b", re.I)
-_NEGATED_OWNERSHIP = re.compile(
-    r"\b(not|n't|never|no longer|used to)\b[^.]{0,30}\b(own|owned|invest\w*|hold\w*|position)\b|"
-    r"\bnicht\b[^.]{0,30}\b(investiert|drin|gekauft)\b|\bkeine?n?\s+position", re.I)
+# know Macy's" as ownership. One cue set per transcript language
+# (claims.rule_languages: the claim's transcript_language, every set when it
+# is unknown).
+_OWNERSHIP_CUES = {
+    "en": re.compile(r"\b(own|owned|holding|holdings|position|bought|buy|buying|invest\w*|shares|stake|portfolio|"
+                     r"added|sold|trimmed|long)\b", re.I),
+    "de": re.compile(r"\b(investiert|gekauft|nachgekauft|zugekauft|eingekauft|aufgestockt|akkumuliert|halten|halte|"
+                     r"tranche|tranchen|eingestiegen|depot|depots|position|positionen|portfolio|bestand|bestände|"
+                     r"aktionär\w*|bespar\w*|sparplan\w*|trade|long|short|verkauft|drin)\b", re.I),
+}
+_NEGATED_OWNERSHIP = {
+    "en": re.compile(r"\b(not|n't|never|no longer|used to)\b[^.]{0,30}\b(own|owned|invest\w*|hold\w*|position)\b",
+                     re.I),
+    "de": re.compile(r"\bnicht\b[^.]{0,30}\b(investiert|drin|gekauft|dabei|engagiert)\b|\bkeine?n?\s+position", re.I),
+}
 
 
-def _states_a_position(evidence):
+def _states_a_position(evidence, language=None):
     if not evidence:
         return True  # nothing to check against; hand-built rows in tests
-    return bool(_OWNERSHIP_CUE.search(evidence)) and not _NEGATED_OWNERSHIP.search(evidence)
+    codes = _claims.rule_languages(language)
+    return any(_OWNERSHIP_CUES[c].search(evidence) for c in codes) and not any(
+        _NEGATED_OWNERSHIP[c].search(evidence) for c in codes)
 
 
+_GAP = _claims._gap
 # What the creator says they DID, read from the evidence, in priority order:
 # "I sold half" is a trim, not an exit. A stored position says what they hold
 # ("owns"); an action outranks it, so "I sold my PayPal stock earlier this
-# year" reads "sold PYPL", never "owns PYPL".
-_DISCLOSED_ACTIONS = (
-    ("trimmed", re.compile(
-        r"\b(sold (half|a (third|quarter|portion|part|bit|little)|some|part|\d+ ?/ ?\d+|\d+ ?(%|percent))|"
-        r"trimm(ed|ing)|cut\b[^.]{0,30}\bposition|reduced (my|our) (position|stake)|teilweise verkauft)", re.I)),
-    ("sold", re.compile(
-        r"\b(i sold|we sold|i'?ve sold|sold (my|our|all|out|everything)|no longer (own|hold)|exited|verkauft)\b",
-        re.I)),
-    ("added", re.compile(
-        r"\b(bought|added|add(ing)? (more|to (my|our))|buying more|purchased|doubled (my|our) (position|stake)|"
-        r"nachgekauft|gekauft|aufgestockt)\b", re.I)),
-)
-_ACTION_PRIORITY = {action: i for i, (action, _) in enumerate(_DISCLOSED_ACTIONS)}
+# year" reads "sold PYPL", never "owns PYPL". One table per transcript
+# language. German: "Wir steigen teilweise bei Snowflake aus, das heißt, wir
+# haben die Hälfte unserer Position verkauft" is a trim (any sale in an
+# excerpt that names a portion is, claims._de_partial), "Also WTI sind wir ja
+# raus aus dem Trade" an exit, "Am 24.02. diesen Jahres haben wir unsere
+# erste Tranche gekauft" and "ich habe hier auch weitere Zukäufe getätigt"
+# purchases.
+_DISCLOSED_ACTIONS = {
+    "en": (
+        ("trimmed", re.compile(
+            r"\b(sold (half|a (third|quarter|portion|part|bit|little)|some|part|\d+ ?/ ?\d+|\d+ ?(%|percent))|"
+            r"trimm(ed|ing)|cut\b[^.]{0,30}\bposition|reduced (my|our) (position|stake))", re.I)),
+        ("sold", re.compile(
+            r"\b(i sold|we sold|i'?ve sold|sold (my|our|all|out|everything)|no longer (own|hold)|exited)\b", re.I)),
+        ("added", re.compile(
+            r"\b(bought|added|add(ing)? (more|to (my|our))|buying more|purchased|doubled (my|our) (position|stake))\b",
+            re.I)),
+    ),
+    "de": (
+        ("trimmed", re.compile(
+            r"\b(?:getrimmt|trimmen|trimme|teilverkauf|teilweise\s+verkauft|"
+            r"teilweise\s+" + _GAP(4) + r"(?:verkauft|veräußert|ausgestiegen|glattgestellt|aus" + _claims._PARTICLE_END
+            + r")|(?:teilgewinne|teilprofite|teilgewinn|teilprofit|gewinne|profite)\s+" + _GAP(3)
+            + r"(?:realisiert|mitgenommen|gesichert)|"
+            r"(?:position|positionen|bestand|bestände|anteile)\s+" + _GAP(3) + r"(?:reduziert|verkleinert|abgebaut)|"
+            r"(?:hälfte|drittel|viertel)\b[^.!?]{0,60}\b(?:verkauft|veräußert|abgestoßen|glattgestellt|geschlossen|"
+            r"getrimmt))\b", re.I)),
+        ("sold", re.compile(
+            r"\b(?:verkauft|veräußert|abgestoßen|glattgestellt|ausgestiegen|"
+            r"(?:ich|wir)\s+steig(?:e|en)\s+" + _GAP(5) + r"aus" + _claims._PARTICLE_END + r"|"
+            r"(?:position|positionen)\s+" + _GAP(3) + r"(?:geschlossen|aufgelöst)|"
+            r"raus\s+aus\s+(?:dem|der|den|unserem|unserer|diesem|dieser)\s+(?:[\w-]+\s+)?(?:[\w-]*trade|trades|"
+            r"position|positionen|investment)|"
+            r"aus\s+(?:dem|der|unserem|unserer|diesem|dieser)\s+[\w-]*(?:trade|position|investment)\s+" + _GAP(2)
+            + r"raus)\b", re.I)),
+        ("added", re.compile(
+            r"\b(?:nachgekauft|zugekauft|eingekauft|gekauft|aufgestockt|akkumuliert|aufgeladen|nachgeladen|"
+            r"eingestiegen|zugeschlagen|zugegriffen|eingedeckt|"
+            r"(?:nachkauf|nachkäufe|nachkäufen|zukauf|zukäufe|zukäufen|kauf|käufe|käufen|einstieg|einstiege|tranche|"
+            r"tranchen)\b[^.!?]{0,40}\b(?:getätigt|gemacht|gewesen)|"
+            r"(?:ich|wir)\s+kauf(?:e|en)\s+" + _GAP(5) + r"nach" + _claims._PARTICLE_END + r"|"
+            r"kauf(?:e|en)\s+(?:ich|wir)\s+" + _GAP(5) + r"nach" + _claims._PARTICLE_END + r"|"
+            r"(?:position|positionen|bestand|bestände|exposition)\b[^.!?]{0,40}\b(?:ausgebaut|aufgebaut|erhöht|"
+            r"vergrößert))\b", re.I)),
+    ),
+}
+_ACTION_PRIORITY = {action: i for i, (action, _) in enumerate(_DISCLOSED_ACTIONS["en"])}
 _TRADE_ACTIONS = frozenset(_ACTION_PRIORITY)
 # A negated action ("I haven't sold") or one describing a holding ("every
 # share that I've bought", "the stock I bought") rather than reporting a
 # trade ("I announced that I added to my position" is still a trade).
 _ACTION_NEGATION = re.compile(
-    r"(\b(not|never|nicht|nie|kein\w*)\b|n't\b)[^.!?,;]{0,20}$"
+    r"(\b(not|never)\b|n't\b)[^.!?,;]{0,20}$"
     r"|\b(shares?|stocks?|positions?|everything|which)\s+(that\s+)?(i|we)\s*('ve|'d|\s+have|\s+had)?\s*$", re.I)
+# German: negation in the clause (claims._de_negated: "Ich kaufe da aber auch
+# nicht mehr nach") or a relative clause describing a holding ("eine
+# Occidental Petroleum, die wir ja eingekauft haben").
+_DE_HOLDING_CLAUSE = re.compile(r"\b(?:die|den|das|welche[nrs]?)\s+(?:ich|wir)\s+(?:[^\s.!?,;:]+\s+){0,3}$", re.I)
 
 
-def disclosed_action(evidence, subject=None):
+def _trade_negated(language, evidence, m):
+    if language == "de":
+        return _claims._de_negated_match(evidence, m) or bool(
+            _DE_HOLDING_CLAUSE.search(evidence[max(0, m.start() - 40):m.start()]))
+    return bool(_ACTION_NEGATION.search(evidence[max(0, m.start() - 30):m.start()]))
+
+
+def disclosed_action(evidence, subject=None, language=None):
     """
     "sold", "trimmed" or "added" when the evidence says the creator traded
     the asset, else None. A negated action ("I haven't sold") does not
     count. When the evidence states two different actions ("I sold Tesla and
-    bought Nvidia"), the one nearest the subject wins.
+    bought Nvidia"), the one nearest the subject wins. `language` is the
+    claim's transcript_language (claims.rule_languages picks the tables).
     """
     ev = evidence if isinstance(evidence, str) else ""
     found = {}
-    for action, pattern in _DISCLOSED_ACTIONS:
-        for m in pattern.finditer(ev):
-            if not _ACTION_NEGATION.search(ev[max(0, m.start() - 30):m.start()]):
-                found[action] = m.start()
+    for code in _claims.rule_languages(language):
+        for action, pattern in _DISCLOSED_ACTIONS[code]:
+            for m in pattern.finditer(ev):
+                if _trade_negated(code, ev, m):
+                    continue
+                # "die Hälfte unserer Position verkauft": a German sale of a portion is a trim
+                kind = "trimmed" if code == "de" and action == "sold" and _claims._de_partial(ev) else action
+                if kind not in found or m.start() < found[kind]:
+                    found[kind] = m.start()
                 break
     if "trimmed" in found and "sold" in found and abs(found["trimmed"] - found["sold"]) <= 12:
         del found["sold"]   # "I sold half": one trim, read twice
@@ -618,6 +683,14 @@ def portfolio_disclosures(claims, start=None, end=None):
     trimmed / added) when it states one, else the stored position; a stated
     exit ("I no longer own it") is reported as sold, not dropped as a
     negated holding.
+
+    Both are read from the evidence at load, under the claim's
+    transcript_language: a stored owns_unspecified gives way to the position
+    the evidence states under the current rules (claims.portfolio_position:
+    "wir sind short im Hang Seng" reads short, "Okay, du bist also noch
+    nicht drin" is no position and is left out), so a claim validated
+    before the German rule set reports correctly without re-extraction. A
+    specific stored position (long / short / no_position) is kept.
     """
     rows = []
     for c in claims:
@@ -625,13 +698,18 @@ def portfolio_disclosures(claims, start=None, end=None):
             continue
         if start is not None and not in_window(c, start, end):
             continue
-        action = disclosed_action(c.get("evidence_text"), c.get("subject_mention"))
-        if action is None and (c.get("portfolio_disclosure") in _NOT_A_POSITION
-                               or not _states_a_position(c.get("evidence_text"))):
+        evidence, language = c.get("evidence_text"), c.get("transcript_language")
+        action = disclosed_action(evidence, c.get("subject_mention"), language)
+        stated = _claims.portfolio_position(evidence, language) if evidence else None
+        position = c.get("portfolio_disclosure")
+        if stated and position in _UNSPECIFIED_POSITIONS:
+            position = stated
+        if action is None and (position in _NOT_A_POSITION
+                               or (stated is None and not _states_a_position(evidence, language))):
             continue
         rows.append({
             "source": source_of(c), "asset": asset_key(c), "ticker": resolved_ticker(c),
-            "position": action or c.get("portfolio_disclosure"),
+            "position": action or position,
             "date": (claim_date(c).isoformat() if claim_date(c) else None),
             "evidence": c.get("evidence_text"), "claim_id": c.get("claim_id"),
             "review_required": bool(c.get("review_required")),

@@ -426,6 +426,449 @@ _SHORT_RE = re.compile(r"\b(i'?m short|i am short|we'?re short|we are short|shor
                        re.IGNORECASE)
 _NO_POSITION_RE = re.compile(r"\b(i don'?t own|i do not own|i have no position|no position in|"
                              r"i sold (all|out|everything|my (whole )?position))\b", re.IGNORECASE)
+
+# --- German evidence rules (HKCM, Phantom by HKCM) ----------------------------
+#
+# The patterns above read nothing in German, so the validator reset every
+# action the extractor took from German speech to "none" (fKyDalNgdxs, a
+# 2-hour HKCM livestream: 11 of them; 117 across the 83 active German runs
+# on 2026-10-31) and stored every German position as owns_unspecified ("wir
+# sind ja auch schon seit vielen Monaten wirklich in einem Monstershort drin
+# im Hansen", "Also WTI sind wir ja raus aus dem Trade"). The set below is
+# selected by the claim's transcript_language (EVIDENCE_RULES). Three things
+# about these transcripts shape it:
+#   * German negates at the end of the clause ("ich würde das nicht kaufen"),
+#     so each instruction is checked for a negation in its own clause
+#     (_de_negated): a negated purchase states AVOID, a negated sale HOLD,
+#     and an action survives only when the evidence states that kind of
+#     instruction (unlike English, where any recommendation word passes);
+#   * the trading vocabulary overlaps with chart talk ("die Unterstützung
+#     muss halten", "Abverkauf", "Verkaufsreaktion"), with opinion ("SpaceX
+#     halte ich für sehr hoch bewertet") and with idiom ("die
+#     Spekulationssteuer in Kauf nehmen"), so a word counts only in the forms
+#     and frames an investor uses;
+#   * HKCM says "wir" for the price ("da sind wir ganz leicht runtergegangen",
+#     "dass wir in dieser C-Welle drin sind"), so "wir sind ... drin" is no
+#     position, and "wir steigen" is a purchase only with its particle
+#     ("Wir steigen auf den aktuellen Niveaus ein").
+# Unless marked, every phrase is from the stored HKCM / Phantom transcripts.
+# Praise is still no instruction: "das könnten sehr interessante Werte sein",
+# "eine Once in a Lifetime Opportunity" and "bullisch" match nothing here.
+
+
+def _gap(n):
+    """Up to `n` words inside one clause (no sentence or clause punctuation;
+    a German decimal such as "107,50" or "26,94%" is one word)."""
+    return r"(?:(?:\d+(?:[.,]\d+)*[%$€]?|[^\s.!?,;:]+)\s+){0," + str(n) + "}"
+
+
+# A separable verb's particle closes its clause: "Wir steigen auf den
+# aktuellen Niveaus ein." / "steigen ... aus mit einem Profit".
+_PARTICLE_END = (r"(?=\s*(?:[.!?,;:]|$|\b(?:und|oder|aber|mit|bei|wenn|sobald|falls|weil|das|dann|sondern|"
+                 r"gerade)\b))")
+# A sentence's first word: an excerpt often starts at the verb ("steigen bei
+# einem Kurs von 22262 aus", "Steigen hier ein und nehmen dann einen Swing-Trade mit").
+_SENTENCE_START = r"(?:^|(?<=[.!?]\s))"
+
+_DE_BUY = re.compile(
+    r"\b(?:"
+    # The verb in every form an investor uses. "kauf" alone is the noun ("in
+    # Kauf nehmen", "der Kauf von Twitter"); "verkaufen" never matches here.
+    r"(?:nach|zu|ein)?kauf(?:en|e|st|t|te|ten)|(?:nach|zu|ein)?gekauft|(?:nach|zu|ein)zukaufen|zu\s+kaufen|"
+    r"aufstocken|aufzustocken|aufgestockt|stock(?:e|en|t)\b[^.!?;:]{0,40}\bauf" + _PARTICLE_END + r"|"
+    r"akkumulier(?:en|e|t)|zu\s+akkumulieren|einsteigen|einzusteigen|eingestiegen|"
+    r"(?:ich|wir)\s+steig(?:e|en)\b[^.!?;:]{0,60}\bein" + _PARTICLE_END + r"|"
+    r"steig(?:e|en)\s+(?:ich|wir)\b[^.!?;:]{0,60}\bein" + _PARTICLE_END + r"|"
+    + _SENTENCE_START + r"steig(?:e|en)\b[^.!?;:]{0,40}\bein" + _PARTICLE_END + r"|"
+    # "dann werde ich mich da auch eindecken", "günstig aufladen", "zuschlagen"
+    r"eindecken|einzudecken|eingedeckt|(?:auf|nach)laden|(?:auf|nach)zuladen|(?:auf|nach)geladen|"
+    r"zuschlagen|zuzuschlagen|zugeschlagen|zugreifen|zuzugreifen|zugegriffen|"
+    r"investier(?:en|e)|zu\s+investieren|bespar(?:en|e|t)|sparplan\w*|reinzukommen|"
+    # Positions opened or built: "Wir gehen Positionen ein", "weitere Long
+    # Positionen aufzubauen", "Dort wollen wir weitere Positionen aufstocken"
+    r"(?:position|positionen|long|tranche|tranchen|exposition|exposure|bestand|bestände)\b[^.!?;:]{0,45}\b"
+    r"(?:eingehen|einzugehen|eingegangen|eröffnen|zu\s+eröffnen|eröffnet|aufbauen|aufzubauen|aufgebaut|"
+    r"ausbauen|auszubauen|ausgebaut|hinterlegen|zu\s+hinterlegen|hinterlegt|nehmen|genommen)|"
+    r"geh(?:e|en)\s+" + _gap(4) + r"(?:position|positionen)\s+" + _gap(3) + r"ein" + _PARTICLE_END + r"|"
+    # Nouns: "ein klarer Kauf", "sehr attraktiver Kauf", "Kaufzielzone",
+    # "eine historische Kaufgelegenheit", "einen Nachkauf, den wir tätigen wollen"
+    r"(?:nach|zu)kauf|(?:nach|zu)käufe|kauf(?:gelegenheit|gelegenheiten|chance|chancen|zone|zonen|zielzone|"
+    r"zielzonen|bereich|bereiche|niveau|niveaus|marke|seite|empfehlung|empfehlungen|limit|order)|"
+    r"einstiegs(?:zone|zonen|bereich|bereiche|niveau|niveaus|chance|chancen|gelegenheit|punkt|marke|kurs)|"
+    r"einstieg(?:e)?\b[^.!?;:]{0,40}\b(?:tätigen|zu\s+tätigen|getätigt|tätigt|setzen|nehmen|wagen|planen|nutzen)|"
+    r"(?:ein|einen|klar(?:er|en)?|gut(?:er|en)?|attraktiv(?:er|en)?|stark(?:er|en)?|sicher(?:er|en)?|"
+    r"absolut(?:er|en)?|echt(?:er|en)?|definitiv|super|top|strong)\s+(?:kauf|buy)|buy\s+the\s+dip|"
+    # English loanwords: "unterhalb von 84,93 ein Must-Buy", "einen weiteren
+    # Long-Term-Buy-In tätigen" (a buy signal is no instruction)
+    r"must[- ]?buy|strong[- ]?buy|buy[- ]?in|buy[- ]?(?:zone|bereich|rating|empfehlung)|"
+    # Long trades: "den Long würde ich auf jeden Fall noch mal nehmen",
+    # "also schauen hier auf einen Long Trade", "Long-Term-Entry"
+    r"long[- ]?(?:trade|trades|position|positionen|einstieg|einstiege|entry|setup|chance|zielzone|zone)|"
+    r"(?:den|einen|ein|im|unseren|unser|meinen|mein)\s+long(?![- ]?term)|"
+    r"long\s+(?:gehen|zu\s+gehen|gegangen|reingegangen|eingestiegen|positioniert)|"
+    r"entry|tranche|tranchen|dca|auf\s+(?:der\s+)?kaufseite|"
+    # "dort sollten sich Anleger positionieren" (never "gut positioniert": praise)
+    r"(?:sich|uns|mich|euch)\b[^.!?;:]{0,40}\bpositionieren|"
+    r"ich\s+empfehle|empfehle\s+ich|wir\s+empfehlen|empfehlen\s+wir|empfehlenswert|kaufenswert"
+    r")\b", re.IGNORECASE)
+_DE_PRAISED_POSITIONING = re.compile(
+    r"\b(?:gut|stark|bestens|hervorragend|optimal|ideal|perfekt|solide|breit|clever|strategisch|richtig)\s+"
+    r"(?:zu\s+)?positionier", re.IGNORECASE)
+_DE_SELL = re.compile(
+    r"\b(?:"
+    # "Abverkauf", "Verkaufsreaktion", "Verkaufsdruck" describe the market and
+    # never match: only the verb and the recommendation noun do.
+    r"verkauf(?:en|e|st|t|te|ten)|zu\s+verkaufen|"
+    r"verkauf(?=\s+(?:lieber|jetzt|sofort|alles|die|den|das|deine|eure|ihn|sie|es)\b)|"   # "verkauf lieber jetzt"
+    r"abstoßen|abzustoßen|abgestoßen|veräußern|zu\s+veräußern|veräußert|"
+    r"aussteigen|auszusteigen|ausgestiegen|"
+    r"(?:ich|wir)\s+steig(?:e|en)\b[^.!?;:]{0,60}\baus" + _PARTICLE_END + r"|"
+    r"steig(?:e|en)\s+(?:ich|wir)\b[^.!?;:]{0,60}\baus" + _PARTICLE_END + r"|"
+    + _SENTENCE_START + r"steig(?:e|en)\b[^.!?;:]{0,60}\baus" + _PARTICLE_END + r"|"
+    r"glattstellen|glattzustellen|glattgestellt|trimmen|trimme|getrimmt|teilverkauf|"
+    r"(?:ich|wir)\s+reduzier(?:e|en)|reduzier(?:e|en)\s+(?:ich|wir)|"
+    # "die Position auch komplett zu schließen", "nur Teilprofite realisieren"
+    r"(?:position|positionen|bestand|bestände|anteile|engagement|exposure|exposition)\b[^.!?;:]{0,40}\b"
+    r"(?:schließen|zu\s+schließen|geschlossen|glattstellen|glattgestellt|auflösen|aufgelöst|reduzieren|"
+    r"zu\s+reduzieren|reduziert|verkleinern|zu\s+verkleinern|verkleinert|abbauen|abzubauen|abgebaut)|"
+    r"(?:gewinne|gewinn|teilgewinne|profite|teilprofite)\b[^.!?;:]{0,30}\b(?:mitnehmen|mitzunehmen|mitgenommen|"
+    r"realisieren|zu\s+realisieren|realisiert|sichern|zu\s+sichern|gesichert)|"
+    r"nehm(?:e|en)\s+" + _gap(3) + r"(?:gewinne|teilgewinne|profite|teilprofite)\s+" + _gap(2) + r"mit"
+    + _PARTICLE_END + r"|"
+    r"take[- ]?profits?|verkaufsempfehlung(?:en)?|strong\s+sell|"
+    # "Also WTI sind wir ja raus aus dem Trade", "wir sind aus dem WTI-Trade raus"
+    r"raus\s+aus\s+(?:dem|der|den|unserem|unserer|diesem|dieser)\s+(?:[\w-]+\s+)?(?:[\w-]*trade|trades|position|"
+    r"positionen|investment)|"
+    r"aus\s+(?:dem|der|unserem|unserer|diesem|dieser)\s+[\w-]*(?:trade|position|investment)\s+" + _gap(2) + r"raus"
+    r")\b", re.IGNORECASE)
+_DE_SHORT = re.compile(
+    r"\b(?:"
+    # "die wir dann wegschorten": auto-captions spell "shorten" with "sch".
+    r"(?:weg|ge)?s(?:c)?hort(?:en|et|e|est)|zu\s+s(?:c)?horten|leerverkauf(?:en|t|e)?|leerverkäufe|"
+    r"short[- ]?(?:trade|trades|position|positionen|einstieg|einstiege|setup|zielzone|zone|seite)|"
+    r"(?:den|einen|ein|im|unseren|unser|meinen|mein)\s+short(?![- ]?(?:term|squeeze))|"
+    r"short\s+(?:gehen|zu\s+gehen|gegangen|reingegangen|eingestiegen|positioniert)|"
+    r"(?:ich\s+bin|wir\s+sind|sind\s+wir|bin\s+ich)\s+" + _gap(4) + r"short(?![- ]?(?:term|squeeze))|"
+    r"(?:ich|wir)\s+" + _gap(3) + r"short\s+(?:bin|sind)|"
+    r"in\s+(?:einem|einen|dem|den|unserem|unseren|meinem)\s+\w*short(?![- ]?squeeze)"
+    r")\b", re.IGNORECASE)
+_DE_HOLD = re.compile(
+    r"\b(?:"
+    # "Den wollen wir weiter halten", "den ich ... 100% halten würde", "Wir
+    # halten hier garantiert unsere Position bei Tesla", "werden wir natürlich
+    # weiterhin durchhalten", "in der Tesla-Aktie langfristig investiert sein"
+    r"(?:weiter|weiterhin|langfristig|vorerst|erstmal|sowieso|garantiert|definitiv|unbedingt|natürlich|auch)\s+"
+    r"(?:zu\s+)?halten|halten\s+würde|würde\s+(?:ich|wir)\s+" + _gap(3) + r"halten|"
+    r"(?:ich|wir)\s+würde(?:n)?\s+" + _gap(4) + r"halten|"
+    r"(?:ich|wir)\s+halte(?:n)?\s+" + _gap(3) + r"(?:position|positionen|aktie|aktien|anteile|bestand|bestände|"
+    r"stücke|unsere|meine|long|short)|"
+    r"halte(?:n)?\s+(?:ich|wir)\s+" + _gap(3) + r"(?:weiterhin|weiter|nach\s+wie\s+vor|vorerst|langfristig|"
+    r"garantiert|definitiv|unbedingt)|"
+    r"durchhalten|durchzuhalten|investiert\s+(?:zu\s+)?(?:sein|bleiben)|(?:drin|dabei)\s+(?:zu\s+)?bleiben|"
+    r"bleib(?:e|en)\s+" + _gap(2) + r"(?:drin|dabei|investiert)|liegen\s+(?:zu\s+)?lassen|"
+    r"an\s+(?:der|unserer|meiner|den|unseren|meinen)\s+(?:position|positionen|aktie|aktien)\s+festhalten|"
+    r"halteempfehlung|halte-?rating"
+    r")\b", re.IGNORECASE)
+# A "halten" that is opinion or a phrase, read from its clause: "SpaceX halte
+# ich für sehr hoch bewertet", "ich halte euch auf dem Laufenden", "halten
+# wir fest".
+_DE_HALTEN_NOT_HOLDING = re.compile(
+    r"\bfür\s+(?!(?:die|den|das|dem|ein|eine|einen|einige|mindestens|weitere|\d))\w+|"
+    r"\b(?:auf\s+dem\s+laufenden|ausschau|im\s+hinterkopf|abstand|wort|versprechen)\b|"
+    r"\bhalten\s+wir\s+" + _gap(2) + r"fest\b", re.IGNORECASE)
+# ...or chart support: "wenn wir die 100 halten", "die Unterstützung muss
+# auch halten" (HKCM's "wir" is the price). Only an instruction is read
+# through this one; a holding of positions never names a level.
+_DE_HALTEN_LEVEL = re.compile(
+    r"\b(?:unterstützung|unterstützungen|support|widerstand|marke|niveau|level|linie|trendlinie|boden|tief|hoch|"
+    r"range|zone|bereich)\b|\b(?:die|der|den|dem)\s+\d", re.IGNORECASE)
+_DE_AVOID = re.compile(
+    r"\b(?:"
+    # "Day Trading. Finger weg davon.", "deswegen rate ich eher von der
+    # Schweiz ab", "Ich würde es nicht machen"
+    r"finger\s+weg|hände\s+weg|finger\s+" + _gap(3) + r"(?:davon|weg)\s+(?:zu\s+)?lassen|"
+    r"lass(?:t)?\s+(?:die|eure|deine)\s+finger|meiden|meide|zu\s+meiden|gemieden|"
+    r"abraten|abzuraten|abgeraten|rat(?:e|en)\s+" + _gap(5) + r"ab" + _PARTICLE_END + r"|"
+    r"(?:nicht|niemals|nie)\s+(?:mehr\s+)?anfassen|abstand\s+(?:halten|nehmen|zu\s+halten)|"
+    r"(?:würde|werde)\s+(?:ich|wir)\s+(?:es|das|ihn|sie|die|den)\s+" + _gap(2) + r"nicht\s+(?:machen|tun)|"
+    r"(?:ich|wir)\s+würde(?:n)?\s+(?:es|das|ihn|sie)\s+" + _gap(2) + r"nicht\s+(?:machen|tun)|"
+    r"kein(?:en)?\s+(?:kauf|einstieg|nachkauf)|keine\s+kaufempfehlung|stay\s+away"
+    r")\b", re.IGNORECASE)
+_DE_WATCH = re.compile(
+    r"\b(?:"
+    r"beobacht(?:en|e|et)|zu\s+beobachten|watch-?list|im\s+auge\s+(?:behalten|zu\s+behalten|behalte)|"
+    r"auf\s+dem\s+(?:schirm|radar)|abwarten|abzuwarten|an\s+der\s+seitenlinie|"
+    # "warum ich für meinen Teil aktuell überlege, in ... Staatsanleihen zu
+    # investieren"; "da auf die Analyse achten, wann haben wir die nächste Trendwende"
+    r"(?:ich|wir)\s+" + _gap(4) + r"überleg(?:e|en)|überleg(?:e|en)\s+(?:ich|wir)|"
+    r"(?:auf|darauf)\b[^.!?;:,]{0,40}\bachten|"
+    r"(?:ich|wir)\s+wart(?:e|en)\s+" + _gap(3) + r"ab" + _PARTICLE_END + r"|"
+    r"wart(?:e|en)\s+(?:ich|wir)\s+" + _gap(3) + r"ab" + _PARTICLE_END
+    + r")\b", re.IGNORECASE)
+_DE_INSTRUCTIONS = (("buy", _DE_BUY), ("sell", _DE_SELL), ("short", _DE_SHORT), ("hold", _DE_HOLD),
+                    ("avoid", _DE_AVOID), ("watch", _DE_WATCH))
+# What a negated instruction states instead: not buying is avoiding it, not
+# selling is holding it ("ich würde meine gesamte Position ... nicht dicht
+# machen"), not holding is selling ("die Aktie nicht mehr halten").
+_DE_NEGATED_INSTRUCTION = {"buy": "avoid", "sell": "hold", "hold": "sell"}
+
+_DE_NEGATION = re.compile(r"\b(?:nicht|nie|niemals|kein|keine|keinen|keinem|keiner|keines|keinesfalls|weder)\b",
+                          re.IGNORECASE)
+# Negation words that negate nothing: "keine Wahl als nachzukaufen" ("Und im
+# Endeffekt haben wir bei dem keine Wahl als nachzukaufen"), "nicht nur".
+_DE_NOT_A_NEGATION = re.compile(
+    r"\b(?:nicht\s+nur|nicht\s+zuletzt|nicht\s+umsonst|nicht\s+ohne\s+grund|nicht\s+mehr\s+lange|"
+    r"nicht\s+(?:allzu|so)\s+lange[nr]?|"     # "vor nicht allzu langer Zeit ... eingestiegen"
+    r"nicht\s+(?:lange\s+)?zögern|zögere\s+nicht|nicht\s+verpassen|nicht\s+entgehen\s+lassen|kein\s+wunder|"
+    r"keine\s+(?:andere\s+)?(?:wahl|alternative|option)\s+als|nichts\s+(?:anderes|besseres)\s+als)\b",
+    re.IGNORECASE)
+# Where a clause ends, for a negation's reach: punctuation, coordinating and
+# subordinating words ("nicht verkaufen, sondern halten", "Ich glaube nicht
+# dass wir kaufen sollten"). A comma or point inside a number ("107,50",
+# "im Bereich 2700, 2600 nochmal nachzukaufen") ends nothing.
+_DE_CLAUSE_BREAK = re.compile(
+    r"[!?;:]|\.(?!\d)|,(?!\s*\d)|\b(?:und|oder|aber|sondern|doch|jedoch|dennoch|trotzdem|allerdings|weil|denn|dass|"
+    r"wenn|falls|sobald|obwohl)\b", re.IGNORECASE)
+_DE_NEGATION_AFTER = re.compile(r"^\s*(?:[^\s.!?,;:]+\s+){0,5}?(?:nicht|nie|niemals|keinesfalls)\b", re.IGNORECASE)
+
+
+def _de_negated(text, start, end):
+    """
+    True when the German instruction text[start:end] is negated inside its
+    own clause: a negation word before it ("ich würde das nicht kaufen",
+    "kein Kauf", "weder kaufen noch verkaufen", "jetzt nicht mehr auf diesen
+    Levels ... nochmal nachzukaufen") or within five words after it
+    ("Kaufen würde ich Tesla hier nicht", "Ich verkaufe nicht"). "nicht nur",
+    "keine Wahl als" and their kind negate nothing, and a negation in
+    another clause ("Ich glaube nicht, dass ...") does not reach it.
+    """
+    before = text[max(0, start - 80):start]
+    breaks = list(_DE_CLAUSE_BREAK.finditer(before))
+    if breaks:
+        before = before[breaks[-1].end():]
+    if _DE_NEGATION.search(_DE_NOT_A_NEGATION.sub(" ", before)):
+        return True
+    after = text[end:end + 40]
+    brk = _DE_CLAUSE_BREAK.search(after)
+    if brk:
+        after = after[:brk.start()]
+    return bool(_DE_NEGATION_AFTER.match(_DE_NOT_A_NEGATION.sub(" ", after)))
+
+
+def _de_negated_match(text, m):
+    """A match negated before or after it, or inside it ("habe Tesla nicht gekauft")."""
+    return _de_negated(text, m.start(), m.end()) or bool(
+        _DE_NEGATION.search(_DE_NOT_A_NEGATION.sub(" ", m.group(0))))
+
+
+def _de_clause(text, start, end, reach=80):
+    """The clause around text[start:end] (see _DE_CLAUSE_BREAK)."""
+    before = text[max(0, start - reach):start]
+    breaks = list(_DE_CLAUSE_BREAK.finditer(before))
+    if breaks:
+        before = before[breaks[-1].end():]
+    after = text[end:end + reach]
+    brk = _DE_CLAUSE_BREAK.search(after)
+    return before + text[start:end] + (after[:brk.start()] if brk else after)
+
+
+def _de_instructions(evidence):
+    """The kinds of instruction a German excerpt states: a subset of buy /
+    sell / short / hold / avoid / watch, negation applied."""
+    ev = evidence or ""
+    stated = set()
+    for kind, pattern in _DE_INSTRUCTIONS:
+        for m in pattern.finditer(ev):
+            if kind == "hold" and (_DE_HALTEN_NOT_HOLDING.search(clause := _de_clause(ev, m.start(), m.end()))
+                                   or _DE_HALTEN_LEVEL.search(clause)):
+                continue
+            if kind == "buy" and _DE_PRAISED_POSITIONING.search(_de_clause(ev, m.start(), m.end())):
+                continue
+            if _de_negated(ev, m.start(), m.end()):
+                if kind in _DE_NEGATED_INSTRUCTION:
+                    stated.add(_DE_NEGATED_INSTRUCTION[kind])
+                continue
+            stated.add(kind)
+    return stated
+
+
+# German positions. No position: "weil ich stand heute noch immer nicht in
+# Ethereum investiert bin", "Okay, du bist du bist also noch nicht drin",
+# "Also WTI sind wir ja raus aus dem Trade" (an exit is no position).
+_DE_NO_POSITION = re.compile(
+    r"\b(?:"
+    r"nicht\s+(?:mehr\s+)?" + _gap(3) + r"(?:investiert|engagiert|positioniert)|"
+    r"(?:ich|du)\s+" + _gap(2) + r"(?:bin|bist)\s+" + _gap(4) + r"nicht\s+(?:mehr\s+)?drin|"
+    r"(?:bin|bist)\s+(?:ich|du)\s+" + _gap(4) + r"nicht\s+(?:mehr\s+)?drin|"
+    r"(?:habe|haben|hab|halte|halten|besitze|besitzen)\s+" + _gap(3) + r"kein(?:e|en)?\s+" + _gap(1)
+    + r"(?:position|positionen|aktien|anteile|stücke)|keine\s+(?:position|positionen)\s+(?:in|bei|im|mehr)|"
+    r"raus\s+aus\s+(?:dem|der|den|unserem|unserer|diesem|dieser)\s+(?:[\w-]+\s+)?(?:[\w-]*trade|trades|position|"
+    r"positionen|investment)|"
+    r"aus\s+(?:dem|der|unserem|unserer|diesem|dieser)\s+[\w-]*(?:trade|position|investment)\s+" + _gap(2) + r"raus|"
+    r"(?:alles|alle|komplett|vollständig|sämtliche)\s+" + _gap(4) + r"(?:verkauft|veräußert|abgestoßen)"
+    r")\b", re.IGNORECASE)
+# A completed sale or exit ("weil ... ich die scheiß Aktien verkauft habe",
+# "Wir steigen ... bei Snowflake aus"). Without a partial marker it leaves no
+# position; with one it is a trim and the rest is still held.
+_DE_SALE = re.compile(
+    r"\b(?:"
+    r"(?:ich|wir)\s+(?:habe|haben|hab)\s+" + _gap(5) + r"(?:verkauft|veräußert|abgestoßen|glattgestellt)|"
+    r"(?:habe|haben|hab)\s+(?:ich|wir)\s+" + _gap(5) + r"(?:verkauft|veräußert|abgestoßen|glattgestellt)|"
+    r"(?:verkauft|veräußert|abgestoßen|glattgestellt)\s+(?:habe|haben|hab)|"
+    r"(?:bin|sind)\s+" + _gap(6) + r"ausgestiegen|ausgestiegen\s+(?:bin|sind)|"
+    r"(?:ich|wir)\s+steig(?:e|en)\s+" + _gap(5) + r"aus" + _PARTICLE_END + r"|"
+    r"(?:position|positionen)\s+" + _gap(3) + r"(?:geschlossen|glattgestellt|aufgelöst)"
+    r")\b", re.IGNORECASE)
+# A portion: "die Hälfte unserer Position verkauft", "Wir steigen teilweise
+# ... aus", "50 % unserer Aktien", "Wir haben eine Position von dreien, die wir
+# halten, verkauft", or a holding that remains ("wir aktuell noch mit zwei
+# Positionen investiert sind. Eine haben wir verkauft"). A percentage of
+# profit ("Und ihr seht es, wir steigen bei Adidas aus, Profit 3,62 %", "mit
+# 40 % Gewinn verkauft") is no portion.
+_DE_PARTIAL_WORDS = re.compile(
+    r"\b(?:hälfte|halbe[nr]?|teilweise|teil|teile|teilposition|teilverkauf|teilgewinne?|teilprofite?|drittel|"
+    r"viertel|einen\s+teil|ein\s+paar|einige|restliche[nr]?|verbleibende[nr]?|rest|"
+    r"(?:eine|einen|zwei|drei)\s+(?:von|davon)|position\s+von\s+(?:zwei|drei|vier|fünf|zweien|dreien|vieren|fünfen)|"
+    r"eine\s+(?:haben|habe|hab)\s+(?:wir|ich)|noch\s+" + _gap(4) + r"(?:investiert|drin|positionen|position))\b",
+    re.IGNORECASE)
+_DE_PERCENT = re.compile(r"\d+(?:[.,]\d+)?\s?(?:%|prozent\b)", re.IGNORECASE)
+_DE_PROFIT_WORDS = re.compile(r"\b(?:gewinn|gewinne|gewinnen|plus|profit|profite|rendite|minus|verlust|performance)\b",
+                              re.IGNORECASE)
+
+
+def _de_partial(text):
+    """True when a German excerpt sells or exits only a portion (see above)."""
+    text = text or ""
+    if _DE_PARTIAL_WORDS.search(text):
+        return True
+    return any(not _DE_PROFIT_WORDS.search(text[max(0, m.start() - 30):m.end() + 20])
+               for m in _DE_PERCENT.finditer(text))
+
+
+# "die Short Zielzone für den Dow Jones", "Short Squeeze": a chart zone or an
+# event, not a position.
+_NOT_A_TRADE_SIDE = r"(?![- ]?z*(?:term|squeeze|ziel|zone|bereich|setup|szenario|signal))"
+_DE_SHORT_POSITION = re.compile(
+    r"\b(?:"
+    # "wir sind short im Hang Seng", "weil ich da short bin auf den Titel",
+    # "haben die Position dann veräußert und sind short reingegangen"
+    r"(?:ich\s+bin|wir\s+sind|sind\s+wir|bin\s+ich|befinden\s+wir\s+uns|befinde\s+ich\s+mich)\s+" + _gap(4)
+    + r"short" + _NOT_A_TRADE_SIDE + r"|"
+    r"(?:ich|wir)\s+" + _gap(3) + r"short\s+(?:bin|sind)|"
+    r"short\s+(?:gegangen|reingegangen|eingestiegen|positioniert)|"
+    r"in\s+(?:einem|einen|dem|den|unserem|unseren|meinem)\s+\w*short" + _NOT_A_TRADE_SIDE + r"|"
+    r"short[- ]?(?:position|positionen)|"
+    r"(?:halte|halten|haben|habe)\s+" + _gap(2) + r"(?:einen|den|eine|die)\s+short" + _NOT_A_TRADE_SIDE + r"|"
+    r"geshortet|geschortet|leerverkauft"
+    r")\b", re.IGNORECASE)
+_DE_LONG_POSITION = re.compile(
+    r"\b(?:"
+    # "Aktuell befinden wir uns long im Markt. Wir halten eine Long Position."
+    r"(?:ich\s+bin|wir\s+sind|sind\s+wir|bin\s+ich|befinden\s+wir\s+uns|befinde\s+ich\s+mich)\s+" + _gap(4)
+    + r"long" + _NOT_A_TRADE_SIDE + r"|"
+    r"(?:ich|wir)\s+" + _gap(3) + r"long\s+(?:bin|sind)|long\s+(?:gegangen|reingegangen|eingestiegen|positioniert)|"
+    r"long[- ]?(?:position|positionen)|"
+    r"(?:halte|halten|haben|habe)\s+" + _gap(2) + r"(?:einen|den|eine|die)\s+long" + _NOT_A_TRADE_SIDE
+    + r")\b", re.IGNORECASE)
+# Ownership: "Wir sind ja zum einen in Chevron ... investiert", "Solana ist
+# meine größte Altcoin Position", "Solana und halte ich auch weiterhin",
+# "Die Rede soll sein von der Adlesin Aktie. Wir halten hier aktuell zwei
+# Positionen", "So, ist übrigens die einzige Aktie, die ich bespare",
+# "Also, ich habe mir den aktuell auch noch mal gekauft", "dass ich nicht nur
+# stolzer Tesla Aktionär und Xpeng Aktionär bin", "ich bin in Crisper drin".
+_DE_OWNERSHIP = re.compile(
+    r"\b(?:"
+    r"(?:ich\s+bin|wir\s+sind|bin\s+ich|sind\s+wir)\s+(?:[^\s.!?;:]+\s+){0,12}investiert|"
+    r"(?:ich|wir)\b[^.!?;:]{0,60}\binvestiert\s+(?:bin|sind|war|waren)|"
+    r"(?:meine|unsere|mein|unser|meinem|unserem|meiner|unserer|meinen|unseren)\s+" + _gap(2)
+    + r"(?:position|positionen|depot|depots|portfolio|bestand|bestände|anteile|aktien|tranche|tranchen)|"
+    r"(?:ich|wir)\s+halte(?:n)?\s+" + _gap(3) + r"(?:position|positionen|anteile|aktien|stücke|bestand|bestände)|"
+    r"(?:position|positionen)\b[^.!?;:]{0,30}\s(?:die|welche)\s+(?:ich|wir)\s+" + _gap(2) + r"halten|"
+    r"halte(?:n)?\s+(?:ich|wir)\s+" + _gap(2) + r"(?:weiterhin|weiter|nach\s+wie\s+vor|noch)|"
+    r"(?:offene|eröffnete|laufende)\s+position|"
+    r"(?:ich|wir)\s+(?:habe|haben|hab)\s+" + _gap(7) + r"(?:gekauft|nachgekauft|zugekauft|eingekauft|aufgestockt|"
+    r"akkumuliert|aufgeladen)|"
+    r"(?:habe|haben|hab)\s+(?:ich|wir)\s+" + _gap(7) + r"(?:gekauft|nachgekauft|zugekauft|eingekauft|aufgestockt|"
+    r"akkumuliert|aufgeladen)|"
+    r"(?:gekauft|nachgekauft|zugekauft|eingekauft|aufgestockt)\s+(?:habe|haben|hab)|"
+    r"(?:bin|sind)\s+" + _gap(6) + r"eingestiegen|eingestiegen\s+(?:bin|sind)|"
+    r"aktionär(?:in|e|en)?|bespar(?:e|t|en)|sparplan\w*|(?:im|ins|in\s+meinem|in\s+unserem|in\s+unseren)\s+depot\w*|"
+    r"(?:ich|du)\s+" + _gap(2) + r"(?:bin|bist)\s+" + _gap(4) + r"drin|(?:bin|bist)\s+(?:ich|du)\s+" + _gap(4) + r"drin"
+    r")\b", re.IGNORECASE)
+
+
+def _de_hit(pattern, text, negation=True):
+    """The first match of `pattern` in `text` that is not negated (see
+    _de_negated_match; `negation=False` takes any match) and is not a
+    "halten" that means something else, else None."""
+    for m in pattern.finditer(text or ""):
+        if "halt" in m.group(0).lower() and _DE_HALTEN_NOT_HOLDING.search(_de_clause(text, m.start(), m.end())):
+            continue
+        if negation and _de_negated_match(text, m):
+            continue
+        return m
+    return None
+
+
+def _de_position(evidence):
+    """German portfolio_position: no position first (an explicit "nicht
+    investiert", an exit), then short, long, a completed sale without a
+    partial marker (no position), then ownership (a trim keeps the rest)."""
+    ev = evidence or ""
+    if _de_hit(_DE_NO_POSITION, ev, negation=False):
+        return "no_position"
+    if _de_hit(_DE_SHORT_POSITION, ev):
+        return "short"
+    if _de_hit(_DE_LONG_POSITION, ev):
+        return "long"
+    sale = _de_hit(_DE_SALE, ev)
+    if sale is not None and not _de_partial(ev):
+        return "no_position"
+    if sale is not None or _de_hit(_DE_OWNERSHIP, ev):
+        return "owns_unspecified"
+    return None
+
+
+# Adoption and rejection of a third party's view: "Emil Jusov hat
+# geschrieben: 35% Kursverlust an einem Tag machen eine Aktie nicht
+# automatisch billig. Das stimme ich ihm auch zu." A rejection is checked
+# first, so "da stimme ich nicht zu" never reads as adoption, and the
+# adoption phrases themselves skip a negation inside them.
+_DE_UNNEGATED_GAP = r"(?:(?!nicht\b|nie\b|kein\w*\b)[^\s.!?,;:]+\s+){0,4}"
+_ADOPT_RE_DE = re.compile(
+    r"\b(?:"
+    r"stimme(?:n)?\s+" + _DE_UNNEGATED_GAP + r"zu|(?:ich|wir)\s+stimme(?:n)?\s+" + _DE_UNNEGATED_GAP + r"zu|"
+    r"(?:da|das|dem)\s+bin\s+ich\s+(?:ganz\s+|voll\s+|völlig\s+)?(?:bei\s+(?:ihm|ihr|ihnen|dir|euch)|"
+    r"d'accord|einverstanden|einer\s+meinung)|"
+    r"ich\s+bin\s+(?:da\s+)?(?:ganz\s+|voll\s+|völlig\s+)?(?:bei\s+(?:ihm|ihr|ihnen)|einverstanden|d'accord|"
+    r"derselben\s+meinung|der\s+gleichen\s+meinung)|"
+    r"sehe\s+ich\s+(?:das\s+)?(?:ganz\s+|genau\s+)?(?:genauso|auch\s+so|ähnlich|ebenso)|"
+    r"ich\s+sehe\s+(?:das|es)\s+(?:ganz\s+|genau\s+)?(?:genauso|auch\s+so|ähnlich|ebenso)|"
+    r"(?:das\s+)?teile\s+ich(?!\s+(?:nicht|kein))|"
+    r"ich\s+teile\s+(?:diese|die|seine|ihre|deren|eure|deine)\s+(?:einschätzung|meinung|sicht|ansicht|prognose|"
+    r"erwartung|sichtweise)(?!\s+(?:nicht|kein))|"
+    r"(?:das\s+ist|ist\s+das)\s+(?:auch\s+)?(?:mein|unser)\s+(?:ziel|kursziel|szenario|call|ausblick)|"
+    r"(?:mein|unser)\s+(?:kursziel|ziel)\s+(?:liegt\s+)?(?:auch|ebenfalls|genauso)|"
+    r"(?:er|sie)\s+(?:hat|haben)\s+(?:völlig\s+|vollkommen\s+|absolut\s+|total\s+|voll\s+)?recht|"
+    r"gebe?\s+(?:ich\s+)?(?:ihm|ihr|ihnen)\s+(?:völlig\s+|vollkommen\s+|absolut\s+)?recht|"
+    r"das\s+deckt\s+sich\s+" + _gap(2) + r"mit\s+(?:meiner|unserer|meinem|unserem)|"
+    r"würde\s+ich\s+(?:genauso|auch\s+so)\s+(?:sehen|unterschreiben)"
+    r")\b", re.IGNORECASE)
+_REJECT_RE_DE = re.compile(
+    r"\b(?:"
+    r"stimme(?:n)?\s+" + _gap(4) + r"nicht\s+zu|(?:ich|wir)\s+stimme(?:n)?\s+" + _gap(4) + r"nicht\s+zu|"
+    r"sehe\s+ich\s+(?:das\s+)?(?:ganz\s+)?(?:anders|nicht\s+so|kritisch)|ich\s+sehe\s+(?:das|es)\s+(?:ganz\s+)?"
+    r"(?:anders|nicht\s+so|kritisch)|teile\s+ich\s+(?:nicht|keineswegs)|ich\s+teile\s+" + _gap(2) + r"nicht|"
+    r"(?:da\s+|das\s+)?bin\s+ich\s+(?:ganz\s+|völlig\s+)?anderer\s+meinung|"
+    r"bin\s+ich\s+nicht\s+(?:einverstanden|bei\s+(?:ihm|ihr|ihnen))|widersprech(?:e|en)|"
+    r"(?:er|sie)\s+(?:hat|haben|liegt|liegen)\s+(?:da\s+|hier\s+)?(?:unrecht|falsch|nicht\s+recht)|"
+    r"(?:nicht|kein)\s+(?:mein|unser)\s+(?:ziel|kursziel|szenario|call)|"
+    r"halte\s+ich\s+für\s+" + _gap(2) + r"(?:falsch|übertrieben|unrealistisch)|"
+    r"(?:viel\s+|deutlich\s+|etwas\s+|weit\s+)?zu\s+(?:bullisch|bärisch|optimistisch|pessimistisch|aggressiv)|"
+    r"(?:zu\s+)?(?:hoch|niedrig)\s+gegriffen|kaufe\s+ich\s+(?:ihm|ihr|ihnen|das|dem)\s+nicht\s+ab|"
+    r"nehme\s+ich\s+(?:ihm|ihr|ihnen)\s+nicht\s+ab|glaube\s+ich\s+(?:persönlich\s+)?nicht|"
+    r"ich\s+glaube\s+(?:das|daran)\s+nicht|bin\s+ich\s+skeptisch|ich\s+bin\s+(?:da\s+|hier\s+)?skeptisch"
+    r")\b", re.IGNORECASE)
 # Generic references whose referent lives in the surrounding transcript.
 _GENERIC_SUBJECT = re.compile(
     r"^(it|its|it'?s|they|them|their|this|that|the (stock|company|name|shares|share price|coin|token|etf|"
@@ -1287,9 +1730,7 @@ def condition_observability(condition):
     return False, "subjective", None
 
 
-def portfolio_position(evidence):
-    """The position the evidence itself supports: long / short / no_position
-    / owns_unspecified, or None when it discloses nothing."""
+def _en_position(evidence):
     ev = evidence or ""
     if _NO_POSITION_RE.search(ev):
         return "no_position"
@@ -1302,16 +1743,115 @@ def portfolio_position(evidence):
     return None
 
 
-def host_position_from(evidence, model_value=None):
+def _en_instructions(evidence):
+    # English keeps its original check: any recommendation word supports any
+    # action ("any"); the German set is kind- and negation-aware (above).
+    return {"any"} if _RECOMMEND_RE.search(evidence or "") else set()
+
+
+# One rule set per transcript language for the evidence checks that decide
+# recommendation_action, portfolio_disclosure and host_position (the
+# suspicious-empty check's SUSPICIOUS_RULES is the same idea). Selected by
+# the claim's transcript_language (rule_languages); a transcript whose
+# language is unknown is checked against every set.
+EVIDENCE_RULES = {
+    "en": {"instructions": _en_instructions, "position": _en_position, "owns": _OWNERSHIP_RE.search,
+           "adopt": _ADOPT_RE, "reject": _REJECT_RE},
+    "de": {"instructions": _de_instructions, "position": _de_position, "owns": _de_position,
+           "adopt": _ADOPT_RE_DE, "reject": _REJECT_RE_DE},
+}
+# Which action kinds an action needs the evidence to state (German set): a
+# short is also a sale, and a negated purchase states "avoid".
+ACTION_KIND = {"buy": "buy", "add": "buy", "accumulate": "buy", "hold": "hold", "reduce": "sell", "sell": "sell",
+               "short": "short", "avoid": "avoid", "watch": "watch"}
+_KINDS_SUPPORTING = {"buy": {"buy"}, "sell": {"sell", "short"}, "hold": {"hold"}, "short": {"short"},
+                     "avoid": {"avoid"}, "watch": {"watch"}}
+_POSITION_PRIORITY = {"no_position": 0, "short": 1, "long": 2, "owns_unspecified": 3}
+
+
+def rule_languages(language=None):
+    """The EVIDENCE_RULES languages that apply to evidence in `language`
+    (a claim's transcript_language: "de", "en-US", "unknown", None): that
+    language's set when there is one, else every set — the evidence may be
+    in any of them."""
+    from language_detect import normalize_code
+    code = normalize_code(language) if isinstance(language, str) else ""
+    return (code,) if code in EVIDENCE_RULES else tuple(EVIDENCE_RULES)
+
+
+def evidence_language(declared=None, text=None):
+    """The language validate_claims runs the evidence rules under: the
+    declared transcript language when a rule set exists for it, else the
+    language detected in `text` (a whole transcript: one excerpt is too short
+    to tell), else None (every set applies)."""
+    from language_detect import detect_language, normalize_code
+    code = normalize_code(declared) if isinstance(declared, str) else ""
+    if code in EVIDENCE_RULES:
+        return code
+    detected = detect_language(text)["language"] if text else "unknown"
+    return detected if detected in EVIDENCE_RULES else None
+
+
+def stated_instructions(evidence, language=None):
+    """What the evidence instructs, under `language`'s rule set(s): {"any"}
+    when English recommendation wording is present, and for German the
+    kinds stated (buy / sell / short / hold / avoid / watch, negation
+    applied). Empty when it instructs nothing — praise, a forecast, a
+    holding."""
+    stated = set()
+    for code in rule_languages(language):
+        stated |= EVIDENCE_RULES[code]["instructions"](evidence)
+    return stated
+
+
+def recommendation_supported(action, evidence, language=None):
+    """
+    Whether the evidence states the recommendation `action`. Only an
+    explicit instruction keeps buy / sell / hold / ...: ownership and praise
+    are not recommendations. English: any recommendation wording supports
+    any action. German: the evidence must state that kind of instruction —
+    "ich würde das nicht kaufen" states avoid, so it keeps "avoid" and
+    drops "buy". "none" and "unclear" are always supported.
+    """
+    if action in (None, "none", "unclear"):
+        return True
+    stated = stated_instructions(evidence, language)
+    return "any" in stated or bool(_KINDS_SUPPORTING.get(ACTION_KIND.get(action), set()) & stated)
+
+
+def portfolio_position(evidence, language=None):
+    """The position the evidence itself supports: long / short / no_position
+    / owns_unspecified, or None when it discloses nothing. `language` picks
+    the rule set (rule_languages); where several apply, the strongest
+    statement wins (no_position, then short, long, owns_unspecified)."""
+    found = [EVIDENCE_RULES[code]["position"](evidence) for code in rule_languages(language)]
+    found = [p for p in found if p]
+    return min(found, key=_POSITION_PRIORITY.get) if found else None
+
+
+def states_ownership(evidence, language=None):
+    """True when the evidence carries any ownership wording at all."""
+    return any(EVIDENCE_RULES[code]["owns"](evidence or "") for code in rule_languages(language))
+
+
+def adopts_view(evidence, language=None):
+    """True when the evidence carries adoption wording ("I agree", "das
+    sehe ich genauso")."""
+    return any(EVIDENCE_RULES[code]["adopt"].search(evidence or "") for code in rule_languages(language))
+
+
+def host_position_from(evidence, model_value=None, language=None):
     """
     Where the speaker stands on a third party's view, from the evidence
     first (explicit rejection beats adoption beats the model's word) and the
-    model's `host_position` only when the evidence says nothing.
+    model's `host_position` only when the evidence says nothing. `language`
+    picks the rule set(s); a rejection in any of them beats an adoption.
     """
     ev = evidence or ""
-    if _REJECT_RE.search(ev):
+    codes = rule_languages(language)
+    if any(EVIDENCE_RULES[code]["reject"].search(ev) for code in codes):
         return "rejected"
-    if _ADOPT_RE.search(ev):
+    if any(EVIDENCE_RULES[code]["adopt"].search(ev) for code in codes):
         return "adopted"
     if model_value in ("adopted", "rejected") :
         # The model may have read a wider context than the excerpt; an
@@ -1721,6 +2261,9 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
     published = _parse_date(context.get("published_at"))
     text = nt.text
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    # The rule set the action / position / adoption checks read the evidence
+    # with (EVIDENCE_RULES): the transcript's language.
+    language = evidence_language(context.get("transcript_language"), text)
 
     for i, raw in enumerate(raw_claims or []):
         if not isinstance(raw, dict):
@@ -1767,10 +2310,10 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
         host_position = "not_applicable"
         third_party_origin = None
         if attribution in OWN_VIEW_ATTRIBUTIONS and _THIRD_PARTY_RE.search(evidence) \
-                and not _ADOPT_RE.search(evidence):
+                and not adopts_view(evidence, language):
             review.append("possible_third_party_view")
         if attribution in THIRD_PARTY_ATTRIBUTIONS or claim_type == "third_party_view":
-            host_position = host_position_from(evidence, raw.get("host_position"))
+            host_position = host_position_from(evidence, raw.get("host_position"), language)
             third_party_origin = _s(raw.get("attributed_person_or_organization"))
             if host_position == "adopted":
                 # Adoption makes it the speaker's own current view; the
@@ -1786,9 +2329,14 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
                     claim_type = "third_party_view"
                 stance = "not_applicable"
                 action = "none"
-        # Rules: ownership and praise are not recommendations.
-        if action not in ("none", "unclear") and not _RECOMMEND_RE.search(evidence):
-            warnings.append(f"claim {i}: recommendation '{action}' not stated in evidence; set to none")
+        # Rules: ownership and praise are not recommendations; in German an
+        # action must also be the kind the evidence states (a negated
+        # purchase is an avoid, never a buy).
+        if not recommendation_supported(action, evidence, language):
+            stated = sorted(stated_instructions(evidence, language) - {"any"})
+            warnings.append(f"claim {i}: recommendation '{action}' not stated in evidence; set to none" if not stated
+                            else f"claim {i}: recommendation '{action}' contradicts the evidence "
+                                 f"({', '.join(stated)}); set to none")
             action = "none"
         if attribution == "hypothetical_example" or claim_type == "hypothetical":
             forward = False
@@ -1802,17 +2350,17 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
         # no stance, no recommendation and no forecast; only a statement that
         # ALSO forecasts or recommends keeps its view (with the disclosure
         # noted beside it).
-        supported_position = portfolio_position(evidence)
+        supported_position = portfolio_position(evidence, language)
         portfolio = _enum(raw.get("portfolio_disclosure"), PORTFOLIO, "not_stated")
         if supported_position:
             portfolio = supported_position
         elif portfolio in ("long", "short", "no_position"):
-            portfolio = "owns_unspecified" if _OWNERSHIP_RE.search(evidence) else "not_stated"
+            portfolio = "owns_unspecified" if states_ownership(evidence, language) else "not_stated"
         view_content = (
             claim_type in ("forecast", "price_target", "recommendation", "valuation_view")
             or action not in ("none", "unclear") or direction is not None
             or any(v is not None for v in (target_value, target_low, target_high))
-            or bool(_RECOMMEND_RE.search(evidence) and action != "none")
+            or bool(stated_instructions(evidence, language) and action != "none")
         )
         if claim_type == "portfolio_disclosure" or (
                 supported_position and claim_type in ("stance", "opinion", "other", "fact") and not view_content):

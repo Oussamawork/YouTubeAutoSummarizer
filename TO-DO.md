@@ -156,10 +156,23 @@ Full worklist: `python ticker_audit.py --top 50`.
 
 ## 4. Code follow-ups (no decision needed)
 
-1. **German-aware claim validation.** German buy, sell and hold wording is
-   reset to `none`, and "wir haben verkauft" / "short" / "nicht investiert"
-   read as ownership. This is the suggested task "Make claim validation
-   German-aware for actions".
+1. **German-aware claim validation: done 2026-10-31.** The rules are in
+   `claims.EVIDENCE_RULES`; docs/tdd-full-transcript-claims.md § 13.3b has
+   the measurement and the decision not to `--reprocess`. Left open:
+   - **Re-validate the 3 offline imports at no model cost.** fKyDalNgdxs,
+     NPElYcJUess and XAecgVjJvhU would regain 13 actions, 4 positions and
+     1 reclassification from their committed candidates. `--import-candidates`
+     skips finished videos and their run key does not change, so this needs a
+     small mode that supersedes the offline run with the re-validated one
+     (compare 1.2).
+   - **Still English-only:** `claims._QUESTION_START`, `_RETRO_RE` ("letztes
+     Jahr habe ich gesagt") and `_THIRD_PARTY_RE`, which raises the
+     `possible_third_party_view` flag ("Analysten", "laut", "zufolge").
+   - **English asymmetries:** the English check keeps any action on any
+     recommendation word ("I would not buy" keeps a model "buy"), and stores
+     "I sold Tesla" as `owns_unspecified`. The German set is kind-aware and
+     stores a completed sale as no position. Measure the English change on
+     the stored claims before aligning it.
 2. **Validator edge cases found in the backfill.** These are the suggested
    task "Fix claim-validator edge cases from the backfill":
    - no-position read as ownership

@@ -191,7 +191,7 @@ Schema and prompt versions are now `2`. New fields per claim:
 
 | Field | Values | Set by |
 | --- | --- | --- |
-| `host_position` | adopted, rejected, neutral, not_applicable | evidence regexes first (`_REJECT_RE` beats `_ADOPT_RE`), the model's word only when the excerpt is silent — and a model-asserted adoption without evidence is downgraded to neutral |
+| `host_position` | adopted, rejected, neutral, not_applicable | evidence regexes first, in the transcript language's rule set (§ 13.3b; rejection beats adoption), the model's word only when the excerpt is silent — and a model-asserted adoption without evidence is downgraded to neutral |
 | `third_party_origin` | organisation | kept when an adopted third-party view is promoted to the speaker's own |
 | `entity_resolution_method` | explicit_mention, local_coreference, title, curated_mapping, unresolved | `validate_claims` |
 | `entity_resolution_confidence` | 1.0 / 0.8 explicit, 0.7 local coreference, 0.6 title, 0.5 curated-only, 0.0 unresolved | `validate_claims` |
@@ -205,7 +205,9 @@ portfolio_disclosure`, `stance = not_applicable`, `stance_basis =
 not_applicable`, `recommendation_action = none`, `is_forward_looking =
 false`, `portfolio_disclosure = owns_unspecified` or the position the
 evidence itself supports (`long`, `short`, `no_position`; a model-supplied
-`long` without supporting words is downgraded). Only a statement that also
+`long` without supporting words is downgraded), read with the transcript
+language's rule set (§ 13.3b: "wir sind short im Hang Seng" is short, "wir
+haben Rheinmetall verkauft" no position). Only a statement that also
 forecasts or recommends keeps its view, with the disclosure noted beside
 it. `claims.carries_view` is the single filter every stance path uses
 (consensus, net stance, flips, tone, the legacy reduction, the pulse, the
@@ -365,7 +367,10 @@ transcripts only (a missing transcript stays `failed_retryable:
 transcript_not_stored`; re-fetching remains the daily job's budgeted
 decision), at most `RESEARCH_BACKFILL_MAX_VIDEOS` per run, stopping on quota.
 `--reprocess` re-extracts videos whose active run predates the current
-versions and supersedes the old run. `--adopt-stored` gives a `pending`
+versions and supersedes the old run. A change to the validation rules alone
+(the German evidence rules, § 13.3b) moves no version, so `--reprocess` does
+not pick it up and stored claims keep the values they were validated with
+until their video is re-extracted. `--adopt-stored` gives a `pending`
 record to stored transcripts that never got research because their summary
 never went out (quota-deferred until the video left the feed, or failed into
 manual review; 40 on 2026-10-16) — skipping videos still pending a summary,
@@ -644,6 +649,108 @@ the new text, and runs the normal extraction as a new run. The daily job
 runs both after the scraper. Summaries already delivered from a wrong
 track are not re-sent.
 
+### 13.3b Evidence rules per language (`claims.EVIDENCE_RULES`)
+
+The checks that decide `recommendation_action`, `portfolio_disclosure` and
+`host_position` read the evidence's own wording, and until 2026-10-31 they
+read it with English patterns only. The German channels (HKCM, Phantom by
+HKCM; HKCM GLOBAL publishes in English) lost three things: every action the
+extractor took from German speech was reset to `none` (117 in the 83 active
+German runs, 11 of them in one HKCM livestream, fKyDalNgdxs); German
+positions were stored as `owns_unspecified` ("Ähm ich die scheiß Aktien
+verkauft habe", "in einem Monstershort drin im Hansen", "Also WTI sind wir
+ja raus aus dem Trade", "du bist also noch nicht drin", where the extractor
+had said no_position / short / no_position / no_position); and a German
+adoption ("Das stimme ich ihm auch zu") stayed a neutral third-party view.
+
+*Selection.* One rule set per language, as for the suspicious-empty check
+(§ 13.3): `EVIDENCE_RULES["en"]` (the original patterns, unchanged) and
+`["de"]`. `validate_claims` reads every claim of a transcript under the
+transcript's language (`evidence_language`: the declared
+`transcript_language` when a set exists for it, else detection over the
+whole transcript); stored claims are read under their own
+`transcript_language` (`rule_languages`); an unknown language reads every
+set. English evidence is never read with the German set, nor German with
+the English one.
+
+*The German set.*
+- **Actions are kind-aware.** The excerpt states buy / sell / short / hold
+  / avoid / watch (`stated_instructions`), and an action survives only when
+  it is a kind the excerpt states (`recommendation_supported`; a short is
+  also a sale). German negates at the end of the clause, so each
+  instruction is checked for a negation inside its own clause
+  (`_de_negated`; "nicht nur", "keine Wahl als", "vor nicht allzu langer
+  Zeit" negate nothing): a negated purchase states avoid ("ich würde das
+  nicht kaufen" keeps a model "avoid" and drops a "buy"), a negated sale
+  states hold. English keeps its original check, where any recommendation
+  word supports any action.
+- **Verbs count only in an investor's frame.** "die Unterstützung muss
+  halten" (chart support; HKCM says "wir" for the price), "SpaceX halte ich
+  für sehr hoch bewertet" (opinion), "Abverkauf" and "Verkaufsreaktion"
+  (the market), "in Kauf nehmen" (an idiom) and "gut positioniert" (praise)
+  state nothing. Praise is still `none`: "das könnten sehr interessante
+  Werte sein", "Once in a Lifetime Opportunity".
+- **Positions.** No position: "nicht investiert", "nicht drin" (first
+  person singular only, because HKCM's "wir sind ... drin" is the price), an
+  exit ("raus aus dem Trade") or a completed sale. Short / long: "wir sind
+  short", "in einem Monstershort drin", "Long Position" (a "Short
+  Zielzone" is a chart zone). A sale of a portion ("die Hälfte", "teilweise",
+  "50 %", "eine Position von dreien"; a profit percentage is no portion)
+  leaves `owns_unspecified`, because the rest is still held.
+- **Adoption and rejection.** "das sehe ich genauso", "stimme ich ihm zu",
+  "das ist auch mein Kursziel" adopt; "da stimme ich nicht zu", "sehe ich
+  ganz anders", "halte ich für übertrieben", "viel zu bullisch" reject.
+  Rejection is checked first.
+
+*The disclosure report* (`canonical_claims.portfolio_disclosures`) reads
+trades (`disclosed_action`, now one table per language: "die Hälfte unserer
+Position verkauft" is a trim, "raus aus dem Trade" a sale, "Zukäufe
+getätigt" a purchase) and, over a stored `owns_unspecified`, the position the
+evidence states under the current rules. Both happen at load, so stored German
+disclosures report correctly without re-extraction. On the committed data
+HKCM's "sold SNOW, TEAM" became "trimmed SNOW, TEAM" (half of one
+position, one of three tranches of the other), and Phantom by HKCM gained
+"short NOW" and "trimmed SHOP". A specific stored position (long / short /
+no_position) is kept.
+
+*Stored claims keep their values until re-extracted.*
+`canonical_claims.reresolve` re-runs entity resolution at load. It does not
+re-run these checks, and the model's own action is not stored, so it
+cannot. A German claim validated before this change keeps the
+`recommendation_action`, `portfolio_disclosure` and `host_position` it was
+stored with, and so do the attribution and claim type an adoption would
+change, until its video is re-extracted. Measured on the committed data
+(2026-10-31, replaying the run warnings): the new rules keep 73 of the 117
+dropped German actions (60 in 44 model-run videos, 13 in the 3 offline
+imports). The other 44 stay `none`: forecasts, praise and excerpts without
+an instruction. 8 stored disclosures would change position. One action the
+old check kept would now be dropped, a "watch" on "einen Long und ein Short
+eingehen", which states two trades.
+
+*No `--reprocess` (decided 2026-10-31).*
+1. `--reprocess` selects runs made under an older prompt, schema,
+   normalization or chunking version. These rules move none of them, and
+   bumping one would re-extract all 597 active runs, English included.
+2. Re-extracting the 80 German model runs costs at least 80 model requests
+   at 20 a day per model, against the summary reserve (§ 13.8), to restore
+   60 actions.
+3. An action matters to the pulse only in the week it reports (37 of the
+   711 German claims were that recent), and the disclosure report is
+   already current.
+
+New videos are validated under these rules from the next run. The 3
+offline imports (fKyDalNgdxs, NPElYcJUess, XAecgVjJvhU) can be re-validated
+from their committed candidates without a model request (13 actions, 4
+positions, 1 reclassification). That needs a small mode, because
+`--import-candidates` skips finished videos and their run key does not
+change (TO-DO.md § 4).
+
+*Still English-only, outside these fields:* `_QUESTION_START` (a German
+question is still caught by its "?" and by the model's own label),
+`_RETRO_RE` ("letztes Jahr habe ich gesagt") and `_THIRD_PARTY_RE`, which
+raises the `possible_third_party_view` review flag (bank names are
+language-independent, but "Analysten", "laut" and "zufolge" are not read).
+
 ### 13.4 Evidence timestamps
 
 `NormalizedTranscript.cues` keeps every caption cue's normalized span and
@@ -888,7 +995,11 @@ spec, skeleton export). Review corrections:
 `test_canonical_analytics.py` (3), `test_scorecard_pricing.py` (4),
 `test_conditional_forecasts.py` (5), `test_attribution_coreference.py` (6),
 `test_suspicious_empty.py` (7), `test_claims_eval.py` (8),
-`test_evidence_timestamps.py` (9). Original coverage: 511 passed; Coverage of the required list: full
+`test_evidence_timestamps.py` (9). German evidence rules (2026-10-31, § 13.3b):
+`test_german_evidence_rules.py`, the fKyDalNgdxs actions and positions
+verbatim, refusals, praise, chart talk and false friends that must state
+nothing, adoption against rejection, the disclosure report over stored
+claims, and the rule-set selection, with English unchanged. Original coverage: 511 passed; Coverage of the required list: full
 transcript (1–7: `test_summarizer.py` new tests, `test_token_budget.py`,
 `test_model_capabilities.py`), chunking (8–12: `test_transcript_normalize.py`,
 `test_summarizer_chunked.py`, `test_signals.py`), normalization (13–18:
@@ -997,6 +1108,18 @@ What changed against the previous example:
 - Local coreference only resolves to names the curated tables or the
   verified learned map already know; a company the dataset has never seen
   stays unresolved even when the context is unambiguous.
+- The evidence rules (§ 13.3b) are phrase rules, tuned on the stored HKCM
+  and Phantom transcripts, and they read one excerpt at a time: "Ich
+  persönlich bin da nicht drin, ich bin in Crisper drin" reads no position
+  for both assets, as "I don't own Apple but I own Tesla" does in English.
+  The two languages also differ by design. The English check passes any
+  action on any recommendation word ("I would not buy" keeps a model "buy")
+  and stores "I sold Tesla" as `owns_unspecified`, while the German one is
+  kind- and negation-aware and stores a completed sale as `no_position`.
+  Aligning English would change English outcomes, so it is a separate
+  measured change. Stored claims keep the values they were validated with
+  until re-extracted. Only the disclosure report re-reads the evidence at
+  load.
 - The evaluation fixtures are hand-authored and the real benchmark
   (§ 13.6) has not been built: no real transcripts are stored yet, this
   sandbox cannot fetch any, and no live run has been made. Production

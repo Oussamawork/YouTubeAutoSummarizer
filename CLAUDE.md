@@ -107,6 +107,23 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   every claim and is not part of the run key — bump it when these rules or
   the channel/market tables change. A condition's "price level" needs a
   number that is not a span of time ("over the next 6 months" is not one).
+  **Evidence rules per language** (`EVIDENCE_RULES`, selected by the
+  claim's `transcript_language`, detected from the transcript when it is
+  missing, every set when it is unknown) decide `recommendation_action`,
+  `portfolio_disclosure` and `host_position`. They were English-only until
+  2026-10-31: German actions were reset to `none` (117 in the German runs),
+  and "wir haben verkauft", "wir sind short" and "nicht investiert" were
+  stored as owns. English is unchanged (any recommendation word supports
+  any action). The German set is **kind- and negation-aware**: "ich würde
+  nicht kaufen" states avoid and never buy, and a negated sale states hold.
+  It reads verbs only in an investor's frame, so "die Unterstützung muss
+  halten", "halte ich für überbewertet", "Abverkauf", "in Kauf nehmen" and
+  praise state nothing. HKCM's "wir" is the price, never a position. A
+  partial sale is a trim; a completed one is no position.
+  `canonical_claims.reresolve` does not re-run these checks, so stored
+  German claims keep their old values until re-extracted. No `--reprocess`
+  was run (cost against benefit, docs/tdd-full-transcript-claims.md § 13.3b);
+  only the disclosure report re-reads the evidence at load.
 - `language_detect.py` — deterministic language handling: a writing-system
   census (`script_of`), stop-word detection (en / de / unknown; floors
   measured on the stored transcripts) and `verify_language(text, accepted,
@@ -139,7 +156,10 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   bucket, one current view per source — research analytics),
   `aggregate_views_by_asset` (per asset, one vote per creator, `target_by` —
   the pulse), `lean`, `video_tone`, `portfolio_disclosures` (sold / trimmed /
-  added read from the evidence, `disclosed_action`). `asset_key` gives basket
+  added read from the evidence, `disclosed_action`, one table per
+  transcript language; over a stored owns_unspecified, the position the
+  evidence states under the current rules, so stored German claims report
+  "short" / "trimmed" without re-extraction). `asset_key` gives basket
   and metric subjects no key and market subjects their canonical key;
   `resolved_ticker` applies `CHANNEL_ALIASES`; `priceable_symbol` is
   registry-first (`COLLIDING_TICKERS`: a coin that is also a NYSE listing —
