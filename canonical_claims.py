@@ -547,15 +547,24 @@ _NOT_A_POSITION = {"no_position", "not_stated", "unclear"}
 _OWNERSHIP_CUE = re.compile(
     r"\b(own|owned|holding|holdings|position|bought|buy|buying|invest\w*|shares|stake|portfolio|added|"
     r"sold|trimmed|long|investiert|gekauft|halten|halte|tranche|eingestiegen|depot|positionen)\b", re.I)
+# Contractions ("I don't already own", "it isn't in my portfolio", "I don't
+# have it") are read clause by clause by claims.portfolio_position: a "n't"
+# here never matched (no word boundary inside "don't"), and a 30-character
+# window would reach across "but" into the next clause.
 _NEGATED_OWNERSHIP = re.compile(
-    r"\b(not|n't|never|no longer|used to)\b[^.]{0,30}\b(own|owned|invest\w*|hold\w*|position)\b|"
+    r"\b(not|never|no longer|used to)\b[^.]{0,30}\b(own|owned|invest\w*|hold\w*|position)\b|"
     r"\bnicht\b[^.]{0,30}\b(investiert|drin|gekauft)\b|\bkeine?n?\s+position", re.I)
 
 
-def _states_a_position(evidence):
+def _states_a_position(evidence, subject=None):
+    """The evidence says the speaker holds (or held) the asset. Stored claims
+    keep the position their extraction gave them, so this re-reads the
+    evidence: a disclosure whose evidence says the speaker holds none
+    ("this is not in my portfolio") is never reported as a holding."""
     if not evidence:
         return True  # nothing to check against; hand-built rows in tests
-    return bool(_OWNERSHIP_CUE.search(evidence)) and not _NEGATED_OWNERSHIP.search(evidence)
+    return (bool(_OWNERSHIP_CUE.search(evidence)) and not _NEGATED_OWNERSHIP.search(evidence)
+            and _claims.portfolio_position(evidence, subject) != "no_position")
 
 
 # What the creator says they DID, read from the evidence, in priority order:
@@ -627,7 +636,7 @@ def portfolio_disclosures(claims, start=None, end=None):
             continue
         action = disclosed_action(c.get("evidence_text"), c.get("subject_mention"))
         if action is None and (c.get("portfolio_disclosure") in _NOT_A_POSITION
-                               or not _states_a_position(c.get("evidence_text"))):
+                               or not _states_a_position(c.get("evidence_text"), c.get("subject_mention"))):
             continue
         rows.append({
             "source": source_of(c), "asset": asset_key(c), "ticker": resolved_ticker(c),

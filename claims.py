@@ -346,47 +346,130 @@ def locate_evidence(evidence, text):
     return idx[pos], idx[pos + len(ev_f) - 1] + 1
 
 
+# A number literal is read whole or not at all. The atomic group stops the
+# regex from backtracking into the digits when a letter follows, which read
+# "20X" as 2, "10x" as 1 and "4.8x" as 4. A multiple ("20x", "12fold") and
+# basis points keep their value; thousand / million / billion / trillion
+# (k, m / mn, b / bn, t) add the scaled reading beside the bare one. A space
+# before a thousands comma is a transcription artifact: "88 ,600" is 88,600.
 _NUMBER_RE = re.compile(
-    r"(?<![\w.])(?:\$|€|£)?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s*"
-    r"(thousand|million|billion|trillion|percent|k|m|b|t|%)?(?![a-z])", re.IGNORECASE)
-_MULT = {"k": 1e3, "thousand": 1e3, "m": 1e6, "million": 1e6, "b": 1e9, "billion": 1e9,
+    r"(?<![\w.])(?:\$|€|£)?(?>(\d{1,3}(?:\s?,\d{3})+|\d+)(?:\.(\d+))?)(?!\d)\s*"
+    r"(thousand|million|billion|trillion|percent|bps|bp|bn|mn|fold|k|m|b|t|x|%)?(?![a-z])", re.IGNORECASE)
+_MULT = {"k": 1e3, "thousand": 1e3, "m": 1e6, "mn": 1e6, "million": 1e6, "b": 1e9, "bn": 1e9, "billion": 1e9,
          "t": 1e12, "trillion": 1e12}
 
 
 _RANGE_JOIN = re.compile(r"^\s*(?:and|to|or|-|–|—|through)\s*$", re.IGNORECASE)
 
+# Spelled-out cardinals ("three", "twenty-five", "two hundred and fifty", "a
+# trillion", "half a trillion"). "a" / "an" / "half a" count only before a
+# scale word: on their own they are articles.
+_UNIT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9}
+_TEEN_WORDS = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+               "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19}
+_TENS_WORDS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80,
+               "ninety": 90}
+_NUMBER_WORDS = {"zero": 0, **_UNIT_WORDS, **_TEEN_WORDS, **_TENS_WORDS}
+_UNITS_ALT = "|".join(_UNIT_WORDS)
+# Longest alternatives first: "sixty" before "six", "fourteen" before "four".
+_BELOW_100 = (rf"(?:(?:{'|'.join(_TENS_WORDS)})(?:[\s-](?:{_UNITS_ALT}))?"
+              rf"|{'|'.join(_TEEN_WORDS)}|{_UNITS_ALT}|zero)")
+_WORD_NUMBER_RE = re.compile(
+    rf"(?<![\w-])((?:{_BELOW_100}|an?)\s+hundred(?:\s+(?:and\s+)?{_BELOW_100})?|half\s+an?|an?|{_BELOW_100})"
+    r"(?:\s*-?\s*(thousand|million|billion|trillion|percent))?(?!\w)", re.IGNORECASE)
 
-def numbers_in(text):
-    """Numeric values a human would read in `text`, including k/m/b and
-    'thousand'-style multipliers and both the bare and scaled readings. In a
-    range such as "150 and 180 thousand" or "150-180k" the multiplier of the
-    upper bound is applied to the lower bound too."""
-    text = text or ""
-    matches = list(_NUMBER_RE.finditer(text))
-    found = set()
-    for i, m in enumerate(matches):
-        whole = m.group(1).replace(",", "")
+# German writes the decimal point as a comma and groups thousands with dots
+# ("1,69", "386,48", "4.200 $", "100.000 US-Dollar"), and "Billion" is 10^12.
+# Read only when the transcript language is de: in English "1,690" is
+# one thousand six hundred and ninety.
+_DE_NUMBER_RE = re.compile(
+    r"(?<![\w.,])(?:\$|€|£)?(?>(\d{1,3}(?:\.\d{3})+|\d+)(?:,(\d+))?)(?!\d)\s*"
+    r"(tausend|tsd\.?|mio\.?|millionen|million|mrd\.?|milliarden|milliarde|billionen|billion|prozent|%)?"
+    r"(?![a-zäöüß])", re.IGNORECASE)
+_DE_MULT = {"tausend": 1e3, "tsd": 1e3, "mio": 1e6, "million": 1e6, "millionen": 1e6, "mrd": 1e9,
+            "milliarde": 1e9, "milliarden": 1e9, "billion": 1e12, "billionen": 1e12}
+_DE_RANGE_JOIN = re.compile(r"^\s*(?:bis|und|oder|-|–|—)\s*$", re.IGNORECASE)
+
+
+def _word_number_value(phrase):
+    words = re.findall(r"[a-z]+", phrase.lower())
+    if words[0] == "half":
+        return 0.5
+    value = 0
+    for word in words:
+        if word in ("a", "an"):
+            value = 1
+        elif word == "hundred":
+            value = (value or 1) * 100
+        elif word != "and":
+            value += _NUMBER_WORDS[word]
+    return value
+
+
+def _english_number_tokens(text):
+    """(start, end, value, suffix) for every number in English notation,
+    digits and words alike, in reading order."""
+    tokens = []
+    for m in _NUMBER_RE.finditer(text):
+        whole = re.sub(r"[\s,]", "", m.group(1))
         frac = m.group(2)
-        try:
-            value = float(f"{whole}.{frac}" if frac else whole)
-        except ValueError:
-            continue
+        tokens.append((m.start(), m.end(), float(f"{whole}.{frac}" if frac else whole), (m.group(3) or "").lower()))
+    for m in _WORD_NUMBER_RE.finditer(text):
+        phrase, suffix = m.group(1), (m.group(2) or "").lower()
+        bare = phrase.lower().split()
+        if (bare in (["a"], ["an"]) or bare[0] == "half") and suffix not in _MULT:
+            continue   # an article, not a number
+        tokens.append((m.start(), m.end(), float(_word_number_value(phrase)), suffix))
+    return sorted(tokens)
+
+
+def _german_number_tokens(text):
+    tokens = []
+    for m in _DE_NUMBER_RE.finditer(text):
+        whole = m.group(1).replace(".", "")
+        frac = m.group(2)
+        tokens.append((m.start(), m.end(), float(f"{whole}.{frac}" if frac else whole),
+                       (m.group(3) or "").lower().rstrip(".")))
+    return tokens
+
+
+def _readings(tokens, text, joins, multipliers):
+    """Each token's bare value and, with a scale word, its scaled value. In a
+    range such as "150 and 180 thousand", "150-180k" or "three to 4 trillion"
+    the upper bound's scale applies to the lower bound too."""
+    found = set()
+    for i, (_, end, value, suffix) in enumerate(tokens):
         found.add(value)
-        suffix = (m.group(3) or "").lower()
-        if suffix in _MULT:
-            found.add(value * _MULT[suffix])
-        elif i + 1 < len(matches):
-            nxt = matches[i + 1]
-            nxt_suffix = (nxt.group(3) or "").lower()
-            if nxt_suffix in _MULT and _RANGE_JOIN.match(text[m.end():nxt.start()] or ""):
-                found.add(value * _MULT[nxt_suffix])
+        if suffix in multipliers:
+            found.add(value * multipliers[suffix])
+        elif i + 1 < len(tokens):
+            nxt_start, _, _, nxt_suffix = tokens[i + 1]
+            if nxt_suffix in multipliers and joins.match(text[end:nxt_start]):
+                found.add(value * multipliers[nxt_suffix])
     return found
 
 
-def number_supported(value, evidence):
+def _is_german(language):
+    return isinstance(language, str) and language.lower().startswith("de")
+
+
+def numbers_in(text, language=None):
+    """Numeric values a human would read in `text`: digits and spelled-out
+    cardinals, k/m/b and 'thousand'-style multipliers with both the bare and
+    the scaled reading, multiples ("20x"), and — for a German transcript
+    (`language` de) — German notation as well ("1,69", "4.200", "60
+    Millionen"). Every reading is kept: the set says what the text CAN mean."""
+    text = text or ""
+    found = _readings(_english_number_tokens(text), text, _RANGE_JOIN, _MULT)
+    if _is_german(language):
+        found |= _readings(_german_number_tokens(text), text, _DE_RANGE_JOIN, _DE_MULT)
+    return found
+
+
+def number_supported(value, evidence, language=None):
     if value is None:
         return True
-    nums = numbers_in(evidence)
+    nums = numbers_in(evidence, language)
     return any(abs(float(value) - n) <= max(1e-9, abs(n) * 1e-9) for n in nums)
 
 
@@ -395,9 +478,34 @@ def number_supported(value, evidence):
 _QUESTION_START = re.compile(
     r"^\s*(could|can|will|would|should|is|are|do|does|did|what|why|how|when|where|who|which)\b",
     re.IGNORECASE)
-_RETRO_RE = re.compile(
-    r"\b(last (year|month|week|time)|back in|i (said|told|predicted|called|warned)|"
-    r"as i (said|predicted)|i was (right|wrong)|in 20[0-2]\d i)\b", re.IGNORECASE)
+# Retrospective claims. The speaker referring back to their OWN earlier call
+# ("Last year I said X", "as I predicted", "I was right", "in 2021 I ...")
+# makes a claim retrospective whatever else it says. A bare time reference
+# ("last year", "last week", "back in 2021") only marks a claim that is
+# itself about the past: "despite difficult comps from the same time last
+# year" inside guidance is a comparison base, and "I think we're going to
+# be in another extended period" after "starting last year" is a forecast.
+_OWN_EARLIER_CALL_RE = re.compile(
+    r"\b(i (said|told|predicted|called|warned)|as i (said|predicted)|i was (right|wrong))\b", re.IGNORECASE)
+# "in 2021 I bought / said ...": a year before the publication year only
+# ("in 2027 I expect ..." looks forward).
+_YEAR_THEN_I_RE = re.compile(r"\bin (20\d\d),? (i|we)\b", re.IGNORECASE)
+# A time reference to the past. "back in" only before a date: "back in the
+# game", "back in the box" and "look back in three years" are not one.
+_PAST_TIME_RE = re.compile(
+    r"\b(last (year|month|week|time)|back in (?:(?:early|mid|late)[\s-]+)?(?:(19|20)\d\d|the (19|20)?\d0s|"
+    r"january|february|march|april|may|june|july|august|september|october|november|december|"
+    r"(the )?(spring|summer|fall|autumn|winter)|q[1-4]|the day))\b", re.IGNORECASE)
+# What makes a claim look forward despite a past time reference: future and
+# modal verbs, expectation, guidance and plan words, a forward period, and
+# the speaker's present view ("I think", "I believe"). "may" only in lower
+# case: "back in May" is a month.
+_FORWARD_CUE_RE = re.compile(
+    r"\b(will|won'?t|going to|gonna|should|could|would|might|(?-i:may)|expect\w*|anticipat\w*|forecast\w*|"
+    r"projected|projecting|projections?|guid(e|es|ed|ing|ance)|outlook|plans? to|planning to|intend\w*|"
+    r"targets?|estimat\w*|predict\w*|next (week|month|quarter|year)|coming (days|weeks|months|quarters|years)|"
+    r"ahead|going forward|from here|by (the )?end of|think|believe|i see|in my (view|opinion))\b|'ll\b",
+    re.IGNORECASE)
 _THIRD_PARTY_RE = re.compile(
     r"\b(analysts?|wall street|consensus|goldman|morgan stanley|jp ?morgan|bank of america|"
     r"citi|ubs|barclays|according to|reports? (say|said)|the street expects?)\b", re.IGNORECASE)
@@ -424,8 +532,31 @@ _LONG_RE = re.compile(r"\b(i'?m long|i am long|we'?re long|we are long|long (pos
                       re.IGNORECASE)
 _SHORT_RE = re.compile(r"\b(i'?m short|i am short|we'?re short|we are short|short (position|the stock))\b",
                        re.IGNORECASE)
-_NO_POSITION_RE = re.compile(r"\b(i don'?t own|i do not own|i have no position|no position in|"
-                             r"i sold (all|out|everything|my (whole )?position))\b", re.IGNORECASE)
+# A first-person statement of holding nothing. The negation binds to the
+# holding verb it modifies, with at most two adverbs between: "I don't
+# already own", "I've never owned", "I don't have it", "we're not invested",
+# "this is not in my portfolio", "it isn't in our portfolio". "I don't own
+# enough" still owns some; "I don't hold out much hope" holds nothing.
+_HOLD_OBJECT = (r"(?:it|them|any|one|some|shares?|stock|a\s+single\s+share|exposure|"
+                r"(?:the|this|that)\s+(?:one|stock|shares?|name|coin|token)|"
+                r"an?\s+(?:long\s+|short\s+)?(?:position|stake))")
+_POSITION_ADVERBS = r"(?:(?:already|currently|actually|really|even|yet|personally|still|ever)\s+){0,2}"
+_NO_POSITION_RE = re.compile(
+    r"\b(?:i|we)(?:'ve|'d)?\s+(?:(?:still|just|actually|really|personally|currently)\s+)?"
+    r"(?:do\s+not|don'?t|did\s+not|didn'?t|have\s+not|haven'?t|never|no\s+longer)\s+" + _POSITION_ADVERBS
+    + r"(?:own|owned|hold(?!\s+(?:out|up|on|off|back)\b)|held|have\s+" + _HOLD_OBJECT + r")\b"
+    r"(?!\s+(?:enough|much|as\s+much|that\s+much|a\s+lot|more)\b)"
+    r"|\b(?:i'?m|i\s+am|we'?re|we\s+are)\s+not\s+" + _POSITION_ADVERBS
+    + r"(?:invested|long|short|holding|in\s+(?:it|this|that|them|the\s+(?:stock|name|trade|coin|token)))\b"
+    r"|(?:\b(?:not|never)|n't)\s+" + _POSITION_ADVERBS + r"in\s+(?:my|our)\s+(?:portfolios?|holdings)\b"
+    r"|\b(?:i|we)\s+have\s+no\s+(?:position|shares?|stake|exposure)\b|\bno\s+position\s+in\b"
+    r"|\b(?:i|we)\s+(?:sold|exited|closed)\s+(?:all|out|everything|(?:my|our)\s+(?:whole\s+|entire\s+)?position)\b",
+    re.IGNORECASE)
+# Clause boundaries a negation never reaches across: a sentence end, a
+# semicolon, a contrast ("but", "however", "although", "though", "whereas")
+# or a spaced dash. Commas are not boundaries: "AMD, I don't have it".
+_CLAUSE_BOUNDARY = re.compile(r"[.!?;]+(?=\s|$)|\s+(?:but|however|although|though|whereas)\b|\s[-–—]+\s",
+                              re.IGNORECASE)
 # Generic references whose referent lives in the surrounding transcript.
 _GENERIC_SUBJECT = re.compile(
     r"^(it|its|it'?s|they|them|their|this|that|the (stock|company|name|shares|share price|coin|token|etf|"
@@ -468,6 +599,39 @@ OBSERVABLE_CONDITIONS = (
                 r"(\$\s?\d|\d+(\.\d+)?\s?(k|thousand|million|billion|trillion|%|percent)?\b)" + _NOT_A_SPAN,
                 re.IGNORECASE), "price_level", "daily_close"),
 )
+# A dollar amount that is not a price of the asset never makes a price level:
+# a scaled amount (no share or coin trades in millions, billions or
+# trillions; a buyback, a revenue line or a market cap does) or an amount
+# that names what it measures ("a $10 dividend", "$50 in revenue").
+_SCALE_WORD = r"(?:million|billion|trillion|millionen|milliarden?|billionen|mio\.?|mrd\.?|mn|bn|[mbt])"
+_AMOUNT_NOUN = (r"(?:buybacks?|(?:share\s+)?repurchases?|revenues?|sales|earnings|profits?|(?:net\s+)?income|"
+                r"(?:free\s+)?cash\s+flows?|deals?|acquisitions?|contracts?|orders?|backlog|capex|spending|"
+                r"investments?|funding|market\s+cap(?:italization)?|valuation|debt|deficits?|dividends?)")
+_NON_PRICE_AMOUNT = re.compile(
+    r"(?:[$€£]\s?)?\d[\d,.]*(?:\s*(?:-|–|to|and|or)\s*(?:[$€£]\s?)?\d[\d,.]*)?\s*" + _SCALE_WORD
+    + r"(?!\w)(?:[\s-]*(?:dollars?|usd|euros?|eur)\b)?"
+    r"|(?:[$€£]\s?)?\d[\d,.]*(?:\s*(?:dollars?|usd|euros?))?[\s-]+(?:in\s+|of\s+|worth\s+of\s+)?" + _AMOUNT_NOUN
+    + r"\b(?!\s+(?:season|calls?|reports?|dates?|days?|week|release))",
+    re.IGNORECASE)
+# Time is no price level either: a span after a comparator word ("over the
+# next couple of months", "over time", "through the end of the year"), a
+# year after a time word ("in 2029", "by 2027") and a stated period
+# ("trailing 12-month", "a 12-month period"; a "50-day" average stays a level).
+_TIME_SPAN = re.compile(
+    r"\b(?:over|under|past|through|beyond)\s+(?:the\s+)?(?:(?:next|coming|following|past|last|previous)\s+)?"
+    r"(?:(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|few|a\s+few|couple(?:\s+of)?|"
+    r"a\s+couple(?:\s+of)?|several)\s+)?(?:days?|weeks?|months?|quarters?|years?|decades?|time|weekend|"
+    r"summer|winter|spring|fall|autumn|holidays?|end\s+of)\b"
+    r"|\b(?:in|by|since|until|till|through|before|after|from|during|end\s+of|early|mid|late)\s+(?:19|20)\d\d\b"
+    r"|\b(?:trailing|rolling)\s+\d+[-\s]?(?:days?|weeks?|months?|quarters?|years?)\b"
+    r"|\b\d+[-\s]?(?:days?|weeks?|months?|quarters?|years?)\s+(?:period|window|span|stretch|time\s*frame)\b",
+    re.IGNORECASE)
+
+
+def _price_level_text(condition):
+    """The condition without what can never be a price level of the asset:
+    non-price amounts and time expressions."""
+    return _TIME_SPAN.sub(" ", _NON_PRICE_AMOUNT.sub(" ", condition))
 
 
 def _norm_name(name):
@@ -1268,6 +1432,29 @@ def _is_question(evidence):
     return ev.endswith("?") or (bool(_QUESTION_START.match(ev)) and "?" in ev)
 
 
+def _is_retrospective(evidence, attribution, claim_type, horizon_end, published):
+    """
+    True when a claim looks back rather than forward: the model said so
+    (retrospective_claim / historical_claim); the speaker refers to their own
+    earlier call; or the evidence points back in time and nothing in the
+    claim points forward — no forward wording, and no stated horizon that
+    ends after publication.
+    """
+    if attribution == "retrospective_claim" or claim_type == "historical_claim":
+        return True
+    ev = evidence or ""
+    if _OWN_EARLIER_CALL_RE.search(ev):
+        return True
+    reference_year = (published or datetime.now(timezone.utc).date()).year
+    if any(int(m.group(1)) < reference_year for m in _YEAR_THEN_I_RE.finditer(ev)):
+        return True
+    if not _PAST_TIME_RE.search(ev):
+        return False
+    looks_forward = bool(_FORWARD_CUE_RE.search(ev)) or bool(
+        horizon_end and published and horizon_end > published)
+    return not looks_forward
+
+
 def condition_observability(condition):
     """
     (observable, kind, data_source) for a forecast's condition. Observable
@@ -1282,24 +1469,90 @@ def condition_observability(condition):
     if not text:
         return False, None, None
     for pattern, kind, source in OBSERVABLE_CONDITIONS:
-        if pattern.search(text):
+        if pattern.search(_price_level_text(text) if kind == "price_level" else text):
             return True, kind, source
     return False, "subjective", None
 
 
-def portfolio_position(evidence):
-    """The position the evidence itself supports: long / short / no_position
-    / owns_unspecified, or None when it discloses nothing."""
-    ev = evidence or ""
-    if _NO_POSITION_RE.search(ev):
+def _clauses(text):
+    out, start = [], 0
+    for m in _CLAUSE_BOUNDARY.finditer(text):
+        out.append(text[start:m.start()])
+        start = m.end()
+    out.append(text[start:])
+    return [c for c in out if c.strip()]
+
+
+def _clause_position(clause):
+    """The position one clause states, or None. A negated holding outranks
+    the ownership words of its own clause: in "the only one that I don't
+    already own in my portfolio", "in my portfolio" is where the speaker
+    does NOT hold it."""
+    if _NO_POSITION_RE.search(clause):
         return "no_position"
-    if _SHORT_RE.search(ev):
+    if _SHORT_RE.search(clause):
         return "short"
-    if _LONG_RE.search(ev):
+    if _LONG_RE.search(clause):
         return "long"
-    if _OWNERSHIP_RE.search(ev):
+    if _OWNERSHIP_RE.search(clause):
         return "owns_unspecified"
     return None
+
+
+def _names_subject(clause, subject):
+    folded = _fold(clause)[0]
+    for name in {_fold(subject)[0], _fold(_strip_suffixes(_name_key(subject)))[0]}:
+        if name and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", folded):
+            return True
+    return False
+
+
+def position_readings(evidence, subject=None):
+    """
+    The distinct positions the evidence states (long / short / no_position /
+    owns_unspecified), read clause by clause, so a negation never reaches
+    across "but" or a sentence end. When the subject is named in clauses that
+    state a position, only those count ("I own Nvidia, but AMD, I don't have
+    it": AMD reads no_position, Nvidia owns_unspecified).
+    """
+    ev = (evidence or "").replace("’", "'").replace("‘", "'")
+    clauses = [(c, _clause_position(c)) for c in _clauses(ev)]
+    if subject and not _is_generic(subject):
+        named = [(c, r) for c, r in clauses if r and _names_subject(c, subject)]
+        if named:
+            clauses = named
+    readings = []
+    for _, reading in clauses:
+        if reading and reading not in readings:
+            readings.append(reading)
+    return readings
+
+
+def portfolio_position(evidence, subject=None):
+    """The one position the evidence supports: long / short / no_position /
+    owns_unspecified, or None when it discloses nothing or states several
+    the subject cannot tell apart."""
+    readings = position_readings(evidence, subject)
+    return readings[0] if len(readings) == 1 else None
+
+
+def reconcile_position(model_value, readings):
+    """
+    (position, conflict) from the model's portfolio_disclosure and the
+    evidence's position readings. The evidence decides when it states one
+    position, or when the model picked one of several it states; a long /
+    short the evidence does not support becomes not_stated. no_position is
+    never turned into ownership: against evidence that reads as a position it
+    is kept and `conflict` is True (portfolio_position_conflict, reviewed).
+    """
+    evidence_value = readings[0] if len(readings) == 1 else model_value if model_value in readings else None
+    if model_value == "no_position":
+        return "no_position", evidence_value not in (None, "no_position")
+    if evidence_value:
+        return evidence_value, False
+    if model_value in ("long", "short"):
+        return "not_stated", False
+    return model_value, False
 
 
 def host_position_from(evidence, model_value=None):
@@ -1695,7 +1948,8 @@ def claim_id_for(video_id, run_key, claim):
     return "clm_" + hashlib.sha1(f"{video_id}|{run_key}|{basis}".encode("utf-8")).hexdigest()[:20]
 
 
-def _dedup_key(claim):
+def _content_key(claim):
+    """What a claim says, whoever says it."""
     return (
         (claim.get("ticker") or _norm_name(claim.get("subject_mention"))),
         claim.get("claim_type"), _slot(claim, "stance"), _slot(claim, "forecast_metric"),
@@ -1704,6 +1958,28 @@ def _dedup_key(claim):
         _norm_name(_slot(claim, "condition")) or None,
         _norm_name(claim.get("attributed_person_or_organization")) or None,
     )
+
+
+def _speaker_key(claim):
+    """The speaker label folded for comparison ("Parkev Tatevosian, CFA" and
+    "parkev tatevosian cfa" are one label); "unknown" when there is none."""
+    speaker = claim.get("speaker")
+    folded = " ".join(re.sub(r"[^\w\s]", " ", speaker.casefold()).split()) if isinstance(speaker, str) else ""
+    return folded or "unknown"
+
+
+def _dedup_key(claim):
+    """The repeat key: the content AND the speaker. In a multi-guest show
+    (TheStreet's panels, FinVid's CNBC compilations) each guest's view of an
+    asset is that guest's claim, so two guests saying the same thing are two
+    claims; one speaker repeating it is one."""
+    return _content_key(claim) + (_speaker_key(claim),)
+
+
+def _spans_overlap(a, b):
+    sa, ea = a.get("evidence_start_character"), a.get("evidence_end_character")
+    sb, eb = b.get("evidence_start_character"), b.get("evidence_end_character")
+    return None not in (sa, ea, sb, eb) and sa < eb and sb < ea
 
 
 def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=None):
@@ -1753,8 +2029,11 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
                 attribution = "interviewer_question"
             stance = "not_applicable"
             action = "none"
-        # Rule: a historical statement is not a new forecast.
-        if attribution == "retrospective_claim" or claim_type == "historical_claim" or _RETRO_RE.search(evidence):
+        # Rule: a historical statement is not a new forecast. A past time
+        # reference alone is not one: the claim must refer back to the
+        # speaker's own call or be about the past (_is_retrospective).
+        horizon_end = resolve_horizon(_s(raw.get("horizon_original")), published)[1]
+        if _is_retrospective(evidence, attribution, claim_type, horizon_end, published):
             if claim_type in ("forecast", "price_target"):
                 claim_type = "historical_claim"
             if attribution not in ("retrospective_claim",):
@@ -1801,13 +2080,14 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
         # Rule: a portfolio disclosure is not a view. "I own Tesla" carries
         # no stance, no recommendation and no forecast; only a statement that
         # ALSO forecasts or recommends keeps its view (with the disclosure
-        # noted beside it).
-        supported_position = portfolio_position(evidence)
-        portfolio = _enum(raw.get("portfolio_disclosure"), PORTFOLIO, "not_stated")
-        if supported_position:
-            portfolio = supported_position
-        elif portfolio in ("long", "short", "no_position"):
-            portfolio = "owns_unspecified" if _OWNERSHIP_RE.search(evidence) else "not_stated"
+        # noted beside it). The evidence decides the position clause by
+        # clause; a no_position is never turned into ownership.
+        readings = position_readings(evidence, _s(raw.get("subject_mention")))
+        portfolio, position_conflict = reconcile_position(
+            _enum(raw.get("portfolio_disclosure"), PORTFOLIO, "not_stated"), readings)
+        if position_conflict:
+            review.append("portfolio_position_conflict")
+        supported_position = portfolio if portfolio in readings else None
         view_content = (
             claim_type in ("forecast", "price_target", "recommendation", "valuation_view")
             or action not in ("none", "unclear") or direction is not None
@@ -1822,11 +2102,13 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
             claim_type = "portfolio_disclosure"
             stance, action, forward = "not_applicable", "none", False
             if portfolio in ("not_stated", "unclear"):
-                portfolio = "owns_unspecified"
+                # A disclosure that names no position holds one ("I trimmed
+                # it") unless its evidence also says the speaker holds none.
+                portfolio = "unclear" if "no_position" in readings else "owns_unspecified"
         for label, value in (("target_value", target_value), ("target_low", target_low),
                              ("target_high", target_high), ("baseline_value", baseline),
                              ("expected_change_value", change)):
-            if value is not None and not number_supported(value, evidence):
+            if value is not None and not number_supported(value, evidence, context.get("transcript_language")):
                 review.append(f"number_not_in_evidence:{label}")
                 issues.append("unsupported_evidence")
         target_kind = _enum(raw.get("target_kind"), TARGET_KINDS, None)
@@ -2042,16 +2324,25 @@ def validate_claims(raw_claims, nt, context, coverage_status="full", chunk_id=No
 
 
 def dedupe_across_chunks(claims):
-    """Mark claims repeated across overlapping chunks: same content key, the
-    first occurrence (by evidence offset) stays primary."""
-    seen = {}
+    """Mark claims repeated across overlapping chunks: same content and
+    speaker, the first occurrence (by evidence offset) stays primary. The
+    same excerpt read by two overlapping chunks is one claim whatever each
+    chunk called the speaker: a guest introduced by name in one chunk is
+    "guest" in the next, which never saw the introduction."""
+    seen, primaries = {}, {}
     for claim in sorted(claims, key=lambda c: (c.get("evidence_start_character") is None,
                                                c.get("evidence_start_character") or 0)):
         key = _dedup_key(claim)
-        if key in seen and seen[key] != claim["claim_id"]:
-            claim["repeat_of_claim_id"] = seen[key]
+        first = seen.get(key)
+        if first is None:
+            first = next((other["claim_id"] for other in primaries.get(_content_key(claim), ())
+                          if other.get("chunk_id") != claim.get("chunk_id") and _spans_overlap(other, claim)),
+                         None)
+        if first is not None and first != claim["claim_id"]:
+            claim["repeat_of_claim_id"] = first
         else:
             seen.setdefault(key, claim["claim_id"])
+            primaries.setdefault(_content_key(claim), []).append(claim)
     return claims
 
 

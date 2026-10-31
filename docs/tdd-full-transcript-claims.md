@@ -171,11 +171,13 @@ offset, so a claim can never reference a segment its evidence is not in.
 Validation (deterministic, `claims.py`): JSON shape; enums; evidence located
 under a normalization-aware match (case, quotes, dashes, whitespace,
 punctuation — never a paraphrase; ≥12 chars); every numeric field present in
-the evidence (with k/m/b/thousand multipliers, distributed across ranges);
-`ticker_spoken` kept only if it appears in the evidence or title, else
+the evidence (with k/m/b/thousand multipliers, distributed across ranges;
+multiples, spelled-out numbers and, in a German transcript, German notation,
+§ 13.11); `ticker_spoken` kept only if it appears in the evidence or title, else
 resolved through `ASSET_ALIASES` / `TICKER_ALIASES` / the catalogue-verified
 learned map, ambiguous names never resolved; questions → `question`, not
-forward-looking; retrospective markers → `historical_claim`; third-party
+forward-looking; the speaker's own earlier call or a claim about the past →
+`historical_claim` (a past time reference alone is not enough, § 13.11); third-party
 markers without adoption → review; recommendation verbs required for any
 action; ownership language → `portfolio_disclosure`; horizons resolved only
 under the rules in `resolve_horizon`'s docstring (vague words get no dates);
@@ -204,8 +206,9 @@ type, stance or action the model attached — becomes `claim_type =
 portfolio_disclosure`, `stance = not_applicable`, `stance_basis =
 not_applicable`, `recommendation_action = none`, `is_forward_looking =
 false`, `portfolio_disclosure = owns_unspecified` or the position the
-evidence itself supports (`long`, `short`, `no_position`; a model-supplied
-`long` without supporting words is downgraded). Only a statement that also
+evidence itself supports (`long`, `short`, `no_position`, read clause by
+clause; a model-supplied `long` without supporting words is downgraded, and
+a model's `no_position` is never turned into ownership, § 13.11). Only a statement that also
 forecasts or recommends keeps its view, with the disclosure noted beside
 it. `claims.carries_view` is the single filter every stance path uses
 (consensus, net stance, flips, tone, the legacy reduction, the pulse, the
@@ -365,7 +368,10 @@ transcripts only (a missing transcript stays `failed_retryable:
 transcript_not_stored`; re-fetching remains the daily job's budgeted
 decision), at most `RESEARCH_BACKFILL_MAX_VIDEOS` per run, stopping on quota.
 `--reprocess` re-extracts videos whose active run predates the current
-versions and supersedes the old run. `--adopt-stored` gives a `pending`
+versions and supersedes the old run. It selects on those versions only:
+validator rules are not versioned, so a rule change reaches stored claims
+through a re-extraction or a load-time re-read, never through `--reprocess`
+alone (§ 13.11 says which re-reads exist). `--adopt-stored` gives a `pending`
 record to stored transcripts that never got research because their summary
 never went out (quota-deferred until the video left the feed, or failed into
 manual review; 40 on 2026-10-16) — skipping videos still pending a summary,
@@ -531,7 +537,9 @@ first, then own-view observable triggers interleaved across creators — and
 a "Not listed" count; the Friday message only counts them). A price level
 needs a number that is not a span of time: "over the next 6 months" and
 "hold it for the next 5 years" are subjective, and the report recomputes
-observability under the current rules. No production job evaluates
+observability under the current rules. Nor is a non-price amount or a time
+expression a level: "a two-300 billion dollar buyback announced here over
+the next couple of months" is subjective (§ 13.11). No production job evaluates
 conditions yet, so every row reads `not_evaluated`. Conditional forecasts
 stay out of unconditional rankings by default.
 
@@ -720,7 +728,8 @@ the values under `reported_*` (`reported_target_value`,
 `hypothetical` under `hypothetical_*`, and a question / retrospective /
 disclosure / fact in `displaced_fields`. Claim ids and the cross-chunk
 dedup key read the slots through `claims._slot`, so two reported targets
-from different houses stay two claims. `claims.non_view_invariant_violations`
+from different houses stay two claims (the repeat key also carries the
+speaker, § 13.11). `claims.non_view_invariant_violations`
 states the invariant (empty for every record `validate_claims` produces;
 `tests/test_non_view_invariants.py`). Consumers that read `condition` or
 `target_value` therefore see only the speaker's own forecasts.
@@ -871,6 +880,123 @@ channel, the title or the asset type).
 claims 1,167 → 1,415 (More Crypto Online 168 → 300), claims with no ticker
 1,009 → 608 (376 of them market subjects, which take no ticker by design).
 
+### 13.11 Validator corrections from the offline backfill (2026-10)
+
+The manual extraction of the 63-transcript backlog (`data/research/candidates/`,
+§ 12) surfaced six validator rules that mislabelled correct claims. Each one
+affected Gemini's extractions as much as the offline ones.
+`tests/test_validator_regressions.py` pins each rule with the phrasing it was
+found with.
+
+1. **No-position disclosures** (`claims.position_readings`,
+   `reconcile_position`). A position is read clause by clause. A first-person
+   negation binds to the holding verb it modifies, with up to two adverbs
+   between ("I don't already own", "I've never owned", "I don't have it",
+   "we're not invested", "this is not in my portfolio"). A clause ends at a
+   sentence end, a semicolon, "but" / "however" / "although" / "though" /
+   "whereas" or a spaced dash. Commas do not end one: "AMD, I don't have it".
+   A negated holding outranks the ownership words of its own clause ("the
+   only one ... that I don't already own in my portfolio"). When clauses
+   disagree, the clause that names the subject decides. The evidence still
+   corrects a model that read ownership, but a model's `no_position` is
+   never turned into ownership:
+   - Without a cue the rules can read, it is kept. It used to fall to
+     `not_stated` and from there to the disclosure default `owns_unspecified`.
+   - Against evidence that reads as a position, it is kept and flagged
+     `portfolio_position_conflict` for review.
+
+   A disclosure that names no position defaults to `owns_unspecified` only
+   when its evidence holds no negated clause; otherwise it is `unclear`.
+   The disclosure report (`canonical_claims.portfolio_disclosures`) re-reads
+   each stored disclosure's evidence with the same reader. The old report
+   guard's `n't` never matched, because there is no word boundary inside
+   "don't".
+2. **Retrospectives** (`claims._is_retrospective`). The speaker referring
+   back to their own earlier call stays retrospective: "Last year I said",
+   "as I predicted", "I was right", and "in 2021 I ..." for a year before
+   publication. A bare past time reference ("last year", "last week",
+   "back in" followed by a date) now makes a claim retrospective only when
+   nothing in it looks forward:
+   - no future, modal, expectation, guidance or plan wording;
+   - no "I think" or "I believe";
+   - no stated horizon that ends after publication.
+
+   "Despite difficult comps from the same time last year" inside guidance is
+   a comparison base. "Look back in three years" and "back in the game"
+   contain no date.
+3. **Multiples.** The number regex backtracked into the digits when a letter
+   followed: "20X" read as 2, "10x" as 1, "4.8x" as 4 and "100bps" as 10.
+   Number literals are now atomic. `x`, `fold` and `bp` / `bps` are suffixes
+   that keep the value; `bn` and `mn` scale it.
+4. **Spelled-out and German numbers.** English cardinals ("three",
+   "twenty-five", "two hundred and fifty", "a trillion", "half a trillion")
+   join the digit tokens, so a range's scale reaches a spelled-out lower
+   bound: "three to 4 trillion" gives 3 × 10¹². A space before a thousands
+   comma ("88 ,600") is one number. German notation is read only when the
+   claim's `transcript_language` is de, as extra readings beside the English
+   ones: the decimal comma ("1,69"), the thousands dot ("4.200 $"), the
+   scale words Tausend / Mio / Millionen / Mrd / Milliarden / Billionen
+   (Billion is 10¹²), and ranges joined by "bis" or "und".
+5. **Repeat key** (`claims._dedup_key`). The key is the content plus the
+   speaker label, folded for case and punctuation (`_speaker_key`). In
+   multi-guest shows each guest's view is that guest's claim; one speaker
+   repeating a view still folds. Across overlapping chunks, the same content
+   on an overlapping evidence span still folds whatever each chunk called
+   the speaker: a guest introduced by name in one chunk is "guest" in the
+   next.
+6. **Price levels** (`claims._price_level_text`). The price-level rule now
+   reads the condition without two things:
+   - non-price amounts: a scaled amount (no share or coin trades in
+     millions, billions or trillions, but a buyback, a revenue line or a
+     market cap does), or an amount that names what it measures ("a $10
+     dividend", "$50 in revenue");
+   - time expressions: a span after over / under / past / through / beyond,
+     a year after a time word ("in 2029"), and a stated period ("trailing
+     12-month", "a 12-month period"). A "50-day" average is still a level.
+
+   The other observable rules read the condition unchanged: "if revenue
+   tops $50 billion" is still an earnings release.
+
+*Measured on the committed data* (active runs: 5,915 claims in 597 videos):
+
+| Rule | Stored claims the new rule reads differently |
+| --- | --- |
+| 1 | 3 disclosures stored as `owns_unspecified` read `no_position` (all Couch Investor, Gemini). One of them, "this is not in my portfolio", was reported as "owns SPCX". 3 more, in one HKCM video of the offline set, are German disclosures whose candidate said `no_position` ("Also WTI sind wir ja raus aus dem Trade"); the old rule flipped them, and the report already kept them out of "owns" (one reads "sold"). |
+| 2 | 24 claims in 22 videos were made retrospective by a bare time reference: 5 recommendations, 5 forecasts stored as `historical_claim` ("the record high was about $140 a barrel back in 2008. I think we're going higher than that"), 4 third-party views, 4 facts, 2 stances, 2 valuation views, 1 opinion and 1 disclosure. |
+| 3, 4 | 129 numeric fields (61 English, 68 German) in 111 claims across 78 videos now pass the number check. 62 of those claims would leave review entirely. No field that passed before fails now. |
+| 5 | 49 of the 170 repeats are a different speaker's view, in 12 videos (FinVid 42, HKCM 4, Phantom 3). |
+| 6 | 3 of 875 conditions change kind, each from `price_level` to `subjective`. No genuine price level changed. |
+
+In total, 193 claims in 109 videos (95 extracted by Gemini, 14 offline).
+
+*Stored claims and `--reprocess`.* Stored claims keep the values they were
+validated with. Only three things are re-read at load:
+
+- entity resolution (`reresolve`, § 13.10);
+- the disclosure report's reading of the evidence (rule 1): the false
+  "owns SPCX" line has gone without a re-run;
+- the conditional report's observability (rule 6, § 13.2).
+
+Review reasons, attribution, repeat marks and `testable` stay as stored
+until the video is re-extracted.
+
+A `research_backfill.py --reprocess` is **not warranted** for these rules:
+
+- It selects videos by prompt, schema, normalization and chunking version.
+  None of those changed, so it would select nothing.
+- Forcing it with a version bump would re-extract every stored video: about
+  600 requests from the shared summary chain, against 20 a day per free
+  model (TO-DO 1.1). A prompt-version bump would also make
+  `--import-candidates` skip every committed candidates file. That cost
+  would buy 193 corrected claims in 109 videos.
+- A re-extraction is a new model run, not a re-validation, so it would also
+  change claims these rules never touched.
+
+New extractions are validated under these rules from now on. The affected
+videos pick them up whenever they are re-extracted for another reason, for
+example a prompt-version change or the Gemini re-extraction of the offline
+set (TO-DO 1.2).
+
 ## 14. Tests
 
 `./scripts/check.sh` → 619 passed. Hardening pass (2026-09-05):
@@ -888,7 +1014,9 @@ spec, skeleton export). Review corrections:
 `test_canonical_analytics.py` (3), `test_scorecard_pricing.py` (4),
 `test_conditional_forecasts.py` (5), `test_attribution_coreference.py` (6),
 `test_suspicious_empty.py` (7), `test_claims_eval.py` (8),
-`test_evidence_timestamps.py` (9). Original coverage: 511 passed; Coverage of the required list: full
+`test_evidence_timestamps.py` (9). Validator corrections from the offline
+backfill (2026-10): `test_validator_regressions.py` (§ 13.11, one section
+per rule). Original coverage: 511 passed; Coverage of the required list: full
 transcript (1–7: `test_summarizer.py` new tests, `test_token_budget.py`,
 `test_model_capabilities.py`), chunking (8–12: `test_transcript_normalize.py`,
 `test_summarizer_chunked.py`, `test_signals.py`), normalization (13–18:
@@ -997,6 +1125,16 @@ What changed against the previous example:
 - Local coreference only resolves to names the curated tables or the
   verified learned map already know; a company the dataset has never seen
   stays unresolved even when the context is unambiguous.
+- Position, retrospective and number reading is lexical (§ 13.11):
+  - Position wording is English. German position wording is tracked
+    separately (TO-DO 4.1). A negation the rules do not know is caught only
+    when the model said `no_position`, which is then kept.
+  - Whether a claim "looks forward" comes from a word list and can be wrong
+    either way; a past-habitual "would" counts as forward.
+  - Number words are English cardinals only.
+- Speaker labels are the model's. If one run calls the same guest "guest"
+  in one claim and by name in another, the repeat key keeps two claims (no
+  stored run labels a speaker two ways).
 - The evaluation fixtures are hand-authored and the real benchmark
   (§ 13.6) has not been built: no real transcripts are stored yet, this
   sandbox cannot fetch any, and no live run has been made. Production

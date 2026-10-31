@@ -157,33 +157,31 @@ Full worklist: `python ticker_audit.py --top 50`.
 ## 4. Code follow-ups (no decision needed)
 
 1. **German-aware claim validation.** German buy, sell and hold wording is
-   reset to `none`, and "wir haben verkauft" / "short" / "nicht investiert"
-   read as ownership. This is the suggested task "Make claim validation
-   German-aware for actions".
-2. **Validator edge cases found in the backfill.** These are the suggested
-   task "Fix claim-validator edge cases from the backfill":
-   - no-position read as ownership
-   - "20X" read as 2
-   - spelled-out numbers and German decimal commas
-   - guidance mislabelled as retrospective
-   - different guests' views merged by the repeat key
-3. **Gemini transcription retries 5xx without the breaker.** `transcript.py`
+   reset to `none`, and the validator reads no German position wording:
+   "wir haben verkauft" / "short" / "nicht investiert" read as ownership
+   unless the model itself said `no_position`, which is now always kept
+   (`docs/tdd-full-transcript-claims.md` § 13.11). This is the suggested task
+   "Make claim validation German-aware for actions".
+2. **Gemini transcription retries 5xx without the breaker.** `transcript.py`
    retries 500/502/503/504 up to `GEMINI_TRANSCRIPT_MAX_RETRIES` (2) per video
    and never calls `gemini_quota.record_failed`. A storm can therefore still
    burn the transcript models' daily quota unseen. Mirror the summarizer's
    breaker.
-4. **No negative price cache.** A symbol that returns no data is re-requested
+3. **No negative price cache.** A symbol that returns no data is re-requested
    by every warm (the audit counts 96 needed symbols without a series). Real
    symbols fill on the next warm; junk ones never do. Remember a 404 for a
    few weeks.
-5. **Testability is not recomputed at load.** `canonical_claims.reresolve`
+4. **Testability is not recomputed at load.** `canonical_claims.reresolve`
    corrects entities but not `testable` / `testability_issues`, so a rule
-   change there needs re-extraction or a recompute step.
-6. **Store the pulse's picks.** "Last week's picks" is rebuilt from claims
+   change there needs re-extraction or a recompute step. The 2026-10
+   validator rules (number check, retrospectives, repeat key, price levels)
+   reach stored claims the same way; the design doc § 13.11 counts what they
+   would change (193 claims in 109 videos).
+5. **Store the pulse's picks.** "Last week's picks" is rebuilt from claims
    each Monday. Persisting the list that was actually sent (for example in
    `data/pulse_picks.jsonl`) would let the one-week review grade exactly
    what readers saw.
-7. **No production condition evaluator.** Nothing calls
+6. **No production condition evaluator.** Nothing calls
    `research_state.record_condition_evaluation`, so conditional forecasts
    never become `condition_status=met` and never reach the strict scorecard.
 

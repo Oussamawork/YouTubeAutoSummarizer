@@ -107,6 +107,34 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   every claim and is not part of the run key — bump it when these rules or
   the channel/market tables change. A condition's "price level" needs a
   number that is not a span of time ("over the next 6 months" is not one).
+  **Rules fixed after the 2026-10 offline backfill** (design doc § 13.11,
+  `tests/test_validator_regressions.py`):
+  - **Positions.** A position is read clause by clause (`position_readings`).
+    A first-person negation binds to its holding verb ("I don't already
+    own", "I don't have it", "not in my portfolio") and never crosses "but"
+    or a sentence end. A model's `no_position` is never turned into
+    ownership (`reconcile_position`); against evidence that reads as a
+    position it is kept and flagged `portfolio_position_conflict`.
+  - **Retrospectives.** A bare past time reference ("last year", "back in
+    2021") makes a claim retrospective only when nothing in it looks
+    forward (`_is_retrospective`). The speaker's own earlier call ("Last
+    year I said") always does.
+  - **Numbers.** Numbers are read whole ("20X" is 20, not 2), spelled out
+    ("three to 4 trillion"), and with a stray space before a thousands comma
+    ("88 ,600"). German notation ("1,69", "4.200", "60 Millionen") is read
+    only when `transcript_language` is de.
+  - **Repeats.** The repeat key includes the speaker (`_speaker_key`), so two
+    guests with the same view stay two claims. Overlapping chunks still fold
+    one excerpt.
+  - **Price levels.** A price level ignores non-price amounts ("a 300 billion
+    dollar buyback") and time expressions (`_price_level_text`).
+
+  Stored claims keep the values they were validated with. Only entity
+  resolution (`reresolve`), the disclosure report's reading of the evidence
+  and the conditional report's observability are re-read at load. No
+  `--reprocess` is warranted for these rules: it selects on versions only,
+  and forcing it would re-extract every video to correct 193 claims
+  (§ 13.11).
 - `language_detect.py` — deterministic language handling: a writing-system
   census (`script_of`), stop-word detection (en / de / unknown; floors
   measured on the stored transcripts) and `verify_language(text, accepted,
@@ -139,7 +167,9 @@ GitHub Actions (`.github/workflows/daily-summary.yml`); tests run on every PR
   bucket, one current view per source — research analytics),
   `aggregate_views_by_asset` (per asset, one vote per creator, `target_by` —
   the pulse), `lean`, `video_tone`, `portfolio_disclosures` (sold / trimmed /
-  added read from the evidence, `disclosed_action`). `asset_key` gives basket
+  added read from the evidence, `disclosed_action`; a stored disclosure whose
+  evidence reads `no_position` under `claims.portfolio_position` is never
+  reported as a holding). `asset_key` gives basket
   and metric subjects no key and market subjects their canonical key;
   `resolved_ticker` applies `CHANNEL_ALIASES`; `priceable_symbol` is
   registry-first (`COLLIDING_TICKERS`: a coin that is also a NYSE listing —
