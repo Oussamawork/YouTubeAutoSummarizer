@@ -5,13 +5,13 @@
     "gemini-3.7-flash": 6
   },
   "models": {
-    "gemini-3.6-flash": 7,
+    "gemini-3.6-flash": 12,
     "gemini-3.7-flash": 9
   },
   "spent": {
     "gemini-3.7-flash": {
-      "at": "2026-11-01T21:54:40+00:00",
-      "confirmations": 2,
+      "at": "2026-11-02T01:26:52+00:00",
+      "confirmations": 3,
       "used": 9
     }
   }
