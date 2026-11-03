@@ -13,8 +13,8 @@
       "last_video_id": "gSenVll2GTQ"
     },
     "UCfCT7SSFEWyG4th9ZmaGYqQ": {
-      "last_published": "2026-10-29T20:02:14+00:00",
-      "last_video_id": "hpr1U8WmhLs"
+      "last_published": "2026-11-02T23:17:47Z",
+      "last_video_id": "80cKV5-eGl4"
     },
     "UCngIhBkikUe6e7tZTjpKK7Q": {
       "last_published": "2026-11-02T04:22:51+00:00",
@@ -33,23 +33,11 @@
       "last_video_id": "PZIR4WwOmSM"
     },
     "UCwKB_00dPL3x5XmHF9IJCrg": {
-      "last_published": "2026-11-02T14:45:37+00:00",
-      "last_video_id": "8UzmIVlMg-8"
+      "last_published": "2026-11-02T16:45:28Z",
+      "last_video_id": "1JccECudmGk"
     }
   },
   "pending": {
-    "1JccECudmGk": {
-      "attempts": 0,
-      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
-    },
-    "3H1Yjx1lVMk": {
-      "attempts": 0,
-      "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ"
-    },
-    "BUNbdt1Iyx0": {
-      "attempts": 0,
-      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
-    },
     "LT39m1xK64o": {
       "attempts": 0,
       "channel_id": "UCp6aBHRM6ZS_kLeC57HV4kg"
@@ -73,10 +61,6 @@
     "Y9pXebMm3GE": {
       "attempts": 0,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
-    },
-    "c1g6ilhARW4": {
-      "attempts": 0,
-      "channel_id": "UCp6aBHRM6ZS_kLeC57HV4kg"
     }
   }
 }
