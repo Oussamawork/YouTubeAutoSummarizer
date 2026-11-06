@@ -1,8 +1,8 @@
 {
   "channels": {
     "UC3AdN1bEmEonuSwXNS8LixQ": {
-      "last_published": "2026-11-02T19:25:48+00:00",
-      "last_video_id": "NDwLIJAFxH0"
+      "last_published": "2026-11-05T17:36:00+00:00",
+      "last_video_id": "0FwzUplB-Xw"
     },
     "UCTPm4y283GIygUCq4a_T96Q": {
       "last_published": "2026-10-31T23:55:35+00:00",
@@ -33,8 +33,8 @@
       "last_video_id": "PZIR4WwOmSM"
     },
     "UCwKB_00dPL3x5XmHF9IJCrg": {
-      "last_published": "2026-11-05T18:15:24Z",
-      "last_video_id": "DnLaWUZt30s"
+      "last_published": "2026-11-06T16:45:25+00:00",
+      "last_video_id": "v93-UPv6ozY"
     }
   },
   "pending": {
@@ -42,25 +42,29 @@
       "attempts": 0,
       "channel_id": "UC_niVs5ITmD-qgnxph8CohA"
     },
-    "0FwzUplB-Xw": {
+    "3RAcKUmKai8": {
       "attempts": 0,
-      "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ"
+      "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
     },
     "4P8xobhkUi4": {
       "attempts": 0,
       "channel_id": "UCp6aBHRM6ZS_kLeC57HV4kg"
     },
+    "9dq6Xpkt4fo": {
+      "attempts": 0,
+      "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ"
+    },
     "BmJrmHKP71o": {
       "attempts": 0,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
     },
+    "BtvCqYoTMGs": {
+      "attempts": 0,
+      "channel_id": "UCvLnTGJQthqju38QPtaD64Q"
+    },
     "C6O4SgD83_Y": {
       "attempts": 0,
       "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
-    },
-    "EGsOZlmJxJI": {
-      "attempts": 0,
-      "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ"
     },
     "H6C2BP7r8pQ": {
       "attempts": 0,
@@ -73,10 +77,6 @@
     "Lv0iAN6BnzE": {
       "attempts": 0,
       "channel_id": "UCp6aBHRM6ZS_kLeC57HV4kg"
-    },
-    "Omm_ILU2SSE": {
-      "attempts": 0,
-      "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ"
     },
     "SRKWX7918xw": {
       "attempts": 0,
@@ -119,6 +119,10 @@
       "channel_id": "UC_niVs5ITmD-qgnxph8CohA"
     },
     "olE8quXaFzk": {
+      "attempts": 0,
+      "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
+    },
+    "saXePxGIVRw": {
       "attempts": 0,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
     },
