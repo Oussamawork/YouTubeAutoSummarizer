@@ -21368,7 +21368,7 @@
         "allowed": false,
         "estimated": 1,
         "reason": "summary_reserve_protected",
-        "remaining": 4,
+        "remaining": 0,
         "reserve": 4,
         "workload": 0
       },
@@ -21393,7 +21393,7 @@
       "transcript_language": "en",
       "transcript_source": "supadata",
       "transcript_stored": true,
-      "updated_at": "2026-11-07T17:52:32+00:00",
+      "updated_at": "2026-11-07T21:47:15+00:00",
       "video_id": "liaQODwy8kU",
       "video_title": "Tech Is Cheap Again \u2014 Stocks To Buy Now"
     },
