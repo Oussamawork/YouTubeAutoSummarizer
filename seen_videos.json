@@ -33,11 +33,19 @@
       "last_video_id": "R7traj7Mi3U"
     },
     "UCwKB_00dPL3x5XmHF9IJCrg": {
-      "last_published": "2026-11-09T14:45:05+00:00",
-      "last_video_id": "f8JLZMEgaHs"
+      "last_published": "2026-11-09T17:43:39+00:00",
+      "last_video_id": "v0BGJtm9I-c"
     }
   },
   "pending": {
+    "0FYP96IgPIU": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
+    "14b4SyffbD4": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
     "1vIqV27C8sc": {
       "attempts": 0,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
@@ -45,6 +53,14 @@
     "4KMZJhGv6L4": {
       "attempts": 0,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
+    },
+    "5TL8GosMI_E": {
+      "attempts": 0,
+      "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
+    },
+    "6hqhwFggoRw": {
+      "attempts": 0,
+      "channel_id": "UC_niVs5ITmD-qgnxph8CohA"
     },
     "8W-6gjsEy8U": {
       "attempts": 0,
@@ -54,13 +70,21 @@
       "attempts": 0,
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     },
-    "GrveN3HYcoY": {
+    "IlJhRGw-IKQ": {
       "attempts": 0,
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     },
     "LylaUtsaYTc": {
       "attempts": 0,
       "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
+    },
+    "N8BlAQF8HpA": {
+      "attempts": 0,
+      "channel_id": "UC_niVs5ITmD-qgnxph8CohA"
+    },
+    "N_hzdQTShg8": {
+      "attempts": 0,
+      "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ"
     },
     "O-LCaAJGbss": {
       "attempts": 0,
@@ -74,15 +98,19 @@
       "attempts": 0,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
     },
+    "Yd6PA1StvUU": {
+      "attempts": 0,
+      "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
+    },
+    "_KQhMECp_uQ": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
     "cuDLbLhE5hg": {
       "attempts": 0,
       "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
     },
-    "tUvjqIrih14": {
-      "attempts": 0,
-      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
-    },
-    "v0BGJtm9I-c": {
+    "vddQvciWLQ8": {
       "attempts": 0,
       "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
     }
