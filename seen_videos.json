@@ -33,9 +33,34 @@
       "last_video_id": "R7traj7Mi3U"
     },
     "UCwKB_00dPL3x5XmHF9IJCrg": {
-      "last_published": "2026-11-11T21:56:26+00:00",
-      "last_video_id": "8AWmVhk8e5w"
+      "last_published": "2026-11-12T17:45:31+00:00",
+      "last_video_id": "WzlGOdImZvc"
     }
   },
-  "pending": {}
+  "pending": {
+    "4bWM55DgyMM": {
+      "attempts": 0,
+      "channel_id": "UCp6aBHRM6ZS_kLeC57HV4kg"
+    },
+    "bgExcPGqq_M": {
+      "attempts": 0,
+      "channel_id": "UC3AdN1bEmEonuSwXNS8LixQ"
+    },
+    "fhZpdHv2Bww": {
+      "attempts": 0,
+      "channel_id": "UCngIhBkikUe6e7tZTjpKK7Q"
+    },
+    "m0Tmlru7Nq8": {
+      "attempts": 0,
+      "channel_id": "UC_niVs5ITmD-qgnxph8CohA"
+    },
+    "o7djftF74UM": {
+      "attempts": 0,
+      "channel_id": "UCrGLm-Drgv0vbbemwwHeXJw"
+    },
+    "wv8qzrG8M1M": {
+      "attempts": 0,
+      "channel_id": "UCrGLm-Drgv0vbbemwwHeXJw"
+    }
+  }
 }
