@@ -33,9 +33,18 @@
       "last_video_id": "ViArar22LOE"
     },
     "UCwKB_00dPL3x5XmHF9IJCrg": {
-      "last_published": "2026-11-13T19:35:24+00:00",
-      "last_video_id": "Zy-2b4qLLcc"
+      "last_published": "2026-11-14T14:45:39+00:00",
+      "last_video_id": "h-WUuLR7gyU"
     }
   },
-  "pending": {}
+  "pending": {
+    "VNQSXEPHdyg": {
+      "attempts": 0,
+      "channel_id": "UCwKB_00dPL3x5XmHF9IJCrg"
+    },
+    "kDpVuRK62MI": {
+      "attempts": 0,
+      "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
+    }
+  }
 }
