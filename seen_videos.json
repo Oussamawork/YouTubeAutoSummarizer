@@ -29,13 +29,22 @@
       "last_video_id": "GLGwJ2uHlzc"
     },
     "UCvLnTGJQthqju38QPtaD64Q": {
-      "last_published": "2026-11-13T18:35:31+00:00",
-      "last_video_id": "ViArar22LOE"
+      "last_published": "2026-11-24T12:00:33+00:00",
+      "last_video_id": "RR6UC8uhZtk"
     },
     "UCwKB_00dPL3x5XmHF9IJCrg": {
       "last_published": "2026-11-23T15:45:34+00:00",
       "last_video_id": "9FUhiM66jyU"
     }
   },
-  "pending": {}
+  "pending": {
+    "8mMZLL3CgzQ": {
+      "attempts": 0,
+      "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
+    },
+    "xDSoWJH8f2s": {
+      "attempts": 0,
+      "channel_id": "UCTPm4y283GIygUCq4a_T96Q"
+    }
+  }
 }
